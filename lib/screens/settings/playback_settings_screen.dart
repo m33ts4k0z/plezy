@@ -31,6 +31,7 @@ class _PlaybackSettingsScreenState extends State<PlaybackSettingsScreen> {
   bool _isLoading = true;
 
   bool _enableHardwareDecoding = true;
+  settings.ThemeMusicLevel _themeMusicLevel = settings.ThemeMusicLevel.off;
   int _bufferSize = 0;
   int _seekTimeSmall = 10;
   int _seekTimeLarge = 30;
@@ -70,6 +71,7 @@ class _PlaybackSettingsScreenState extends State<PlaybackSettingsScreen> {
     if (!mounted) return;
     setState(() {
       _enableHardwareDecoding = _settingsService.getEnableHardwareDecoding();
+      _themeMusicLevel = _settingsService.getThemeMusicLevel();
       _bufferSize = _settingsService.getBufferSize();
       _seekTimeSmall = _settingsService.getSeekTimeSmall();
       _seekTimeLarge = _settingsService.getSeekTimeLarge();
@@ -138,6 +140,7 @@ class _PlaybackSettingsScreenState extends State<PlaybackSettingsScreen> {
             _buildRewindOnResume(),
             _buildDefaultSleepTimer(),
             _buildMaxVolume(),
+            _buildThemeMusic(),
 
             // --- Behavior ---
             SettingsSectionHeader(t.settings.behavior),
@@ -321,10 +324,7 @@ class _PlaybackSettingsScreenState extends State<PlaybackSettingsScreen> {
           if (Platform.isAndroid && value > 0) {
             final heapMB = await PlayerAndroid.getHeapSize();
             if (heapMB > 0 && value > heapMB ~/ 4 && mounted) {
-              showAppSnackBar(
-                context,
-                t.settings.bufferSizeWarning(heap: heapMB.toString(), size: value.toString()),
-              );
+              showAppSnackBar(context, t.settings.bufferSizeWarning(heap: heapMB.toString(), size: value.toString()));
             }
           }
         }
@@ -476,6 +476,57 @@ class _PlaybackSettingsScreenState extends State<PlaybackSettingsScreen> {
         },
       ),
     );
+  }
+
+  Widget _buildThemeMusic() {
+    return ListTile(
+      leading: const AppIcon(Symbols.music_note_rounded, fill: 1),
+      title: const Text('Theme Music'),
+      subtitle: Text(_themeMusicSubtitle(_themeMusicLevel)),
+      trailing: const AppIcon(Symbols.chevron_right_rounded, fill: 1),
+      onTap: () async {
+        final value = await showSelectionDialog<settings.ThemeMusicLevel>(
+          context: context,
+          title: 'Theme Music',
+          options: settings.ThemeMusicLevel.values
+              .map(
+                (level) => DialogOption(
+                  value: level,
+                  title: _themeMusicLabel(level),
+                  subtitle: _themeMusicOptionDescription(level),
+                ),
+              )
+              .toList(),
+          currentValue: _themeMusicLevel,
+        );
+        if (value != null) {
+          setState(() => _themeMusicLevel = value);
+          await _settingsService.setThemeMusicLevel(value);
+        }
+      },
+    );
+  }
+
+  String _themeMusicLabel(settings.ThemeMusicLevel level) {
+    return switch (level) {
+      settings.ThemeMusicLevel.off => 'Off',
+      settings.ThemeMusicLevel.low => 'Low',
+      settings.ThemeMusicLevel.medium => 'Medium',
+      settings.ThemeMusicLevel.high => 'High',
+    };
+  }
+
+  String _themeMusicOptionDescription(settings.ThemeMusicLevel level) {
+    return switch (level) {
+      settings.ThemeMusicLevel.off => 'Disable TV show theme music',
+      settings.ThemeMusicLevel.low => 'Play theme music quietly on show detail pages',
+      settings.ThemeMusicLevel.medium => 'Play theme music at a balanced volume',
+      settings.ThemeMusicLevel.high => 'Play theme music at the loudest setting',
+    };
+  }
+
+  String _themeMusicSubtitle(settings.ThemeMusicLevel level) {
+    return 'Play TV show theme music on detail pages: ${_themeMusicLabel(level)}';
   }
 
   // --- Behavior section ---

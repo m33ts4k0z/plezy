@@ -11,11 +11,9 @@ import '../utils/json_utils.dart';
 
 part 'plex_metadata.g.dart';
 
-Object? _readRatingKey(Map json, String key) =>
-    json['ratingKey'] ?? json['key'] ?? '';
+Object? _readRatingKey(Map json, String key) => json['ratingKey'] ?? json['key'] ?? '';
 
-List<String>? _tagsFromJson(List? json) =>
-    json?.cast<Map<String, dynamic>>().map((e) => e['tag'] as String).toList();
+List<String>? _tagsFromJson(List? json) => json?.cast<Map<String, dynamic>>().map((e) => e['tag'] as String).toList();
 
 /// Media type enum for type-safe media type handling
 enum PlexMediaType {
@@ -89,6 +87,7 @@ class PlexMetadata with MultiServerFields {
   final String? parentRatingKey; // Season rating key for episodes
   final int? parentIndex; // Season number
   final int? index; // Episode number
+  final String? theme; // Show theme music
   final String? grandparentTheme; // Show theme music
   final int? viewOffset; // Resume position in ms
   final int? viewCount;
@@ -213,6 +212,7 @@ class PlexMetadata with MultiServerFields {
     this.parentRatingKey,
     this.parentIndex,
     this.index,
+    this.theme,
     this.grandparentTheme,
     this.viewOffset,
     this.viewCount,
@@ -282,6 +282,7 @@ class PlexMetadata with MultiServerFields {
     String? parentRatingKey,
     int? parentIndex,
     int? index,
+    String? theme,
     String? grandparentTheme,
     int? viewOffset,
     int? viewCount,
@@ -349,6 +350,7 @@ class PlexMetadata with MultiServerFields {
       parentRatingKey: parentRatingKey ?? this.parentRatingKey,
       parentIndex: parentIndex ?? this.parentIndex,
       index: index ?? this.index,
+      theme: theme ?? this.theme,
       grandparentTheme: grandparentTheme ?? this.grandparentTheme,
       viewOffset: viewOffset ?? this.viewOffset,
       viewCount: viewCount ?? this.viewCount,
@@ -535,9 +537,13 @@ class PlexMetadata with MultiServerFields {
     try {
       return _$PlexMetadataFromJson(kBlurArtwork ? _obfuscateJson(json) : json);
     } on TypeError catch (e, st) {
-      Sentry.captureException(e, stackTrace: st, withScope: (scope) {
-        scope.setContexts('json', json);
-      });
+      Sentry.captureException(
+        e,
+        stackTrace: st,
+        withScope: (scope) {
+          scope.setContexts('json', json);
+        },
+      );
       rethrow;
     }
   }

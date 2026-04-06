@@ -19,8 +19,8 @@ class ConnectionTimeouts {
   static const receive = Duration(seconds: 120);
 
   /// Dio connect timeout for plex.tv / clients.plex.tv API requests.
-  static const plexTvConnect = Duration(seconds: 5);
+  static const plexTvConnect = Duration(seconds: 10);
 
   /// Dio receive timeout for plex.tv / clients.plex.tv API responses.
-  static const plexTvReceive = Duration(seconds: 10);
+  static const plexTvReceive = Duration(seconds: 20);
 }
