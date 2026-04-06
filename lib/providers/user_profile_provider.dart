@@ -118,8 +118,15 @@ class UserProfileProvider extends ChangeNotifier {
       _currentUser = _home!.getUserByUUID(currentUserUUID);
     }
 
-    // Profile settings are NOT cached - they will be fetched fresh from API
-    // in refreshProfileSettings()
+    final cachedProfile = _storageService!.getUserProfile();
+    if (cachedProfile != null) {
+      try {
+        _profileSettings = PlexUserProfile.fromJson(cachedProfile);
+        appLogger.d('Loaded cached Plex user profile settings');
+      } catch (e) {
+        appLogger.w('Failed to load cached user profile settings', error: e);
+      }
+    }
 
     notifyListeners();
   }
@@ -141,13 +148,17 @@ class UserProfileProvider extends ChangeNotifier {
 
       final profile = await _authService!.getUserProfile(currentToken);
       _profileSettings = profile;
+      await _storageService!.saveUserProfile(profile.toJson());
 
       appLogger.i('Successfully fetched user profile settings from API');
 
       notifyListeners();
     } catch (e) {
       appLogger.w('Failed to fetch user profile settings from API', error: e);
-      // Don't set error state, profile will remain null or keep existing value
+      if (_profileSettings != null) {
+        appLogger.i('Using cached Plex user profile settings after API failure');
+        notifyListeners();
+      }
     }
   }
 
@@ -282,6 +293,7 @@ class UserProfileProvider extends ChangeNotifier {
 
       // Update user profile settings (fresh from API)
       _profileSettings = switchResponse.profile;
+      await _storageService!.saveUserProfile(switchResponse.profile.toJson());
       appLogger.d(
         'Updated profile settings for user: ${user.displayName}',
         error: {

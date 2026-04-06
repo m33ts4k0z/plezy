@@ -13,6 +13,8 @@ import '../utils/platform_detector.dart';
 
 enum ThemeMode { system, light, dark, oled }
 
+enum ThemeMusicLevel { off, low, medium, high }
+
 /// Library density is now an int 1–5 (1 = most compact, 5 = most comfortable).
 /// Default is 3.
 class LibraryDensity {
@@ -31,6 +33,7 @@ enum EpisodePosterMode { seriesPoster, seasonPoster, episodeThumbnail }
 class SettingsService extends BaseSharedPreferencesService {
   static const String _keyThemeMode = 'theme_mode';
   static const String _keyEnableDebugLogging = 'enable_debug_logging';
+  static const String _keyThemeMusicLevel = 'theme_music_level';
   static const String _keyCrashReporting = 'crash_reporting';
   static const String _keyBufferSize = 'buffer_size';
   static const String _keyBufferSizeMigratedToAuto = 'buffer_size_migrated_to_auto';
@@ -72,10 +75,8 @@ class SettingsService extends BaseSharedPreferencesService {
   static const String _keyIntroPattern = 'intro_pattern';
   static const String _keyCreditsPattern = 'credits_pattern';
 
-  static const String defaultIntroPattern =
-      r'(?:^|\b)(?:intro(?:duction)?|opening)(?:\b|$)|^op(?:\s?\d+)?$';
-  static const String defaultCreditsPattern =
-      r'(?:^|\b)(?:outro|closing|credits?|ending)(?:\b|$)|^ed(?:\s?\d+)?$';
+  static const String defaultIntroPattern = r'(?:^|\b)(?:intro(?:duction)?|opening)(?:\b|$)|^op(?:\s?\d+)?$';
+  static const String defaultCreditsPattern = r'(?:^|\b)(?:outro|closing|credits?|ending)(?:\b|$)|^ed(?:\s?\d+)?$';
   static const String _keyCustomDownloadPath = 'custom_download_path';
   static const String _keyCustomDownloadPathType = 'custom_download_path_type';
   static const String _keyDownloadOnWifiOnly = 'download_on_wifi_only';
@@ -155,6 +156,24 @@ class SettingsService extends BaseSharedPreferencesService {
 
   bool getEnableDebugLogging() {
     return prefs.getBool(_keyEnableDebugLogging) ?? false;
+  }
+
+  // Theme Music
+  Future<void> setThemeMusicLevel(ThemeMusicLevel level) async {
+    await prefs.setString(_keyThemeMusicLevel, level.name);
+  }
+
+  ThemeMusicLevel getThemeMusicLevel() {
+    return _getEnumValue(_keyThemeMusicLevel, ThemeMusicLevel.values, ThemeMusicLevel.off);
+  }
+
+  double getThemeMusicVolume() {
+    return switch (getThemeMusicLevel()) {
+      ThemeMusicLevel.off => 0.0,
+      ThemeMusicLevel.low => 0.2,
+      ThemeMusicLevel.medium => 0.4,
+      ThemeMusicLevel.high => 0.6,
+    };
   }
 
   // Crash Reporting
@@ -1313,6 +1332,7 @@ class SettingsService extends BaseSharedPreferencesService {
     await Future.wait([
       prefs.remove(_keyThemeMode),
       prefs.remove(_keyEnableDebugLogging),
+      prefs.remove(_keyThemeMusicLevel),
       prefs.remove(_keyBufferSize),
       prefs.remove(_keyKeyboardShortcuts),
       prefs.remove(_keyKeyboardHotkeys),
@@ -1390,6 +1410,7 @@ class SettingsService extends BaseSharedPreferencesService {
     return {
       'themeMode': getThemeMode().name,
       'enableDebugLogging': getEnableDebugLogging(),
+      'themeMusicLevel': getThemeMusicLevel().name,
       'bufferSize': getBufferSize(),
       'enableHardwareDecoding': getEnableHardwareDecoding(),
       'preferredVideoCodec': getPreferredVideoCodec(),

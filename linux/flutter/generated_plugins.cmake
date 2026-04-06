@@ -3,6 +3,7 @@
 #
 
 list(APPEND FLUTTER_PLUGIN_LIST
+  audioplayers_linux
   os_media_controls
   screen_retriever_linux
   sentry_flutter

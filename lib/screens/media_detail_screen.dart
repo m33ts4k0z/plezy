@@ -9,6 +9,7 @@ import 'package:plezy/utils/platform_detector.dart';
 import 'package:plezy/widgets/app_icon.dart';
 import 'package:material_symbols_icons/symbols.dart';
 import 'package:provider/provider.dart';
+import '../main.dart';
 import '../widgets/collapsible_text.dart';
 import '../widgets/rating_bottom_sheet.dart';
 
@@ -25,10 +26,12 @@ import '../../services/plex_client.dart';
 import '../services/plex_api_cache.dart';
 import '../models/plex_metadata.dart';
 import '../models/plex_video_playback_data.dart';
+import '../services/settings_service.dart' as app_settings;
 import '../utils/content_utils.dart';
 import '../utils/rating_utils.dart';
 import '../models/download_models.dart';
 import '../services/download_storage_service.dart';
+import '../services/theme_music_service.dart';
 import '../utils/download_version_utils.dart';
 import '../providers/playback_state_provider.dart';
 import '../providers/settings_provider.dart';
@@ -72,7 +75,13 @@ class MediaDetailScreen extends StatefulWidget {
 }
 
 class _MediaDetailScreenState extends State<MediaDetailScreen>
-    with WatchStateAware, DeletionAware, MountedSetStateMixin, ServerBoundMediaMixin {
+    with
+        WatchStateAware,
+        DeletionAware,
+        MountedSetStateMixin,
+        ServerBoundMediaMixin,
+        RouteAware,
+        WidgetsBindingObserver {
   List<PlexMetadata> _seasons = [];
   bool _isLoadingSeasons = false;
   Completer<void>? _seasonsCompleter;
@@ -98,6 +107,13 @@ class _MediaDetailScreenState extends State<MediaDetailScreen>
   final ScrollController _seasonTabsScrollController = ScrollController();
   final FocusNode _firstEpisodeFocusNode = FocusNode(debugLabel: 'first_episode');
   final FocusNode _lastEpisodeFocusNode = FocusNode(debugLabel: 'last_episode');
+  final String _themeMusicOwnerId = 'media_detail_${identityHashCode(Object())}';
+  bool _isRouteVisible = true;
+  bool _isAppActive = true;
+  bool _isRouteObserverSubscribed = false;
+  int _themeMusicSyncGeneration = 0;
+  Timer? _themeMusicRetryTimer;
+  static const Duration _themeMusicRetryDelay = Duration(milliseconds: 900);
 
   late final FocusNode _playButtonFocusNode;
   late final FocusNode _ratingChipFocusNode;
@@ -108,7 +124,6 @@ class _MediaDetailScreenState extends State<MediaDetailScreen>
 
   // Context menu key for the three-dots button
   final _contextMenuKey = GlobalKey<MediaContextMenuState>();
-
 
   // Locked focus pattern for extras
   int _focusedExtraIndex = 0;
@@ -340,6 +355,7 @@ class _MediaDetailScreenState extends State<MediaDetailScreen>
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _scrollController = ScrollController();
     _scrollController.addListener(_onScroll);
     _extrasFocusNode = FocusNode(debugLabel: 'extras_row');
@@ -350,12 +366,31 @@ class _MediaDetailScreenState extends State<MediaDetailScreen>
     _loadFullMetadata();
   }
 
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_isRouteObserverSubscribed) return;
+
+    final route = ModalRoute.of(context);
+    if (route is PageRoute) {
+      routeObserver.subscribe(this, route);
+      _isRouteObserverSubscribed = true;
+    }
+  }
+
   void _onScroll() {
     _scrollOffset.value = _scrollController.offset;
   }
 
   @override
   void dispose() {
+    _themeMusicSyncGeneration++;
+    _themeMusicRetryTimer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    if (_isRouteObserverSubscribed) {
+      routeObserver.unsubscribe(this);
+    }
+    ThemeMusicService.instance.stop(ownerId: _themeMusicOwnerId);
     _scrollController.dispose();
     _scrollOffset.dispose();
     _extrasScrollController.dispose();
@@ -373,6 +408,191 @@ class _MediaDetailScreenState extends State<MediaDetailScreen>
     _firstEpisodeFocusNode.dispose();
     _lastEpisodeFocusNode.dispose();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _isAppActive = state == AppLifecycleState.resumed;
+    _syncThemeMusic();
+  }
+
+  @override
+  void didPush() {
+    _isRouteVisible = true;
+    _syncThemeMusic();
+  }
+
+  @override
+  void didPopNext() {
+    _isRouteVisible = true;
+    _syncThemeMusic();
+  }
+
+  @override
+  void didPushNext() {
+    _isRouteVisible = false;
+    _syncThemeMusic();
+  }
+
+  @override
+  void didPop() {
+    _isRouteVisible = false;
+    ThemeMusicService.instance.stop(ownerId: _themeMusicOwnerId);
+  }
+
+  Future<void> _syncThemeMusic() async {
+    final syncGeneration = ++_themeMusicSyncGeneration;
+    _themeMusicRetryTimer?.cancel();
+    _themeMusicRetryTimer = null;
+    final metadata = _fullMetadata ?? widget.metadata;
+    final settingsService =
+        app_settings.SettingsService.instanceOrNull ?? await app_settings.SettingsService.getInstance();
+    final themeMusicLevel = settingsService.getThemeMusicLevel();
+    final themeMusicVolume = settingsService.getThemeMusicVolume();
+
+    if (!_isCurrentThemeMusicSync(syncGeneration)) {
+      appLogger.d(
+        'Theme music sync superseded before evaluation',
+        error: {'syncGeneration': syncGeneration, 'ratingKey': metadata.ratingKey, 'title': metadata.title},
+      );
+      return;
+    }
+
+    if (!mounted || widget.isOffline || !_isRouteVisible || !_isAppActive) {
+      appLogger.d(
+        'Theme music suppressed by screen state',
+        error: {
+          'syncGeneration': syncGeneration,
+          'mounted': mounted,
+          'isOffline': widget.isOffline,
+          'isRouteVisible': _isRouteVisible,
+          'isAppActive': _isAppActive,
+          'ratingKey': metadata.ratingKey,
+          'title': metadata.title,
+        },
+      );
+      await _stopThemeMusicIfCurrent(syncGeneration);
+      return;
+    }
+
+    final client = _getClientForMetadata(context);
+
+    if (client == null) {
+      appLogger.d(
+        'Theme music skipped: no client',
+        error: {
+          'syncGeneration': syncGeneration,
+          'ratingKey': metadata.ratingKey,
+          'title': metadata.title,
+          'serverId': metadata.serverId,
+        },
+      );
+      await _stopThemeMusicIfCurrent(syncGeneration);
+      _scheduleThemeMusicRetry(syncGeneration);
+      return;
+    }
+
+    if (!metadata.isShow) {
+      appLogger.d(
+        'Theme music skipped: metadata is not a show',
+        error: {
+          'syncGeneration': syncGeneration,
+          'ratingKey': metadata.ratingKey,
+          'title': metadata.title,
+          'type': metadata.type,
+        },
+      );
+      await _stopThemeMusicIfCurrent(syncGeneration);
+      return;
+    }
+
+    if (themeMusicLevel == app_settings.ThemeMusicLevel.off) {
+      appLogger.d(
+        'Theme music disabled by Plezy settings',
+        error: {
+          'syncGeneration': syncGeneration,
+          'ratingKey': metadata.ratingKey,
+          'title': metadata.title,
+          'level': themeMusicLevel.name,
+        },
+      );
+      await _stopThemeMusicIfCurrent(syncGeneration);
+      return;
+    }
+
+    if (_isLoadingMetadata && _fullMetadata == null && metadata.isShow && !(metadata.theme?.isNotEmpty ?? false)) {
+      appLogger.d(
+        'Theme music deferred until full metadata loads',
+        error: {
+          'syncGeneration': syncGeneration,
+          'ratingKey': metadata.ratingKey,
+          'title': metadata.title,
+          'isLoadingMetadata': _isLoadingMetadata,
+        },
+      );
+      return;
+    }
+
+    if (!_isCurrentThemeMusicSync(syncGeneration)) {
+      appLogger.d(
+        'Theme music sync superseded before playback',
+        error: {'syncGeneration': syncGeneration, 'ratingKey': metadata.ratingKey, 'title': metadata.title},
+      );
+      return;
+    }
+
+    appLogger.d(
+      'Theme music allowed for show detail',
+      error: {
+        'syncGeneration': syncGeneration,
+        'ratingKey': metadata.ratingKey,
+        'title': metadata.title,
+        'hasTheme': (metadata.theme?.isNotEmpty ?? false),
+        'hasGrandparentTheme': (metadata.grandparentTheme?.isNotEmpty ?? false),
+        'serverId': metadata.serverId,
+        'level': themeMusicLevel.name,
+      },
+    );
+
+    await ThemeMusicService.instance.playForMetadata(
+      ownerId: _themeMusicOwnerId,
+      metadata: metadata,
+      client: client,
+      volume: themeMusicVolume,
+    );
+  }
+
+  bool _isCurrentThemeMusicSync(int syncGeneration) =>
+      mounted && syncGeneration == _themeMusicSyncGeneration;
+
+  Future<void> _stopThemeMusicIfCurrent(int syncGeneration) async {
+    if (!_isCurrentThemeMusicSync(syncGeneration)) {
+      appLogger.d(
+        'Skipping stale theme music stop',
+        error: {'syncGeneration': syncGeneration, 'activeGeneration': _themeMusicSyncGeneration},
+      );
+      return;
+    }
+
+    await ThemeMusicService.instance.stop(ownerId: _themeMusicOwnerId);
+  }
+
+  void _scheduleThemeMusicRetry(int syncGeneration) {
+    if (!_isCurrentThemeMusicSync(syncGeneration) || widget.isOffline || !_isRouteVisible || !_isAppActive) {
+      return;
+    }
+
+    _themeMusicRetryTimer?.cancel();
+    _themeMusicRetryTimer = Timer(_themeMusicRetryDelay, () {
+      _themeMusicRetryTimer = null;
+      if (!mounted || widget.isOffline || !_isRouteVisible || !_isAppActive) return;
+
+      appLogger.d(
+        'Retrying theme music sync after transient client miss',
+        error: {'syncGeneration': syncGeneration + 1, 'ratingKey': widget.metadata.ratingKey},
+      );
+      unawaited(_syncThemeMusic());
+    });
   }
 
   /// Build title text widget for clear logo fallback
@@ -781,7 +1001,11 @@ class _MediaDetailScreenState extends State<MediaDetailScreen>
                     if (versionConfig == null || !context.mounted) return;
 
                     try {
-                      final count = await downloadProvider.queueDownload(metadata, client, versionConfig: versionConfig);
+                      final count = await downloadProvider.queueDownload(
+                        metadata,
+                        client,
+                        versionConfig: versionConfig,
+                      );
                       if (context.mounted) {
                         final message = count > 1
                             ? t.downloads.episodesQueued(count: count)
@@ -991,10 +1215,7 @@ class _MediaDetailScreenState extends State<MediaDetailScreen>
           duration: const Duration(milliseconds: 150),
           curve: Curves.easeOutCubic,
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-          decoration: BoxDecoration(
-            color: bgColor,
-            borderRadius: const BorderRadius.all(Radius.circular(100)),
-          ),
+          decoration: BoxDecoration(color: bgColor, borderRadius: const BorderRadius.all(Radius.circular(100))),
           child: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -1007,11 +1228,7 @@ class _MediaDetailScreenState extends State<MediaDetailScreen>
               const SizedBox(width: 4),
               Text(
                 hasRating ? formatRating(starValue) : t.mediaMenu.rate,
-                style: TextStyle(
-                  color: fgColor,
-                  fontSize: 13,
-                  fontWeight: FontWeight.w500,
-                ),
+                style: TextStyle(color: fgColor, fontSize: 13, fontWeight: FontWeight.w500),
               ),
             ],
           ),
@@ -1083,12 +1300,7 @@ class _MediaDetailScreenState extends State<MediaDetailScreen>
     PlexMetadata metadata,
     PlexClient client,
   ) {
-    return resolveDownloadVersion(
-      context,
-      metadata,
-      client,
-      fallbackVersions: _fullMetadata?.mediaVersions,
-    );
+    return resolveDownloadVersion(context, metadata, client, fallbackVersions: _fullMetadata?.mediaVersions);
   }
 
   Future<void> _loadFullMetadata() async {
@@ -1107,6 +1319,7 @@ class _MediaDetailScreenState extends State<MediaDetailScreen>
         _fullMetadata = cachedMetadata ?? widget.metadata;
         _isLoadingMetadata = false;
       });
+      unawaited(_syncThemeMusic());
 
       if (widget.metadata.isShow) {
         _loadSeasonsFromDownloads();
@@ -1129,6 +1342,7 @@ class _MediaDetailScreenState extends State<MediaDetailScreen>
           _fullMetadata = widget.metadata;
           _isLoadingMetadata = false;
         });
+        unawaited(_syncThemeMusic());
         return;
       }
 
@@ -1157,6 +1371,7 @@ class _MediaDetailScreenState extends State<MediaDetailScreen>
           _playbackData = playbackData;
           _isLoadingMetadata = false;
         });
+        unawaited(_syncThemeMusic());
 
         // Load seasons if it's a show
         if (metadata.isShow) {
@@ -1178,6 +1393,7 @@ class _MediaDetailScreenState extends State<MediaDetailScreen>
         _fullMetadata = widget.metadata;
         _isLoadingMetadata = false;
       });
+      unawaited(_syncThemeMusic());
 
       if (widget.metadata.isShow) {
         _loadSeasons();
@@ -1193,6 +1409,7 @@ class _MediaDetailScreenState extends State<MediaDetailScreen>
         _fullMetadata = widget.metadata;
         _isLoadingMetadata = false;
       });
+      unawaited(_syncThemeMusic());
 
       if (widget.metadata.isShow) {
         _loadSeasons();
@@ -1347,10 +1564,7 @@ class _MediaDetailScreenState extends State<MediaDetailScreen>
       for (final node in _seasonTabFocusNodes) {
         node.dispose();
       }
-      _seasonTabFocusNodes = List.generate(
-        count,
-        (i) => FocusNode(debugLabel: 'season_tab_$i'),
-      );
+      _seasonTabFocusNodes = List.generate(count, (i) => FocusNode(debugLabel: 'season_tab_$i'));
       _seasonContextMenuKeys.clear();
     }
   }
@@ -1592,10 +1806,7 @@ class _MediaDetailScreenState extends State<MediaDetailScreen>
         child: Row(
           children: List.generate(_seasons.length, (index) {
             final season = _seasons[index];
-            final contextMenuKey = _seasonContextMenuKeys.putIfAbsent(
-              index,
-              () => GlobalKey<MediaContextMenuState>(),
-            );
+            final contextMenuKey = _seasonContextMenuKeys.putIfAbsent(index, () => GlobalKey<MediaContextMenuState>());
             Offset? tapPosition;
             return Padding(
               padding: const EdgeInsets.only(right: 8),
@@ -1706,7 +1917,12 @@ class _MediaDetailScreenState extends State<MediaDetailScreen>
     if (key.isLeftKey) {
       if (_focusedExtraIndex > 0) {
         setState(() => _focusedExtraIndex--);
-        scrollListToIndex(_extrasScrollController, _focusedExtraIndex, itemExtent: _getResponsiveCardWidth() + 4, leadingPadding: 0);
+        scrollListToIndex(
+          _extrasScrollController,
+          _focusedExtraIndex,
+          itemExtent: _getResponsiveCardWidth() + 4,
+          leadingPadding: 0,
+        );
       }
       return KeyEventResult.handled;
     }
@@ -1715,7 +1931,12 @@ class _MediaDetailScreenState extends State<MediaDetailScreen>
     if (key.isRightKey) {
       if (_focusedExtraIndex < _extras!.length - 1) {
         setState(() => _focusedExtraIndex++);
-        scrollListToIndex(_extrasScrollController, _focusedExtraIndex, itemExtent: _getResponsiveCardWidth() + 4, leadingPadding: 0);
+        scrollListToIndex(
+          _extrasScrollController,
+          _focusedExtraIndex,
+          itemExtent: _getResponsiveCardWidth() + 4,
+          leadingPadding: 0,
+        );
       }
       return KeyEventResult.handled;
     }
@@ -1760,7 +1981,12 @@ class _MediaDetailScreenState extends State<MediaDetailScreen>
     if (key.isLeftKey) {
       if (_focusedCastIndex > 0) {
         setState(() => _focusedCastIndex--);
-        scrollListToIndex(_castScrollController, _focusedCastIndex, itemExtent: _getResponsiveCardWidth() + 8 + 4, leadingPadding: 0);
+        scrollListToIndex(
+          _castScrollController,
+          _focusedCastIndex,
+          itemExtent: _getResponsiveCardWidth() + 8 + 4,
+          leadingPadding: 0,
+        );
       }
       return KeyEventResult.handled;
     }
@@ -1769,7 +1995,12 @@ class _MediaDetailScreenState extends State<MediaDetailScreen>
     if (key.isRightKey) {
       if (_focusedCastIndex < roleCount - 1) {
         setState(() => _focusedCastIndex++);
-        scrollListToIndex(_castScrollController, _focusedCastIndex, itemExtent: _getResponsiveCardWidth() + 8 + 4, leadingPadding: 0);
+        scrollListToIndex(
+          _castScrollController,
+          _focusedCastIndex,
+          itemExtent: _getResponsiveCardWidth() + 8 + 4,
+          leadingPadding: 0,
+        );
       }
       return KeyEventResult.handled;
     }
@@ -1836,8 +2067,8 @@ class _MediaDetailScreenState extends State<MediaDetailScreen>
           focusNode: index == 0
               ? _firstEpisodeFocusNode
               : index == _episodes.length - 1 && _episodes.length > 1
-                  ? _lastEpisodeFocusNode
-                  : null,
+              ? _lastEpisodeFocusNode
+              : null,
           onNavigateUp: index == 0
               ? () {
                   if (!_showEpisodesDirectly) {
@@ -1846,8 +2077,7 @@ class _MediaDetailScreenState extends State<MediaDetailScreen>
                     _overviewFocusNode.requestFocus();
                     _scrollSectionIntoView(_overviewSectionKey);
                   } else {
-                    _scrollController.animateTo(0,
-                        duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
+                    _scrollController.animateTo(0, duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
                     _playButtonFocusNode.requestFocus();
                   }
                 }
@@ -1918,9 +2148,7 @@ class _MediaDetailScreenState extends State<MediaDetailScreen>
     if (client == null) return;
     setStateIfMounted(() => _isLoadingEpisodes = true);
     try {
-      final episodeLists = await Future.wait(
-        _seasons.map((season) => client.getChildren(season.ratingKey)),
-      );
+      final episodeLists = await Future.wait(_seasons.map((season) => client.getChildren(season.ratingKey)));
       setStateIfMounted(() {
         _episodes = episodeLists.expand((e) => e).toList();
         _isLoadingEpisodes = false;
@@ -1982,6 +2210,7 @@ class _MediaDetailScreenState extends State<MediaDetailScreen>
             _seasons = updatedSeasons;
           }
         });
+        unawaited(_syncThemeMusic());
       }
     } catch (e) {
       appLogger.e('Failed to update watch state', error: e);
@@ -2841,4 +3070,3 @@ class _MediaDetailScreenState extends State<MediaDetailScreen>
     return Symbols.play_arrow_rounded; // Default play icon
   }
 }
-
