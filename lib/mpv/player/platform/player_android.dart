@@ -123,7 +123,7 @@ class PlayerAndroid extends PlayerBase {
       await observeProperty('sid', 'string');
       await observeProperty('demuxer-cache-time', 'double');
     } catch (e) {
-      errorController.add('Initialization failed: $e');
+      errorController.add(PlayerError('Initialization failed: $e'));
       rethrow;
     }
   }
@@ -424,15 +424,21 @@ class PlayerAndroid extends PlayerBase {
   // ============================================
 
   @override
-  Future<void> setVideoFrameRate(double fps, int durationMs) async {
-    if (disposed || !initialized) return;
+  Future<bool> setVideoFrameRate(double fps, int durationMs, {int extraDelayMs = 0}) async {
+    if (disposed || !initialized) return false;
     await invoke('setVideoFrameRate', {'fps': fps, 'duration': durationMs});
+    return true;
   }
 
   @override
   Future<void> clearVideoFrameRate() async {
     if (disposed || !initialized) return;
     await invoke('clearVideoFrameRate');
+  }
+
+  Future<void> setBoxFitMode(int mode) async {
+    if (disposed) return;
+    await invoke('setMpvProperty', {'name': 'box-fit-mode', 'value': mode.toString()});
   }
 
   @override

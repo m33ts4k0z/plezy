@@ -1,15 +1,10 @@
 import '../../../mpv/mpv.dart';
 
-/// Helper class for filtering tracks to remove auto/no tracks
-///
-/// This keeps track-filter rules in one place and eliminates duplication.
 class TrackFilterHelper {
-  /// Generic method to filter tracks based on type
   static List<T> filterTracks<T>(List<T> tracks) {
     return tracks.where(_isAllowedTrack).toList();
   }
 
-  /// Extract and filter tracks from Tracks object
   static List<T> extractAndFilterTracks<T>(Tracks? tracks, List<T> Function(Tracks?) extractor) {
     return filterTracks<T>(extractor(tracks));
   }
@@ -26,8 +21,8 @@ class TrackFilterHelper {
 
   static bool _isAllowedTrack<T>(T track) {
     final id = switch (track) {
-      AudioTrack t => t.id,
-      SubtitleTrack t => t.id,
+      final AudioTrack t => t.id,
+      final SubtitleTrack t => t.id,
       _ => '',
     };
 

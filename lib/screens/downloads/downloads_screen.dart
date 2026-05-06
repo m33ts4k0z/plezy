@@ -1,10 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/symbols.dart';
 import 'package:provider/provider.dart';
-import '../../models/plex_metadata.dart';
+import '../../focus/focusable_action_bar.dart';
+import '../../media/media_item.dart';
 import '../../providers/download_provider.dart';
 import '../../providers/multi_server_provider.dart';
-import '../../providers/settings_provider.dart';
+import '../../services/settings_service.dart';
+import '../../widgets/settings_builder.dart';
 import '../../utils/global_key_utils.dart';
 import '../../mixins/tab_navigation_mixin.dart';
 import '../../utils/grid_size_calculator.dart';
@@ -17,6 +19,7 @@ import '../../widgets/download_tree_view.dart';
 import '../main_screen.dart';
 import '../libraries/state_messages.dart';
 import '../../i18n/strings.g.dart';
+import 'sync_rules_screen.dart';
 
 class DownloadsScreen extends StatefulWidget {
   const DownloadsScreen({super.key});
@@ -30,6 +33,7 @@ class DownloadsScreenState extends State<DownloadsScreen> with TickerProviderSta
   final _queueTabChipFocusNode = FocusNode(debugLabel: 'tab_chip_queue');
   final _tvShowsTabChipFocusNode = FocusNode(debugLabel: 'tab_chip_tv_shows');
   final _moviesTabChipFocusNode = FocusNode(debugLabel: 'tab_chip_movies');
+  final _actionBarKey = GlobalKey<FocusableActionBarState>();
 
   @override
   List<FocusNode> get tabChipFocusNodes => [_queueTabChipFocusNode, _tvShowsTabChipFocusNode, _moviesTabChipFocusNode];
@@ -146,6 +150,21 @@ class DownloadsScreenState extends State<DownloadsScreen> with TickerProviderSta
             surfaceTintColor: Colors.transparent,
             shadowColor: Colors.transparent,
             scrolledUnderElevation: 0,
+            actions: [
+              FocusableActionBar(
+                key: _actionBarKey,
+                onNavigateLeft: () => getTabChipFocusNode(tabCount - 1).requestFocus(),
+                onNavigateDown: _focusCurrentTab,
+                actions: [
+                  FocusableAction(
+                    icon: Symbols.rule_settings,
+                    tooltip: t.downloads.activeSyncRules,
+                    onPressed: () =>
+                        Navigator.push(context, MaterialPageRoute(builder: (_) => const SyncRulesScreen())),
+                  ),
+                ],
+              ),
+            ],
           ),
           SliverFillRemaining(
             child: Column(
@@ -175,7 +194,11 @@ class DownloadsScreenState extends State<DownloadsScreen> with TickerProviderSta
                     children: [
                       Consumer2<DownloadProvider, MultiServerProvider>(
                         builder: (context, downloadProvider, serverProvider, _) {
-                          // Helper to get client from globalKey (serverId:ratingKey)
+                          // Resolve the owning server's client from a download's
+                          // globalKey (`serverId:ratingKey`). Backend-neutral —
+                          // Jellyfin downloads also surface here, so the
+                          // resume/retry buttons need a [MediaServerClient]
+                          // (not a [PlexClient]) for both code paths.
                           getClient(String globalKey) {
                             final serverId = parseGlobalKey(globalKey)?.serverId ?? globalKey;
                             return serverProvider.serverManager.getClient(serverId);
@@ -270,9 +293,9 @@ class _DownloadsGridContentState extends State<_DownloadsGridContent> {
 
   @override
   Widget build(BuildContext context) {
-    return Consumer2<DownloadProvider, SettingsProvider>(
-      builder: (context, downloadProvider, settingsProvider, _) {
-        final List<PlexMetadata> items = widget.type == DownloadType.tvShows
+    return Consumer<DownloadProvider>(
+      builder: (context, downloadProvider, _) {
+        final List<MediaItem> items = widget.type == DownloadType.tvShows
             ? downloadProvider.downloadedShows
             : downloadProvider.downloadedMovies;
 
@@ -282,33 +305,35 @@ class _DownloadsGridContentState extends State<_DownloadsGridContent> {
 
         // Extra top padding for focus decoration (scale + border extends beyond item bounds)
         const effectivePadding = EdgeInsets.only(left: 8, right: 8, top: 8);
-        final maxCrossAxisExtent = GridSizeCalculator.getMaxCrossAxisExtent(context, settingsProvider.libraryDensity);
 
-        // Use LayoutBuilder to get actual available width (accounting for sidebar)
-        return LayoutBuilder(
-          builder: (context, constraints) {
-            final availableWidth = constraints.maxWidth - effectivePadding.left - effectivePadding.right;
-            final columnCount = GridSizeCalculator.getColumnCount(availableWidth, maxCrossAxisExtent);
+        return SettingValueBuilder<int>(
+          pref: SettingsService.libraryDensity,
+          builder: (context, density, _) {
+            final maxCrossAxisExtent = GridSizeCalculator.getMaxCrossAxisExtent(context, density);
+            // Use LayoutBuilder to get actual available width (accounting for sidebar)
+            return LayoutBuilder(
+              builder: (context, constraints) {
+                final availableWidth = constraints.maxWidth - effectivePadding.left - effectivePadding.right;
+                final columnCount = GridSizeCalculator.getColumnCount(availableWidth, maxCrossAxisExtent);
 
-            return GridView.builder(
-              padding: effectivePadding,
-              // Allow focus decoration to render outside scroll bounds
-              clipBehavior: Clip.none,
-              gridDelegate: MediaGridDelegate.createDelegate(
-                context: context,
-                density: settingsProvider.libraryDensity,
-              ),
-              itemCount: items.length,
-              itemBuilder: (context, index) {
-                final item = items[index];
-                final isFirstColumn = GridSizeCalculator.isFirstColumn(index, columnCount);
-                final isFirst = index == 0;
-                return FocusableMediaCard(
-                  item: item,
-                  focusNode: isFirst ? _firstItemFocusNode : null,
-                  onBack: widget.onBack,
-                  isOffline: true, // Downloaded content works without server
-                  onNavigateLeft: isFirstColumn ? _navigateToSidebar : null,
+                return GridView.builder(
+                  padding: effectivePadding,
+                  // Allow focus decoration to render outside scroll bounds
+                  clipBehavior: Clip.none,
+                  gridDelegate: MediaGridDelegate.createDelegate(context: context, density: density),
+                  itemCount: items.length,
+                  itemBuilder: (context, index) {
+                    final item = items[index];
+                    final isFirstColumn = GridSizeCalculator.isFirstColumn(index, columnCount);
+                    final isFirst = index == 0;
+                    return FocusableMediaCard(
+                      item: item,
+                      focusNode: isFirst ? _firstItemFocusNode : null,
+                      onBack: widget.onBack,
+                      isOffline: true, // Downloaded content works without server
+                      onNavigateLeft: isFirstColumn ? _navigateToSidebar : null,
+                    );
+                  },
                 );
               },
             );

@@ -1,11 +1,12 @@
 import 'dart:io';
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
+import 'package:uuid/uuid.dart';
 
 import '../models/shader_preset.dart';
+import '../utils/app_logger.dart';
 
 /// Utility class for loading GLSL shader assets for MPV video enhancement.
 ///
@@ -17,6 +18,16 @@ class ShaderAssetLoader {
 
   /// NVScaler shader file
   static const String _nvscalerShader = 'nvscaler/NVScaler.glsl';
+
+  /// ArtCNN shader files organized by preset model and variant.
+  static const Map<String, String> _artcnnShaders = {
+    'c4f16_neutral': 'artcnn/ArtCNN_C4F16.glsl',
+    'c4f16_dn': 'artcnn/ArtCNN_C4F16_DN.glsl',
+    'c4f16_ds': 'artcnn/ArtCNN_C4F16_DS.glsl',
+    'c4f32_neutral': 'artcnn/ArtCNN_C4F32.glsl',
+    'c4f32_dn': 'artcnn/ArtCNN_C4F32_DN.glsl',
+    'c4f32_ds': 'artcnn/ArtCNN_C4F32_DS.glsl',
+  };
 
   /// Anime4K shader files organized by function
   static const Map<String, String> _anime4kShaders = {
@@ -54,7 +65,6 @@ class ShaderAssetLoader {
       final fileName = path.basename(assetPath);
       final subDir = path.dirname(assetPath);
 
-      // Create subdirectory if needed
       final targetDir = Directory(path.join(shaderDir, subDir));
       if (!await targetDir.exists()) {
         await targetDir.create(recursive: true);
@@ -70,10 +80,8 @@ class ShaderAssetLoader {
       }
 
       return targetFile.path;
-    } catch (e) {
-      if (kDebugMode) {
-        debugPrint('Failed to extract shader $assetPath: $e');
-      }
+    } catch (e, st) {
+      appLogger.w('Failed to extract shader $assetPath', error: e, stackTrace: st);
       return null;
     }
   }
@@ -86,6 +94,19 @@ class ShaderAssetLoader {
     return [shaderPath];
   }
 
+  /// Get the shader file path for an ArtCNN preset.
+  /// Returns a list containing exactly one ArtCNN shader path.
+  static Future<List<String>> getArtCNNShaders(ArtCNNConfig config) async {
+    final variantId = switch (config.variant) {
+      ArtCNNVariant.neutral => 'neutral',
+      ArtCNNVariant.denoise => 'dn',
+      ArtCNNVariant.denoiseSharpen => 'ds',
+    };
+    final shaderPath = await _extractShader(_artcnnShaders['${config.model.name}_$variantId']!);
+    if (shaderPath == null) return [];
+    return [shaderPath];
+  }
+
   /// Get the shader file paths for an Anime4K preset.
   /// Returns a list of shader paths in the correct order for MPV.
   static Future<List<String>> getAnime4KShaders(Anime4KConfig config) async {
@@ -93,7 +114,6 @@ class ShaderAssetLoader {
     final quality = config.quality;
     final mode = config.mode;
 
-    // Get quality-specific shader variants
     String restoreVariant;
     String upscaleVariant;
 
@@ -192,7 +212,7 @@ class ShaderAssetLoader {
   static Future<String> importCustomShader(String sourcePath) async {
     final customDir = await _getCustomShaderDirectory();
     final ext = path.extension(sourcePath);
-    final uuid = DateTime.now().millisecondsSinceEpoch.toRadixString(36);
+    final uuid = const Uuid().v4();
     final storedName = '$uuid$ext';
     final targetFile = File(path.join(customDir, storedName));
 
@@ -223,6 +243,9 @@ class ShaderAssetLoader {
         return [];
       case ShaderPresetType.nvscaler:
         return getNVScalerShaders();
+      case ShaderPresetType.artcnn:
+        if (preset.artcnnConfig == null) return [];
+        return getArtCNNShaders(preset.artcnnConfig!);
       case ShaderPresetType.anime4k:
         if (preset.anime4kConfig == null) return [];
         return getAnime4KShaders(preset.anime4kConfig!);
@@ -238,17 +261,17 @@ class ShaderAssetLoader {
   /// Call this at startup to avoid extraction delay during playback.
   static Future<void> preloadShaders() async {
     try {
-      // Extract NVScaler
       await _extractShader(_nvscalerShader);
 
-      // Extract all Anime4K shaders
+      for (final shaderPath in _artcnnShaders.values) {
+        await _extractShader(shaderPath);
+      }
+
       for (final shaderPath in _anime4kShaders.values) {
         await _extractShader(shaderPath);
       }
-    } catch (e) {
-      if (kDebugMode) {
-        debugPrint('Failed to preload shaders: $e');
-      }
+    } catch (e, st) {
+      appLogger.w('Failed to preload shaders', error: e, stackTrace: st);
     }
   }
 

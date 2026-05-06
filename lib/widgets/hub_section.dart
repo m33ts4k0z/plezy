@@ -4,17 +4,17 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:plezy/widgets/app_icon.dart';
 import 'package:material_symbols_icons/symbols.dart';
-import 'package:provider/provider.dart';
 import '../focus/dpad_navigator.dart';
 import '../focus/focus_theme.dart';
 import '../focus/input_mode_tracker.dart';
 import '../focus/key_event_utils.dart';
-import '../providers/settings_provider.dart';
-import '../services/settings_service.dart' show EpisodePosterMode;
+import '../services/settings_service.dart';
+import 'settings_builder.dart';
 import '../utils/grid_size_calculator.dart';
 import '../theme/mono_tokens.dart';
 import '../focus/locked_hub_controller.dart';
-import '../models/plex_hub.dart';
+import '../media/media_hub.dart';
+import '../mixins/mounted_set_state_mixin.dart';
 import '../screens/hub_detail_screen.dart';
 import '../utils/media_navigation_helper.dart';
 import 'focus_builders.dart';
@@ -32,7 +32,7 @@ import '../i18n/strings.g.dart';
 /// - Children render focus visuals based on the passed index
 /// - Focus never "escapes" to random elements
 class HubSection extends StatefulWidget {
-  final PlexHub hub;
+  final MediaHub hub;
   final IconData icon;
   final void Function(String)? onRefresh;
   final VoidCallback? onRemoveFromContinueWatching;
@@ -54,6 +54,10 @@ class HubSection extends StatefulWidget {
   /// Used to navigate focus to the sidebar.
   final VoidCallback? onNavigateToSidebar;
 
+  /// When true, removes internal horizontal padding (header + list).
+  /// Use when the parent already provides edge spacing (e.g. inside Padding(16)).
+  final bool inset;
+
   const HubSection({
     super.key,
     required this.hub,
@@ -66,13 +70,14 @@ class HubSection extends StatefulWidget {
     this.onBack,
     this.onNavigateUp,
     this.onNavigateToSidebar,
+    this.inset = false,
   });
 
   @override
   State<HubSection> createState() => HubSectionState();
 }
 
-class HubSectionState extends State<HubSection> {
+class HubSectionState extends State<HubSection> with MountedSetStateMixin {
   static const _longPressDuration = Duration(milliseconds: 500);
 
   late FocusNode _hubFocusNode;
@@ -81,9 +86,8 @@ class HubSectionState extends State<HubSection> {
   /// Current visual focus index (not tied to Flutter's focus system)
   int _focusedIndex = 0;
 
-  /// Item extent for scroll calculations
   double _itemExtent = 0;
-  static const double _leadingPadding = 12.0;
+  double get _leadingPadding => widget.inset ? 0.0 : 12.0;
 
   Timer? _longPressTimer;
   bool _isSelectKeyDown = false;
@@ -92,7 +96,7 @@ class HubSectionState extends State<HubSection> {
   @override
   void initState() {
     super.initState();
-    _hubFocusNode = FocusNode(debugLabel: 'hub_${widget.hub.hubKey}');
+    _hubFocusNode = FocusNode(debugLabel: 'hub_${widget.hub.id}');
     _hubFocusNode.addListener(_onFocusChange);
   }
 
@@ -102,7 +106,6 @@ class HubSectionState extends State<HubSection> {
   @override
   void didUpdateWidget(HubSection oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // Clamp focus index if item count changed
     if (widget.hub.items.length != oldWidget.hub.items.length) {
       final maxIndex = _totalItemCount == 0 ? 0 : _totalItemCount - 1;
       if (_focusedIndex > maxIndex) {
@@ -128,7 +131,7 @@ class HubSectionState extends State<HubSection> {
       _longPressTriggered = false;
     }
     // ignore: no-empty-block - setState triggers rebuild to update focus styling
-    if (mounted) setState(() {});
+    setStateIfMounted(() {});
   }
 
   /// Request focus on this hub at a specific item index
@@ -138,19 +141,18 @@ class HubSectionState extends State<HubSection> {
     final clamped = index.clamp(0, _totalItemCount - 1);
     _focusedIndex = clamped;
     // Remember this position for this specific hub
-    HubFocusMemory.setForHub(widget.hub.hubKey, clamped);
+    HubFocusMemory.setForHub(widget.hub.id, clamped);
     _scrollToIndex(clamped);
     _hubFocusNode.requestFocus();
     // ignore: no-empty-block - setState triggers rebuild to update focus styling
-    if (mounted) setState(() {});
+    setStateIfMounted(() {});
 
-    // Scroll the hub into view in the parent scroll view
     _scrollHubIntoView();
   }
 
   /// Request focus using the stored memory for this hub
   void requestFocusFromMemory() {
-    final index = HubFocusMemory.getForHub(widget.hub.hubKey, _totalItemCount);
+    final index = HubFocusMemory.getForHub(widget.hub.id, _totalItemCount);
     requestFocusAt(index);
   }
 
@@ -239,7 +241,7 @@ class HubSectionState extends State<HubSection> {
         setState(() {
           _focusedIndex--;
         });
-        HubFocusMemory.setForHub(widget.hub.hubKey, _focusedIndex);
+        HubFocusMemory.setForHub(widget.hub.id, _focusedIndex);
         _scrollToIndex(_focusedIndex);
       } else if (widget.onNavigateToSidebar != null) {
         // At leftmost item: navigate to sidebar
@@ -255,7 +257,7 @@ class HubSectionState extends State<HubSection> {
         setState(() {
           _focusedIndex++;
         });
-        HubFocusMemory.setForHub(widget.hub.hubKey, _focusedIndex);
+        HubFocusMemory.setForHub(widget.hub.id, _focusedIndex);
         _scrollToIndex(_focusedIndex);
       }
       return KeyEventResult.handled;
@@ -326,13 +328,15 @@ class HubSectionState extends State<HubSection> {
       children: [
         // Hub header (NOT focusable - titles should not be focusable)
         Padding(
-          padding: const EdgeInsets.fromLTRB(8, 2, 8, 2),
+          padding: widget.inset ? const EdgeInsets.symmetric(vertical: 2) : const EdgeInsets.fromLTRB(8, 2, 8, 2),
           child: ExcludeFocus(
             child: InkWell(
               onTap: widget.hub.more ? () => _navigateToHubDetail(context) : null,
               borderRadius: BorderRadius.circular(tokens(context).radiusSm),
               child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                padding: widget.inset
+                    ? const EdgeInsets.symmetric(vertical: 2)
+                    : const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -373,130 +377,139 @@ class HubSectionState extends State<HubSection> {
           ),
         ),
 
-        // Hub items with locked focus control
         if (widget.hub.items.isNotEmpty)
           Focus(
             focusNode: _hubFocusNode,
             onKeyEvent: _handleKeyEvent,
-            child: LayoutBuilder(
-              builder: (context, constraints) {
-                final settings = context.watch<SettingsProvider>();
-                final baseCardWidth = GridSizeCalculator.getCellWidth(constraints.maxWidth, context, settings.libraryDensity);
+            child: SettingsBuilder(
+              prefs: const [SettingsService.libraryDensity, SettingsService.episodePosterMode],
+              builder: (context) => LayoutBuilder(
+                builder: (context, constraints) {
+                  final svc = SettingsService.instanceOrNull!;
+                  final baseCardWidth = GridSizeCalculator.getCellWidth(
+                    constraints.maxWidth,
+                    context,
+                    svc.read(SettingsService.libraryDensity),
+                  );
 
-                // Get episode poster mode setting
-                final episodePosterMode = settings.episodePosterMode;
+                  final episodePosterMode = svc.read(SettingsService.episodePosterMode);
 
-                // Determine hub content type for layout decisions
-                final hasEpisodes = widget.hub.items.any((item) => item.usesWideAspectRatio(episodePosterMode));
-                final hasNonEpisodes = widget.hub.items.any((item) => !item.usesWideAspectRatio(episodePosterMode));
+                  final hasEpisodes = widget.hub.items.any((item) => item.usesWideAspectRatio(episodePosterMode));
+                  final hasNonEpisodes = widget.hub.items.any((item) => !item.usesWideAspectRatio(episodePosterMode));
 
-                // Mixed hub = has both episodes AND non-episodes (like Continue Watching)
-                final isMixedHub = hasEpisodes && hasNonEpisodes;
+                  final isMixedHub = hasEpisodes && hasNonEpisodes;
 
-                // Episode-only = all items are episodes with thumbnails
-                final isEpisodeOnlyHub = hasEpisodes && !hasNonEpisodes;
+                  final isEpisodeOnlyHub = hasEpisodes && !hasNonEpisodes;
 
-                // Use 16:9 for episode-only hubs OR mixed hubs (with episode thumbnail mode)
-                final useWideLayout =
-                    episodePosterMode == EpisodePosterMode.episodeThumbnail && (isEpisodeOnlyHub || isMixedHub);
+                  // Use 16:9 for episode-only hubs OR mixed hubs (with episode thumbnail mode)
+                  final useWideLayout =
+                      episodePosterMode == EpisodePosterMode.episodeThumbnail && (isEpisodeOnlyHub || isMixedHub);
 
-                // Card dimensions based on hub type
-                const wideCardMultiplier = 1.5;
-                final cardWidth = useWideLayout ? baseCardWidth * wideCardMultiplier : baseCardWidth;
-                final posterWidth = cardWidth - 6; // 3px padding on each side
-                final posterHeight = useWideLayout
-                    ? posterWidth *
-                          (9 / 16) // 16:9 for wide layout
-                    : posterWidth * 1.5; // 2:3 for poster layout
+                  // Card dimensions based on hub type
+                  const wideCardMultiplier = 1.5;
+                  final cardWidth = useWideLayout ? baseCardWidth * wideCardMultiplier : baseCardWidth;
+                  final posterWidth = cardWidth - 6; // 3px padding on each side
+                  final posterHeight = useWideLayout
+                      ? posterWidth *
+                            (9 / 16) // 16:9 for wide layout
+                      : posterWidth * 1.5; // 2:3 for poster layout
 
-                final containerHeight = posterHeight + 48;
-                final focusBorderWidth = FocusTheme.focusBorderWidth;
-                final focusExtra = focusBorderWidth * 2; // border on both sides
-                _itemExtent = cardWidth + focusExtra + 4;
+                  final containerHeight = posterHeight + 33;
+                  final focusBorderWidth = FocusTheme.focusBorderWidth;
+                  final focusExtra = focusBorderWidth * 2; // border on both sides
+                  _itemExtent = cardWidth + focusExtra + 4;
 
-                return SizedBox(
-                  height: containerHeight + focusExtra + 4, // extra for scale + border top/bottom
-                  child: HorizontalScrollWithArrows(
-                    controller: _scrollController,
-                    builder: (scrollController) => ListView.builder(
-                      controller: scrollController,
-                      scrollDirection: Axis.horizontal,
-                      clipBehavior: Clip.none,
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                      itemCount: isKeyboardMode ? _totalItemCount : widget.hub.items.length,
-                      itemBuilder: (context, index) {
-                        final isItemFocused = hasFocus && index == _focusedIndex;
+                  return SizedBox(
+                    height: containerHeight + focusExtra + 4, // extra for scale + border top/bottom
+                    child: HorizontalScrollWithArrows(
+                      controller: _scrollController,
+                      builder: (scrollController) => ListView.builder(
+                        controller: scrollController,
+                        scrollDirection: Axis.horizontal,
+                        clipBehavior: Clip.none,
+                        padding: widget.inset
+                            ? const EdgeInsets.symmetric(vertical: 2)
+                            : const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                        itemCount: isKeyboardMode ? _totalItemCount : widget.hub.items.length,
+                        itemBuilder: (context, index) {
+                          final isItemFocused = hasFocus && index == _focusedIndex;
 
-                        // "View All" card at end
-                        if (index == widget.hub.items.length) {
-                          return Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 2),
-                            child: FocusBuilders.buildLockedFocusWrapper(
-                              context: context,
-                              isFocused: isItemFocused,
-                              onTap: () {
-                                _onItemTapped(index);
-                                _navigateToHubDetail(context);
-                              },
-                              child: SizedBox(
-                                width: 80,
-                                height: containerHeight - 10,
-                                child: Center(
-                                  child: Column(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      Icon(
-                                        Symbols.arrow_forward_rounded,
-                                        size: 32,
-                                        color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.7),
-                                      ),
-                                      const SizedBox(height: 4),
-                                      Text(
-                                        t.common.viewAll,
-                                        style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                          if (index == widget.hub.items.length) {
+                            return Padding(
+                              padding: widget.inset
+                                  ? const EdgeInsets.only(right: 4)
+                                  : const EdgeInsets.symmetric(horizontal: 2),
+                              child: FocusBuilders.buildLockedFocusWrapper(
+                                context: context,
+                                isFocused: isItemFocused,
+                                onTap: () {
+                                  _onItemTapped(index);
+                                  _navigateToHubDetail(context);
+                                },
+                                child: SizedBox(
+                                  width: 80,
+                                  height: containerHeight - 10,
+                                  child: Center(
+                                    child: Column(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        Icon(
+                                          Symbols.arrow_forward_rounded,
+                                          size: 32,
                                           color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.7),
                                         ),
-                                      ),
-                                    ],
+                                        const SizedBox(height: 4),
+                                        Text(
+                                          t.common.viewAll,
+                                          style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                                            color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.7),
+                                          ),
+                                        ),
+                                      ],
+                                    ),
                                   ),
                                 ),
                               ),
+                            );
+                          }
+
+                          final item = widget.hub.items[index];
+
+                          return Padding(
+                            padding: widget.inset
+                                ? const EdgeInsets.only(right: 4)
+                                : const EdgeInsets.symmetric(horizontal: 2),
+                            child: FocusBuilders.buildLockedFocusWrapper(
+                              context: context,
+                              isFocused: isItemFocused,
+                              onTap: () => _onItemTapped(index),
+                              onLongPress: () => _mediaCardKeys[index]?.currentState?.showContextMenu(),
+                              child: MediaCard(
+                                key: _getMediaCardKey(index),
+                                item: item,
+                                width: cardWidth,
+                                height: posterHeight,
+                                onRefresh: widget.onRefresh,
+                                onRemoveFromContinueWatching: widget.onRemoveFromContinueWatching,
+                                forceGridMode: true,
+                                isInContinueWatching: widget.isInContinueWatching,
+                                mixedHubContext: isMixedHub,
+                              ),
                             ),
                           );
-                        }
-
-                        final item = widget.hub.items[index];
-
-                        return Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 2),
-                          child: FocusBuilders.buildLockedFocusWrapper(
-                            context: context,
-                            isFocused: isItemFocused,
-                            onTap: () => _onItemTapped(index),
-                            onLongPress: () => _mediaCardKeys[index]?.currentState?.showContextMenu(),
-                            child: MediaCard(
-                              key: _getMediaCardKey(index),
-                              item: item,
-                              width: cardWidth,
-                              height: posterHeight,
-                              onRefresh: widget.onRefresh,
-                              onRemoveFromContinueWatching: widget.onRemoveFromContinueWatching,
-                              forceGridMode: true,
-                              isInContinueWatching: widget.isInContinueWatching,
-                              mixedHubContext: isMixedHub,
-                            ),
-                          ),
-                        );
-                      },
+                        },
+                      ),
                     ),
-                  ),
-                );
-              },
+                  );
+                },
+              ),
             ),
           )
         else
           Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            padding: widget.inset
+                ? const EdgeInsets.symmetric(vertical: 8)
+                : const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
             child: Text(
               t.messages.noItemsAvailable,
               style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Colors.grey),
@@ -506,12 +519,11 @@ class HubSectionState extends State<HubSection> {
     );
   }
 
-  /// Called when an item is tapped (mouse/touch)
   void _onItemTapped(int index) {
     setState(() {
       _focusedIndex = index;
     });
-    HubFocusMemory.setForHub(widget.hub.hubKey, index);
+    HubFocusMemory.setForHub(widget.hub.id, index);
     _hubFocusNode.requestFocus();
   }
 }

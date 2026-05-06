@@ -1,67 +1,36 @@
-/// Represents a contiguous buffered range in the demuxer cache.
 class BufferRange {
   final Duration start;
   final Duration end;
   const BufferRange({required this.start, required this.end});
 }
 
-/// Log level for player messages.
-enum PlayerLogLevel {
-  /// No logging.
-  none,
+/// [cause] is an optional machine-readable tag (e.g. `server-http-500`),
+/// letting the UI branch without parsing [message].
+class PlayerError {
+  /// Cause tag for a server-side HTTP 500 — shared-user bandwidth or
+  /// transcoding limit rejection set by the server owner.
+  static const String serverHttp500 = 'server-http-500';
 
-  /// Fatal errors only.
-  fatal,
+  final String message;
+  final String? cause;
+  const PlayerError(this.message, {this.cause});
 
-  /// Errors.
-  error,
-
-  /// Warnings.
-  warn,
-
-  /// Informational messages.
-  info,
-
-  /// Verbose output.
-  verbose,
-
-  /// Debug messages.
-  debug,
-
-  /// Trace-level output (very verbose).
-  trace,
+  @override
+  String toString() => message;
 }
 
-/// Represents an audio track in the media.
+enum PlayerLogLevel { none, fatal, error, warn, info, verbose, debug, trace }
+
 class AudioTrack {
-  /// Unique identifier for the track.
   final String id;
-
-  /// Human-readable title of the track.
   final String? title;
-
-  /// Language code (e.g., 'eng', 'jpn').
   final String? language;
-
-  /// Audio codec (e.g., 'aac', 'ac3', 'dts').
   final String? codec;
-
-  /// Number of audio channels.
   final int? channels;
-
-  /// Alias for channels (media_kit compatibility).
   int? get channelsCount => channels;
-
-  /// Sample rate in Hz.
   final int? sampleRate;
-
-  /// Bitrate in bits per second.
   final int? bitrate;
-
-  /// Whether this is the default track.
   final bool isDefault;
-
-  /// Whether this track is forced.
   final bool isForced;
 
   const AudioTrack({
@@ -76,13 +45,10 @@ class AudioTrack {
     this.isForced = false,
   });
 
-  /// Auto-select track.
   static const auto = AudioTrack(id: 'auto', title: 'Auto');
 
-  /// Disable audio.
   static const off = AudioTrack(id: 'no', title: 'Off');
 
-  /// Returns a display name for the track.
   String get displayName {
     if (title != null && title!.isNotEmpty) return title!;
     if (language != null && language!.isNotEmpty) return language!;
@@ -100,30 +66,14 @@ class AudioTrack {
   int get hashCode => id.hashCode;
 }
 
-/// Represents a subtitle track in the media.
 class SubtitleTrack {
-  /// Unique identifier for the track.
   final String id;
-
-  /// Human-readable title of the track.
   final String? title;
-
-  /// Language code (e.g., 'eng', 'jpn').
   final String? language;
-
-  /// Subtitle codec/format (e.g., 'subrip', 'ass', 'pgs').
   final String? codec;
-
-  /// Whether this is the default track.
   final bool isDefault;
-
-  /// Whether this track is forced (e.g., for foreign language segments).
   final bool isForced;
-
-  /// Whether this is an external subtitle file.
   final bool isExternal;
-
-  /// URI of external subtitle file (if isExternal is true).
   final String? uri;
 
   const SubtitleTrack({
@@ -137,18 +87,14 @@ class SubtitleTrack {
     this.uri,
   });
 
-  /// Create a subtitle track from an external URI.
   factory SubtitleTrack.uri(String uri, {String? title, String? language}) {
     return SubtitleTrack(id: 'external:$uri', title: title, language: language, isExternal: true, uri: uri);
   }
 
-  /// Auto-select track.
   static const auto = SubtitleTrack(id: 'auto', title: 'Auto');
 
-  /// Disable subtitles.
   static const off = SubtitleTrack(id: 'no', title: 'Off');
 
-  /// Returns a display name for the track.
   String get displayName {
     if (title != null && title!.isNotEmpty) return title!;
     if (language != null && language!.isNotEmpty) return language!;
@@ -167,17 +113,12 @@ class SubtitleTrack {
   int get hashCode => id.hashCode;
 }
 
-/// Container for all available tracks in the media.
 class Tracks {
-  /// Available audio tracks.
   final List<AudioTrack> audio;
-
-  /// Available subtitle tracks.
   final List<SubtitleTrack> subtitle;
 
   const Tracks({this.audio = const [], this.subtitle = const []});
 
-  /// Creates a copy with the given fields replaced.
   Tracks copyWith({List<AudioTrack>? audio, List<SubtitleTrack>? subtitle}) {
     return Tracks(audio: audio ?? this.audio, subtitle: subtitle ?? this.subtitle);
   }
@@ -189,15 +130,9 @@ class Tracks {
 /// Sentinel value used to distinguish "not provided" from "explicitly set to null" in copyWith.
 const _sentinel = Object();
 
-/// Represents the currently selected tracks.
 class TrackSelection {
-  /// Currently selected audio track.
   final AudioTrack? audio;
-
-  /// Currently selected subtitle track.
   final SubtitleTrack? subtitle;
-
-  /// Currently selected secondary subtitle track (mpv secondary-sid).
   final SubtitleTrack? secondarySubtitle;
 
   const TrackSelection({this.audio, this.subtitle, this.secondarySubtitle});
@@ -218,17 +153,12 @@ class TrackSelection {
   String toString() => 'TrackSelection(audio: $audio, subtitle: $subtitle, secondarySubtitle: $secondarySubtitle)';
 }
 
-/// Represents an audio output device.
 class AudioDevice {
-  /// Unique identifier for the device.
   final String name;
-
-  /// Human-readable description of the device.
   final String description;
 
   const AudioDevice({required this.name, this.description = ''});
 
-  /// Default/auto audio device.
   static const auto = AudioDevice(name: 'auto', description: 'Auto');
 
   @override
@@ -242,15 +172,9 @@ class AudioDevice {
   int get hashCode => name.hashCode;
 }
 
-/// A log entry from the player.
 class PlayerLog {
-  /// The log level of this message.
   final PlayerLogLevel level;
-
-  /// The prefix/category of the log message (e.g., 'cplayer', 'ffmpeg').
   final String prefix;
-
-  /// The log message text.
   final String text;
 
   const PlayerLog({required this.level, required this.prefix, required this.text});
@@ -259,15 +183,9 @@ class PlayerLog {
   String toString() => '[$prefix] ${level.name}: $text';
 }
 
-/// Represents a media source for the player.
 class Media {
-  /// The URI of the media (file path, HTTP URL, etc.).
   final String uri;
-
-  /// Optional HTTP headers for network requests.
   final Map<String, String>? headers;
-
-  /// Optional start position for playback.
   final Duration? start;
 
   const Media(this.uri, {this.headers, this.start});

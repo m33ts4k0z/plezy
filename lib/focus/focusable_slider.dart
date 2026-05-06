@@ -4,11 +4,6 @@ import 'dpad_navigator.dart';
 import 'focusable_wrapper.dart';
 import 'input_mode_tracker.dart';
 
-/// A D-pad friendly slider that uses LEFT/RIGHT to adjust value
-/// and lets UP/DOWN pass through for focus traversal.
-///
-/// Hides the thumb in keyboard mode when not focused, matching
-/// the timeline slider pattern.
 class FocusableSlider extends StatefulWidget {
   final double value;
   final double min;
@@ -43,7 +38,7 @@ class _FocusableSliderState extends State<FocusableSlider> {
     return (widget.max - widget.min) * 0.05;
   }
 
-  KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
+  KeyEventResult _handleKeyEvent(FocusNode _, KeyEvent event) {
     final key = event.logicalKey;
     if (key.isLeftKey || key.isRightKey) {
       if (event.isActionable && widget.onChanged != null) {

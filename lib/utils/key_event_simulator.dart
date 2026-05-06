@@ -4,8 +4,8 @@ import 'package:flutter/widgets.dart';
 
 /// Shared utility for simulating key press events through the focus tree.
 ///
-/// Used by both [CompanionRemoteReceiver] and [GamepadService] to translate
-/// external input (remote commands, gamepad buttons) into focus-tree key events.
+/// Used by companion remotes, Apple TV touch input, and gamepad services to
+/// translate external input into focus-tree key events.
 void simulateKeyPress(LogicalKeyboardKey logicalKey) {
   SchedulerBinding.instance.addPostFrameCallback((_) {
     final focusNode = FocusManager.instance.primaryFocus;
@@ -19,7 +19,6 @@ void simulateKeyPress(LogicalKeyboardKey logicalKey) {
       timeStamp: Duration(milliseconds: DateTime.now().millisecondsSinceEpoch),
     );
 
-    // Walk up the focus tree dispatching the key event
     FocusNode? node = focusNode;
     KeyEventResult result = KeyEventResult.ignored;
 
@@ -30,7 +29,6 @@ void simulateKeyPress(LogicalKeyboardKey logicalKey) {
       node = node.parent;
     }
 
-    // Send key up event
     final keyUpEvent = KeyUpEvent(
       physicalKey: physicalKey,
       logicalKey: logicalKey,
@@ -62,6 +60,7 @@ PhysicalKeyboardKey _getPhysicalKey(LogicalKeyboardKey logicalKey) {
   if (logicalKey == LogicalKeyboardKey.arrowLeft) return PhysicalKeyboardKey.arrowLeft;
   if (logicalKey == LogicalKeyboardKey.arrowRight) return PhysicalKeyboardKey.arrowRight;
   if (logicalKey == LogicalKeyboardKey.enter) return PhysicalKeyboardKey.enter;
+  if (logicalKey == LogicalKeyboardKey.select) return PhysicalKeyboardKey.select;
   if (logicalKey == LogicalKeyboardKey.escape) return PhysicalKeyboardKey.escape;
   if (logicalKey == LogicalKeyboardKey.space) return PhysicalKeyboardKey.space;
   if (logicalKey == LogicalKeyboardKey.contextMenu) return PhysicalKeyboardKey.contextMenu;

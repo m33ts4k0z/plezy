@@ -52,10 +52,7 @@ class BackKeyCoordinator {
   }
 }
 
-/// Handle a BACK key press by running [onBack] on key up.
-///
-/// This consumes KeyDown/KeyRepeat to avoid duplicate actions from key repeat.
-/// Optionally suppresses stray KeyUp events delivered to the next route after a pop.
+/// Consumes KeyDown/KeyRepeat to avoid duplicate actions, runs [onBack] on KeyUp.
 KeyEventResult handleBackKeyAction(KeyEvent event, VoidCallback onBack) {
   if (!event.logicalKey.isBackKey) return KeyEventResult.ignored;
 
@@ -82,9 +79,22 @@ KeyEventResult handleBackKeyNavigation<T>(BuildContext context, KeyEvent event, 
   if (!Navigator.canPop(context)) {
     return KeyEventResult.ignored;
   }
+  // Don't handle back when a dialog/overlay is on top of our route —
+  // the overlay handles its own dismissal via DismissAction.
+  if (ModalRoute.of(context)?.isCurrent != true) {
+    return KeyEventResult.ignored;
+  }
   // Handle on KeyUpEvent to prevent double-pop when returning from child screens
   // (KeyDownEvent can be received by both the popping screen and the returned-to screen)
   return handleBackKeyAction(event, () => Navigator.pop(context, result));
+}
+
+/// Consumes all select-key events (down, repeat, up) so they don't reach
+/// platform-level handlers; fires [onActivate] on the initial KeyDown only.
+KeyEventResult handleOneShotSelect(KeyEvent event, VoidCallback onActivate) {
+  if (!event.logicalKey.isSelectKey) return KeyEventResult.ignored;
+  if (event is KeyDownEvent) onActivate();
+  return KeyEventResult.handled;
 }
 
 /// Creates a [FocusOnKeyEventCallback] that dispatches d-pad / arrow keys to
@@ -94,7 +104,8 @@ KeyEventResult handleBackKeyNavigation<T>(BuildContext context, KeyEvent event, 
 /// (passed through to the framework). Directions mapped to a callback
 /// automatically return [KeyEventResult.handled].
 ///
-/// Only [KeyDownEvent] and [KeyRepeatEvent] are handled (via [isActionable]).
+/// Directional keys repeat on [KeyRepeatEvent] (via [isActionable]).
+/// Select is one-shot: fires on [KeyDownEvent] only, consumes repeat and up.
 ///
 /// ```dart
 /// Focus(
@@ -115,6 +126,13 @@ FocusOnKeyEventCallback dpadKeyHandler({
   VoidCallback? onSelect,
 }) {
   return (FocusNode _, KeyEvent event) {
+    // Select: one-shot activation (no repeat), must run before isActionable
+    // filter so KeyUpEvent is also consumed.
+    if (onSelect != null) {
+      final result = handleOneShotSelect(event, onSelect);
+      if (result != KeyEventResult.ignored) return result;
+    }
+
     if (!event.isActionable) return KeyEventResult.ignored;
     final key = event.logicalKey;
 
@@ -132,10 +150,6 @@ FocusOnKeyEventCallback dpadKeyHandler({
     }
     if (key.isRightKey && onRight != null) {
       onRight();
-      return KeyEventResult.handled;
-    }
-    if (key.isSelectKey && onSelect != null) {
-      onSelect();
       return KeyEventResult.handled;
     }
 

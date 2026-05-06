@@ -1,8 +1,8 @@
 #include "mpv_player.h"
 
-#include <flutter_linux/flutter_linux.h>
-#include <epoxy/gl.h>
 #include <epoxy/egl.h>
+#include <epoxy/gl.h>
+#include <flutter_linux/flutter_linux.h>
 #include <gdk/gdk.h>
 #ifdef GDK_WINDOWING_X11
 #include <gdk/gdkx.h>
@@ -24,9 +24,7 @@ namespace mpv {
 
 MpvPlayer::MpvPlayer() {}
 
-MpvPlayer::~MpvPlayer() {
-  Dispose();
-}
+MpvPlayer::~MpvPlayer() { Dispose(); }
 
 bool MpvPlayer::Initialize() {
   if (mpv_) {
@@ -111,7 +109,7 @@ bool MpvPlayer::InitRenderContext() {
   }
 
   EGLint num_configs = 0;
-  EGLint config_attribs[] = { EGL_CONFIG_ID, config_id, EGL_NONE };
+  EGLint config_attribs[] = {EGL_CONFIG_ID, config_id, EGL_NONE};
   if (!eglChooseConfig(egl_display_, config_attribs, &config, 1, &num_configs) || num_configs == 0) {
     g_warning("MPV: Failed to get Flutter's EGL config");
     return false;
@@ -121,7 +119,8 @@ bool MpvPlayer::InitRenderContext() {
   // GL state pollution
   eglBindAPI(EGL_OPENGL_ES_API);
   EGLint context_attribs[] = {
-      EGL_CONTEXT_CLIENT_VERSION, 2,
+      EGL_CONTEXT_CLIENT_VERSION,
+      2,
       EGL_NONE,
   };
   egl_context_ = eglCreateContext(egl_display_, config, EGL_NO_CONTEXT, context_attribs);
@@ -142,8 +141,7 @@ bool MpvPlayer::InitRenderContext() {
   };
 
   mpv_render_param params[] = {
-      {MPV_RENDER_PARAM_API_TYPE,
-       const_cast<char*>(MPV_RENDER_API_TYPE_OPENGL)},
+      {MPV_RENDER_PARAM_API_TYPE, const_cast<char*>(MPV_RENDER_API_TYPE_OPENGL)},
       {MPV_RENDER_PARAM_OPENGL_INIT_PARAMS, &gl_init_params},
       {MPV_RENDER_PARAM_INVALID, nullptr},  // slot for X11/Wayland display
       {MPV_RENDER_PARAM_INVALID, nullptr},
@@ -170,8 +168,7 @@ bool MpvPlayer::InitRenderContext() {
   eglMakeCurrent(egl_display_, flutter_draw, flutter_read, flutter_context);
 
   if (err < 0) {
-    g_warning("MPV: mpv_render_context_create() failed: %s",
-              mpv_error_string(err));
+    g_warning("MPV: mpv_render_context_create() failed: %s", mpv_error_string(err));
     eglDestroyContext(egl_display_, egl_context_);
     egl_context_ = EGL_NO_CONTEXT;
     return false;
@@ -205,13 +202,25 @@ void MpvPlayer::Dispose() {
     event_callback_ = nullptr;
   }
 
-  // 4. Cancel pending async commands
+  // 4. Cancel pending async requests
+  std::vector<StatusCallback> status_callbacks;
+  std::vector<GetPropertyCallback> get_callbacks;
   {
-    std::lock_guard<std::mutex> cmd_lock(pending_commands_mutex_);
-    for (auto& pair : pending_commands_) {
-      if (pair.second) pair.second(-1);
+    std::lock_guard<std::mutex> request_lock(pending_requests_mutex_);
+    for (auto& pair : pending_status_requests_) {
+      if (pair.second) status_callbacks.push_back(std::move(pair.second));
     }
-    pending_commands_.clear();
+    for (auto& pair : pending_get_property_requests_) {
+      if (pair.second) get_callbacks.push_back(std::move(pair.second));
+    }
+    pending_status_requests_.clear();
+    pending_get_property_requests_.clear();
+  }
+  for (auto& callback : status_callbacks) {
+    callback(-1);
+  }
+  for (auto& callback : get_callbacks) {
+    callback(-1, "");
   }
 
   // 5. Remove pending idle callbacks
@@ -274,21 +283,9 @@ void MpvPlayer::Render(int width, int height, int fbo) {
   mpv_render_context_render(mpv_gl_, params);
 }
 
-void MpvPlayer::Command(const std::vector<std::string>& args) {
-  if (disposed_ || !mpv_) return;
+void MpvPlayer::Command(const std::vector<std::string>& args) { CommandAsync(args, nullptr); }
 
-  std::vector<const char*> c_args;
-  c_args.reserve(args.size() + 1);
-  for (const auto& arg : args) {
-    c_args.push_back(arg.c_str());
-  }
-  c_args.push_back(nullptr);
-
-  mpv_command(mpv_, c_args.data());
-}
-
-void MpvPlayer::CommandAsync(const std::vector<std::string>& args,
-                              CommandCallback callback) {
+void MpvPlayer::CommandAsync(const std::vector<std::string>& args, CommandCallback callback) {
   if (disposed_ || !mpv_) {
     if (callback) callback(0);
     return;
@@ -301,44 +298,83 @@ void MpvPlayer::CommandAsync(const std::vector<std::string>& args,
   }
   c_args.push_back(nullptr);
 
-  uint64_t request_id;
-  {
-    std::lock_guard<std::mutex> lock(pending_commands_mutex_);
-    request_id = next_reply_userdata_++;
-    pending_commands_[request_id] = std::move(callback);
-  }
+  uint64_t request_id = callback ? RegisterStatusRequest(std::move(callback)) : 0;
 
   int result = mpv_command_async(mpv_, request_id, c_args.data());
   if (result < 0) {
-    std::lock_guard<std::mutex> lock(pending_commands_mutex_);
-    auto it = pending_commands_.find(request_id);
-    if (it != pending_commands_.end()) {
-      auto cb = std::move(it->second);
-      pending_commands_.erase(it);
-      if (cb) cb(result);
-    }
+    auto cb = TakeStatusRequest(request_id);
+    if (cb) cb(result);
   }
 }
 
 void MpvPlayer::SetProperty(const std::string& name, const std::string& value) {
-  if (disposed_ || !mpv_) return;
-  mpv_set_property_string(mpv_, name.c_str(), value.c_str());
+  SetPropertyAsync(name, value, nullptr);
 }
 
-std::string MpvPlayer::GetProperty(const std::string& name) {
-  if (disposed_ || !mpv_) return "";
+void MpvPlayer::SetPropertyAsync(const std::string& name, const std::string& value, StatusCallback callback) {
+  if (disposed_ || !mpv_) {
+    if (callback) callback(0);
+    return;
+  }
 
-  char* value = mpv_get_property_string(mpv_, name.c_str());
-  if (!value) return "";
+  uint64_t request_id = callback ? RegisterStatusRequest(std::move(callback)) : 0;
 
-  std::string result(value);
-  mpv_free(value);
-  return result;
+  char* property_value = const_cast<char*>(value.c_str());
+  int result = mpv_set_property_async(mpv_, request_id, name.c_str(), MPV_FORMAT_STRING, &property_value);
+  if (result < 0) {
+    auto cb = TakeStatusRequest(request_id);
+    if (cb) cb(result);
+  }
 }
 
-void MpvPlayer::ObserveProperty(const std::string& name,
-                                const std::string& format,
-                                int id) {
+void MpvPlayer::GetPropertyAsync(const std::string& name, GetPropertyCallback callback) {
+  if (disposed_ || !mpv_) {
+    if (callback) callback(-1, "");
+    return;
+  }
+
+  uint64_t request_id = RegisterGetPropertyRequest(std::move(callback));
+
+  int result = mpv_get_property_async(mpv_, request_id, name.c_str(), MPV_FORMAT_STRING);
+  if (result < 0) {
+    auto cb = TakeGetPropertyRequest(request_id);
+    if (cb) cb(result, "");
+  }
+}
+
+uint64_t MpvPlayer::RegisterStatusRequest(StatusCallback callback) {
+  std::lock_guard<std::mutex> lock(pending_requests_mutex_);
+  uint64_t request_id = next_reply_userdata_++;
+  pending_status_requests_[request_id] = std::move(callback);
+  return request_id;
+}
+
+MpvPlayer::StatusCallback MpvPlayer::TakeStatusRequest(uint64_t request_id) {
+  std::lock_guard<std::mutex> lock(pending_requests_mutex_);
+  auto it = pending_status_requests_.find(request_id);
+  if (it == pending_status_requests_.end()) return nullptr;
+  auto callback = std::move(it->second);
+  pending_status_requests_.erase(it);
+  return callback;
+}
+
+uint64_t MpvPlayer::RegisterGetPropertyRequest(GetPropertyCallback callback) {
+  std::lock_guard<std::mutex> lock(pending_requests_mutex_);
+  uint64_t request_id = next_reply_userdata_++;
+  pending_get_property_requests_[request_id] = std::move(callback);
+  return request_id;
+}
+
+MpvPlayer::GetPropertyCallback MpvPlayer::TakeGetPropertyRequest(uint64_t request_id) {
+  std::lock_guard<std::mutex> lock(pending_requests_mutex_);
+  auto it = pending_get_property_requests_.find(request_id);
+  if (it == pending_get_property_requests_.end()) return nullptr;
+  auto callback = std::move(it->second);
+  pending_get_property_requests_.erase(it);
+  return callback;
+}
+
+void MpvPlayer::ObserveProperty(const std::string& name, const std::string& format, int id) {
   if (disposed_ || !mpv_) return;
 
   if (observed_properties_.find(name) != observed_properties_.end()) {
@@ -403,8 +439,7 @@ void MpvPlayer::OnMpvWakeup(void* ctx) {
         }
         return G_SOURCE_REMOVE;
       },
-      player,
-      nullptr);
+      player, nullptr);
 }
 
 void MpvPlayer::OnMpvRenderUpdate(void* ctx) {
@@ -453,17 +488,10 @@ bool MpvPlayer::ProcessEvents() {
 
 void MpvPlayer::HandleMpvEvent(mpv_event* event) {
   switch (event->event_id) {
-    case MPV_EVENT_COMMAND_REPLY: {
+    case MPV_EVENT_COMMAND_REPLY:
+    case MPV_EVENT_SET_PROPERTY_REPLY: {
       uint64_t request_id = event->reply_userdata;
-      CommandCallback callback;
-      {
-        std::lock_guard<std::mutex> lock(pending_commands_mutex_);
-        auto it = pending_commands_.find(request_id);
-        if (it != pending_commands_.end()) {
-          callback = std::move(it->second);
-          pending_commands_.erase(it);
-        }
-      }
+      StatusCallback callback = TakeStatusRequest(request_id);
       if (callback) {
         int error = event->error;
         g_idle_add(
@@ -477,17 +505,39 @@ void MpvPlayer::HandleMpvEvent(mpv_event* event) {
       }
       break;
     }
+    case MPV_EVENT_GET_PROPERTY_REPLY: {
+      uint64_t request_id = event->reply_userdata;
+      GetPropertyCallback callback = TakeGetPropertyRequest(request_id);
+      if (callback) {
+        int error = event->error;
+        std::string value;
+        if (error >= 0) {
+          auto* prop = static_cast<mpv_event_property*>(event->data);
+          if (prop && prop->format == MPV_FORMAT_STRING && prop->data) {
+            auto c_value = *static_cast<char**>(prop->data);
+            if (c_value) value = SanitizeUtf8(c_value);
+          }
+        }
+        g_idle_add(
+            [](gpointer data) -> gboolean {
+              auto* tuple = static_cast<std::tuple<GetPropertyCallback, int, std::string>*>(data);
+              const auto& callback = std::get<0>(*tuple);
+              if (callback) callback(std::get<1>(*tuple), std::get<2>(*tuple));
+              delete tuple;
+              return G_SOURCE_REMOVE;
+            },
+            new std::tuple<GetPropertyCallback, int, std::string>(std::move(callback), error, std::move(value)));
+      }
+      break;
+    }
     case MPV_EVENT_LOG_MESSAGE: {
       auto* msg = static_cast<mpv_event_log_message*>(event->data);
       g_message("MPV [%s] %s: %s", msg->level, msg->prefix, msg->text);
 
       FlValue* data = fl_value_new_map();
-      fl_value_set_string_take(data, "prefix",
-                               fl_value_new_string(SanitizeUtf8(msg->prefix).c_str()));
-      fl_value_set_string_take(data, "level",
-                               fl_value_new_string(SanitizeUtf8(msg->level).c_str()));
-      fl_value_set_string_take(data, "text",
-                               fl_value_new_string(SanitizeUtf8(msg->text).c_str()));
+      fl_value_set_string_take(data, "prefix", fl_value_new_string(SanitizeUtf8(msg->prefix).c_str()));
+      fl_value_set_string_take(data, "level", fl_value_new_string(SanitizeUtf8(msg->level).c_str()));
+      fl_value_set_string_take(data, "text", fl_value_new_string(SanitizeUtf8(msg->text).c_str()));
       SendEvent("log-message", data);
       fl_value_unref(data);
       break;
@@ -499,8 +549,7 @@ void MpvPlayer::HandleMpvEvent(mpv_event* event) {
 
       switch (prop->format) {
         case MPV_FORMAT_STRING:
-          node.u.string =
-              prop->data ? *static_cast<char**>(prop->data) : nullptr;
+          node.u.string = prop->data ? *static_cast<char**>(prop->data) : nullptr;
           break;
         case MPV_FORMAT_FLAG:
           node.u.flag = prop->data ? *static_cast<int*>(prop->data) : 0;
@@ -527,13 +576,11 @@ void MpvPlayer::HandleMpvEvent(mpv_event* event) {
     case MPV_EVENT_END_FILE: {
       auto* end = static_cast<mpv_event_end_file*>(event->data);
       FlValue* data = fl_value_new_map();
-      fl_value_set_string_take(data, "reason",
-                               fl_value_new_int(static_cast<int>(end->reason)));
+      fl_value_set_string_take(data, "reason", fl_value_new_int(static_cast<int>(end->reason)));
       if (end->reason == MPV_END_FILE_REASON_ERROR) {
-        fl_value_set_string_take(data, "error",
-                                 fl_value_new_int(static_cast<int>(end->error)));
-        fl_value_set_string_take(data, "message",
-                                 fl_value_new_string(SanitizeUtf8(mpv_error_string(end->error)).c_str()));
+        fl_value_set_string_take(data, "error", fl_value_new_int(static_cast<int>(end->error)));
+        fl_value_set_string_take(
+            data, "message", fl_value_new_string(SanitizeUtf8(mpv_error_string(end->error)).c_str()));
       }
       SendEvent("end-file", data);
       fl_value_unref(data);
@@ -578,9 +625,7 @@ FlValue* MpvPlayer::NodeToFlValue(mpv_node* node) {
     case MPV_FORMAT_NODE_MAP: {
       FlValue* map = fl_value_new_map();
       for (int i = 0; i < node->u.list->num; i++) {
-        fl_value_set_string_take(
-            map, node->u.list->keys[i],
-            NodeToFlValue(&node->u.list->values[i]));
+        fl_value_set_string_take(map, node->u.list->keys[i], NodeToFlValue(&node->u.list->values[i]));
       }
       return map;
     }

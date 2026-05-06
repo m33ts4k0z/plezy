@@ -3,14 +3,13 @@ import '../services/settings_service.dart' show LibraryDensity;
 import 'layout_constants.dart';
 import 'platform_detector.dart';
 
-/// Utility class for calculating consistent grid sizes across the app
 class GridSizeCalculator {
   static double _lerp(double min, double max, double t) => min + (max - min) * t;
 
   /// Calculates the maximum cross-axis extent for grid items based on screen size and density.
   /// [density] is an int 1–5 (1 = most compact, 5 = most comfortable).
   static double getMaxCrossAxisExtent(BuildContext context, int density) {
-    final screenWidth = MediaQuery.of(context).size.width;
+    final screenWidth = MediaQuery.sizeOf(context).width;
     final f = LibraryDensity.factor(density);
 
     if (PlatformDetector.isTV()) return _lerp(120, 220, f);
@@ -21,12 +20,8 @@ class GridSizeCalculator {
 
   /// Calculates the max cross-axis extent accounting for outer padding.
   /// [density] is an int 1–5.
-  static double getMaxCrossAxisExtentWithPadding(
-    BuildContext context,
-    int density,
-    double horizontalPadding,
-  ) {
-    final screenWidth = MediaQuery.of(context).size.width;
+  static double getMaxCrossAxisExtentWithPadding(BuildContext context, int density, double horizontalPadding) {
+    final screenWidth = MediaQuery.sizeOf(context).width;
     final availableWidth = screenWidth - horizontalPadding;
     final f = LibraryDensity.factor(density);
 
@@ -72,12 +67,10 @@ class GridSizeCalculator {
     return availableWidth / columns;
   }
 
-  /// Check if the given index is in the first row of a grid with given column count.
   static bool isFirstRow(int index, int columnCount) {
     return index < columnCount;
   }
 
-  /// Check if the given index is in the first column of a grid with given column count.
   static bool isFirstColumn(int index, int columnCount) {
     return index % columnCount == 0;
   }

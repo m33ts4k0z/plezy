@@ -1,19 +1,25 @@
 import 'package:flutter/material.dart';
 
-import '../../../models/plex_playback_quality.dart';
-import '../../../models/plex_media_version.dart';
-import '../../../models/plex_metadata.dart';
-import '../../../models/plex_media_info.dart';
-import '../../../models/plex_playback_session.dart';
+import '../../../media/media_item.dart';
+import '../../../media/media_version.dart';
+import '../../../media/media_source_info.dart';
+import '../../../models/transcode_quality_preset.dart';
 import '../../../mpv/mpv.dart';
 import '../../../services/shader_service.dart';
 
 /// Immutable configuration for track/chapter control widgets.
 class TrackControlsState {
-  final List<PlexMediaVersion> availableVersions;
+  final List<MediaVersion> availableVersions;
   final int selectedMediaIndex;
-  final List<PlexPlaybackQualityOption> availablePlaybackQualities;
-  final PlexPlaybackQualityOption? selectedPlaybackQuality;
+  final TranscodeQualityPreset selectedQualityPreset;
+  final bool serverSupportsTranscoding;
+  final bool isTranscoding;
+  final List<MediaAudioTrack> sourceAudioTracks;
+  final int? selectedAudioStreamId;
+
+  /// Total media duration in milliseconds. Used by the version/quality sheet
+  /// to show estimated file sizes per preset (bitrate × duration).
+  final int? sourceDurationMs;
   final int boxFitMode;
   final int audioSyncOffset;
   final int subtitleSyncOffset;
@@ -28,7 +34,8 @@ class TrackControlsState {
   final VoidCallback? onToggleFullscreen;
   final VoidCallback? onToggleAlwaysOnTop;
   final Function(int)? onSwitchVersion;
-  final Future<void> Function(PlexPlaybackQualityOption quality)? onPlaybackQualityChanged;
+  final ValueChanged<TranscodeQualityPreset>? onSwitchQualityPreset;
+  final ValueChanged<int>? onSwitchAudioStreamId;
   final Function(AudioTrack)? onAudioTrackChanged;
   final Function(SubtitleTrack)? onSubtitleTrackChanged;
   final Function(SubtitleTrack)? onSecondarySubtitleTrackChanged;
@@ -45,18 +52,26 @@ class TrackControlsState {
   final bool isLive;
   final bool subtitlesVisible;
   final bool showQueueButton;
-  final Function(PlexMetadata)? onQueueItemSelected;
+  final Function(MediaItem)? onQueueItemSelected;
   final String ratingKey;
   final String? mediaTitle;
   final Future<void> Function()? onSubtitleDownloaded;
-  final PlexMediaInfo? plexMediaInfo;
-  final PlexPlaybackSession? playbackSession;
+
+  /// Whether OpenSubtitles search is reachable for this server. The Plex
+  /// server proxies the OpenSubtitles plugin; Jellyfin doesn't expose an
+  /// equivalent. The track sheet hides the "Search subtitles" tile when
+  /// this is false.
+  final bool subtitleSearchSupported;
 
   const TrackControlsState({
     this.availableVersions = const [],
     this.selectedMediaIndex = 0,
-    this.availablePlaybackQualities = const [],
-    this.selectedPlaybackQuality,
+    this.selectedQualityPreset = TranscodeQualityPreset.original,
+    this.serverSupportsTranscoding = false,
+    this.isTranscoding = false,
+    this.sourceAudioTracks = const [],
+    this.selectedAudioStreamId,
+    this.sourceDurationMs,
     this.boxFitMode = 0,
     this.audioSyncOffset = 0,
     this.subtitleSyncOffset = 0,
@@ -71,7 +86,8 @@ class TrackControlsState {
     this.onToggleFullscreen,
     this.onToggleAlwaysOnTop,
     this.onSwitchVersion,
-    this.onPlaybackQualityChanged,
+    this.onSwitchQualityPreset,
+    this.onSwitchAudioStreamId,
     this.onAudioTrackChanged,
     this.onSubtitleTrackChanged,
     this.onSecondarySubtitleTrackChanged,
@@ -92,7 +108,6 @@ class TrackControlsState {
     this.ratingKey = '',
     this.mediaTitle,
     this.onSubtitleDownloaded,
-    this.plexMediaInfo,
-    this.playbackSession,
+    this.subtitleSearchSupported = true,
   });
 }

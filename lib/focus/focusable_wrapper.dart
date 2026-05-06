@@ -136,8 +136,8 @@ class _FocusableWrapperState extends State<FocusableWrapper> with SingleTickerPr
   bool _ownsNode = false;
   bool _isFocused = false;
 
-  late AnimationController _animationController;
-  late Animation<double> _scaleAnimation;
+  late final AnimationController _animationController;
+  late final Animation<double> _scaleAnimation;
 
   // Long-press detection for SELECT key
   Timer? _longPressTimer;
@@ -366,12 +366,8 @@ class _FocusableWrapperState extends State<FocusableWrapper> with SingleTickerPr
           _isSelectKeyDown = false;
           return KeyEventResult.handled;
         }
-      } else {
-        // Simple select handling without long-press
-        if (event is KeyDownEvent) {
-          widget.onSelect?.call();
-          return KeyEventResult.handled;
-        }
+      } else if (widget.onSelect != null) {
+        return handleOneShotSelect(event, widget.onSelect!);
       }
     }
 
@@ -430,7 +426,12 @@ class _FocusableWrapperState extends State<FocusableWrapper> with SingleTickerPr
     // Choose decoration based on useBackgroundFocus
     final decoration = widget.useBackgroundFocus
         ? FocusTheme.focusBackgroundDecoration(isFocused: showFocus, borderRadius: widget.borderRadius)
-        : FocusTheme.focusDecoration(context, isFocused: showFocus, borderRadius: widget.borderRadius, color: widget.focusColor);
+        : FocusTheme.focusDecoration(
+            context,
+            isFocused: showFocus,
+            borderRadius: widget.borderRadius,
+            color: widget.focusColor,
+          );
 
     Widget result = Focus(
       focusNode: _focusNode,

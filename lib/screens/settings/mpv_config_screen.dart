@@ -3,14 +3,17 @@ import 'package:flutter/services.dart';
 import 'package:plezy/widgets/app_icon.dart';
 import 'package:material_symbols_icons/symbols.dart';
 import '../../focus/dpad_navigator.dart';
+import '../../focus/focusable_text_field.dart';
 import '../../focus/key_event_utils.dart';
 import '../../i18n/strings.g.dart';
+import '../../mixins/controller_disposer_mixin.dart';
 import '../../models/mpv_config_models.dart';
-import '../../focus/focusable_button.dart';
 import '../../utils/dialogs.dart';
 import '../../utils/snackbar_helper.dart';
+import '../../mixins/settings_effect_mixin.dart';
 import '../../services/settings_service.dart';
 import '../../widgets/focused_scroll_scaffold.dart';
+import '../../widgets/settings_builder.dart';
 
 class MpvConfigScreen extends StatefulWidget {
   const MpvConfigScreen({super.key});
@@ -19,114 +22,57 @@ class MpvConfigScreen extends StatefulWidget {
   State<MpvConfigScreen> createState() => _MpvConfigScreenState();
 }
 
-class _MpvConfigScreenState extends State<MpvConfigScreen> {
-  late SettingsService _settingsService;
-  bool _isLoading = true;
+class _MpvConfigScreenState extends State<MpvConfigScreen> with SettingsEffectMixin, ControllerDisposerMixin {
+  SettingsService get _settingsService => SettingsService.instanceOrNull!;
 
-  late TextEditingController _textController;
+  late final TextEditingController _textController = createTextEditingController(
+    text: _settingsService.read(SettingsService.mpvConfigText),
+  );
   final _savePresetFocusNode = FocusNode();
   final _textFieldFocusNode = FocusNode();
-  List<MpvPreset> _presets = [];
 
   @override
   void initState() {
     super.initState();
-    _textController = TextEditingController();
-    _loadSettings();
+    // Sync the editor when the pref is mutated externally (e.g. loadMpvPreset).
+    // Skip when the listener fires for the same value the controller already
+    // holds — avoids fighting user-typed text mid-edit.
+    bindEffect<String>(SettingsService.mpvConfigText, (v) {
+      if (_textController.text != v) _textController.text = v;
+    }, fireImmediately: false);
   }
 
   @override
   void dispose() {
-    _textController.dispose();
     _savePresetFocusNode.dispose();
     _textFieldFocusNode.dispose();
     super.dispose();
   }
 
-  Future<void> _loadSettings() async {
-    _settingsService = await SettingsService.getInstance();
-
-    if (!mounted) return;
-    setState(() {
-      _textController.text = _settingsService.getMpvConfigText();
-      _presets = _settingsService.getMpvPresets();
-      _isLoading = false;
-    });
-  }
-
   Future<void> _saveText() async {
-    await _settingsService.setMpvConfigText(_textController.text);
+    await _settingsService.write(SettingsService.mpvConfigText, _textController.text);
   }
 
   Future<void> _showSavePresetDialog() async {
     if (_textController.text.trim().isEmpty) return;
 
-    final nameController = TextEditingController();
-    final saveFocusNode = FocusNode();
-
-    final result = await showDialog<bool>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: Text(t.mpvConfig.saveAsPreset),
-        content: TextField(
-          controller: nameController,
-          decoration: InputDecoration(labelText: t.mpvConfig.presetName, hintText: t.mpvConfig.presetNameHint),
-          autofocus: true,
-          textInputAction: TextInputAction.done,
-          onSubmitted: (_) => saveFocusNode.requestFocus(),
-        ),
-        actions: [
-          FocusableButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: TextButton(onPressed: () => Navigator.pop(context, false), child: Text(t.common.cancel)),
-          ),
-          FocusableButton(
-            focusNode: saveFocusNode,
-            onPressed: () {
-              if (nameController.text.isNotEmpty) {
-                Navigator.pop(context, true);
-              }
-            },
-            child: FilledButton(
-              onPressed: () {
-                if (nameController.text.isNotEmpty) {
-                  Navigator.pop(context, true);
-                }
-              },
-              child: Text(t.common.save),
-            ),
-          ),
-        ],
-      ),
+    final name = await showTextInputDialog(
+      context,
+      title: t.mpvConfig.saveAsPreset,
+      labelText: t.mpvConfig.presetName,
+      hintText: t.mpvConfig.presetNameHint,
     );
 
-    saveFocusNode.dispose();
-
-    if (result == true) {
-      await _settingsService.saveMpvPreset(nameController.text.trim(), _textController.text);
-      if (!mounted) return;
-      setState(() {
-        _presets = _settingsService.getMpvPresets();
-      });
-
-      if (mounted) {
-        showSuccessSnackBar(context, t.mpvConfig.presetSaved);
-      }
+    if (name != null && name.trim().isNotEmpty) {
+      await _settingsService.saveMpvPreset(name.trim(), _textController.text);
+      if (mounted) showSuccessSnackBar(context, t.mpvConfig.presetSaved);
     }
-
-    nameController.dispose();
   }
 
   Future<void> _loadPreset(MpvPreset preset) async {
     await _settingsService.loadMpvPreset(preset.name);
-    if (!mounted) return;
-    setState(() {
-      _textController.text = _settingsService.getMpvConfigText();
-    });
-
-    if (mounted) {
-      showAppSnackBar(context, t.mpvConfig.presetLoaded);
-    }
+    // Controller text is updated reactively via the bindEffect above.
+    if (mounted) showAppSnackBar(context, t.mpvConfig.presetLoaded);
   }
 
   Future<void> _deletePreset(MpvPreset preset) async {
@@ -135,18 +81,9 @@ class _MpvConfigScreenState extends State<MpvConfigScreen> {
       title: t.mpvConfig.deletePreset,
       message: t.mpvConfig.confirmDeletePreset,
     );
-
-    if (confirmed) {
-      await _settingsService.deleteMpvPreset(preset.name);
-      if (!mounted) return;
-      setState(() {
-        _presets = _settingsService.getMpvPresets();
-      });
-
-      if (mounted) {
-        showSuccessSnackBar(context, t.mpvConfig.presetDeleted);
-      }
-    }
+    if (!confirmed) return;
+    await _settingsService.deleteMpvPreset(preset.name);
+    if (mounted) showSuccessSnackBar(context, t.mpvConfig.presetDeleted);
   }
 
   @override
@@ -165,21 +102,19 @@ class _MpvConfigScreenState extends State<MpvConfigScreen> {
       },
       child: FocusedScrollScaffold(
         title: Text(t.screens.mpvConfig),
-        slivers: _isLoading
-            ? [const SliverFillRemaining(child: Center(child: CircularProgressIndicator()))]
-            : [
-                SliverPadding(
-                  padding: const EdgeInsets.all(16),
-                  sliver: SliverList(
-                    delegate: SliverChildListDelegate([
-                      _buildConfigEditor(),
-                      const SizedBox(height: 16),
-                      _buildPresetsCard(),
-                      const SizedBox(height: 24),
-                    ]),
-                  ),
-                ),
-              ],
+        slivers: [
+          SliverPadding(
+            padding: const EdgeInsets.all(16),
+            sliver: SliverList(
+              delegate: SliverChildListDelegate([
+                _buildConfigEditor(),
+                const SizedBox(height: 16),
+                _buildPresetsCard(),
+                const SizedBox(height: 24),
+              ]),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -204,8 +139,7 @@ class _MpvConfigScreenState extends State<MpvConfigScreen> {
         // We must consume Enter to prevent parent handlers from unfocusing,
         // but that also blocks Flutter's text editing shortcuts (which are
         // higher in the focus tree). So we manually insert newlines here.
-        if (event.logicalKey == LogicalKeyboardKey.enter ||
-            event.logicalKey == LogicalKeyboardKey.numpadEnter) {
+        if (event.logicalKey == LogicalKeyboardKey.enter || event.logicalKey == LogicalKeyboardKey.numpadEnter) {
           if (event is KeyDownEvent || event is KeyRepeatEvent) {
             final sel = _textController.selection;
             if (sel.isValid) {
@@ -224,17 +158,17 @@ class _MpvConfigScreenState extends State<MpvConfigScreen> {
         }
         if (event.logicalKey.isDownKey && event.isActionable) {
           final sel = _textController.selection;
-          if (sel.isValid &&
-              _textController.text.indexOf('\n', sel.extentOffset) == -1) {
+          if (sel.isValid && _textController.text.indexOf('\n', sel.extentOffset) == -1) {
             _savePresetFocusNode.requestFocus();
             return KeyEventResult.handled;
           }
         }
         return KeyEventResult.ignored;
       },
-      child: TextField(
+      child: FocusableTextField(
         controller: _textController,
         focusNode: _textFieldFocusNode,
+        keyboardType: TextInputType.multiline,
         maxLines: null,
         minLines: 12,
         decoration: InputDecoration(
@@ -249,57 +183,60 @@ class _MpvConfigScreenState extends State<MpvConfigScreen> {
   }
 
   Widget _buildPresetsCard() {
-    return Card(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: const EdgeInsets.all(16),
-            child: Text(
-              t.mpvConfig.presets,
-              style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
-            ),
-          ),
-          ListTile(
-            focusNode: _savePresetFocusNode,
-            leading: const AppIcon(Symbols.save_rounded, fill: 1),
-            title: Text(t.mpvConfig.saveAsPreset),
-            enabled: _textController.text.trim().isNotEmpty,
-            onTap: _textController.text.trim().isNotEmpty ? _showSavePresetDialog : null,
-          ),
-          if (_presets.isNotEmpty) ...[
-            const Divider(),
-            ..._presets.map(
-              (preset) => ListTile(
-                leading: const AppIcon(Symbols.folder_rounded, fill: 1),
-                title: Text(preset.name),
-                trailing: PopupMenuButton<String>(
-                  onSelected: (value) {
-                    if (value == 'load') {
-                      _loadPreset(preset);
-                    } else if (value == 'delete') {
-                      _deletePreset(preset);
-                    }
-                  },
-                  itemBuilder: (context) => [
-                    PopupMenuItem(value: 'load', child: Text(t.mpvConfig.loadPreset)),
-                    PopupMenuItem(value: 'delete', child: Text(t.mpvConfig.deletePreset)),
-                  ],
-                ),
-                onTap: () => _loadPreset(preset),
-              ),
-            ),
-          ] else
+    return SettingValueBuilder<List<MpvPreset>>(
+      pref: SettingsService.mpvPresets,
+      builder: (context, presets, _) => Card(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
             Padding(
-              padding: const EdgeInsets.only(left: 16, right: 16, bottom: 16),
+              padding: const EdgeInsets.all(16),
               child: Text(
-                t.mpvConfig.noPresets,
-                style: Theme.of(
-                  context,
-                ).textTheme.bodyMedium?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant),
+                t.mpvConfig.presets,
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
               ),
             ),
-        ],
+            ListTile(
+              focusNode: _savePresetFocusNode,
+              leading: const AppIcon(Symbols.save_rounded, fill: 1),
+              title: Text(t.mpvConfig.saveAsPreset),
+              enabled: _textController.text.trim().isNotEmpty,
+              onTap: _textController.text.trim().isNotEmpty ? _showSavePresetDialog : null,
+            ),
+            if (presets.isNotEmpty) ...[
+              const Divider(),
+              ...presets.map(
+                (preset) => ListTile(
+                  leading: const AppIcon(Symbols.folder_rounded, fill: 1),
+                  title: Text(preset.name),
+                  trailing: PopupMenuButton<String>(
+                    onSelected: (value) {
+                      if (value == 'load') {
+                        _loadPreset(preset);
+                      } else if (value == 'delete') {
+                        _deletePreset(preset);
+                      }
+                    },
+                    itemBuilder: (context) => [
+                      PopupMenuItem(value: 'load', child: Text(t.mpvConfig.loadPreset)),
+                      PopupMenuItem(value: 'delete', child: Text(t.mpvConfig.deletePreset)),
+                    ],
+                  ),
+                  onTap: () => _loadPreset(preset),
+                ),
+              ),
+            ] else
+              Padding(
+                padding: const EdgeInsets.only(left: 16, right: 16, bottom: 16),
+                child: Text(
+                  t.mpvConfig.noPresets,
+                  style: Theme.of(
+                    context,
+                  ).textTheme.bodyMedium?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant),
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }

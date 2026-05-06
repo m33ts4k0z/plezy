@@ -1,18 +1,16 @@
-import 'dart:io' show Platform;
-
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/symbols.dart';
 
+import '../../../media/media_source_info.dart';
 import '../../../mpv/mpv.dart';
 import '../../../i18n/strings.g.dart';
-import '../../../models/plex_media_info.dart';
-import '../../../models/plex_playback_session.dart';
 import '../../../utils/scroll_utils.dart';
 import '../../../utils/track_label_builder.dart';
 import '../../../widgets/app_icon.dart';
 import '../../../widgets/focusable_list_tile.dart';
 import '../../../widgets/overlay_sheet.dart';
 import 'base_video_control_sheet.dart';
+import 'sheet_column_header.dart';
 import 'subtitle_search_sheet.dart';
 import '../helpers/track_filter_helper.dart';
 import '../helpers/track_selection_helper.dart';
@@ -27,8 +25,20 @@ class TrackSheet extends StatelessWidget {
   final Function(AudioTrack)? onAudioTrackChanged;
   final Function(SubtitleTrack)? onSubtitleTrackChanged;
   final Function(SubtitleTrack)? onSecondarySubtitleTrackChanged;
-  final PlexMediaInfo? plexMediaInfo;
-  final PlexPlaybackSession? playbackSession;
+
+  /// When true, the audio column renders the Plex [sourceAudioTracks] list
+  /// and taps are routed to [onSwitchAudioStreamId] instead of using the
+  /// player's in-stream audio selection (the transcoded stream only has one
+  /// audio track).
+  final bool isTranscoding;
+  final List<MediaAudioTrack> sourceAudioTracks;
+  final int? selectedAudioStreamId;
+  final ValueChanged<int>? onSwitchAudioStreamId;
+
+  /// Whether OpenSubtitles search is supported by the active server. Plex
+  /// proxies the OpenSubtitles plugin; Jellyfin doesn't expose an
+  /// equivalent today.
+  final bool subtitleSearchSupported;
 
   const TrackSheet({
     super.key,
@@ -40,8 +50,11 @@ class TrackSheet extends StatelessWidget {
     this.onAudioTrackChanged,
     this.onSubtitleTrackChanged,
     this.onSecondarySubtitleTrackChanged,
-    this.plexMediaInfo,
-    this.playbackSession,
+    this.isTranscoding = false,
+    this.sourceAudioTracks = const [],
+    this.selectedAudioStreamId,
+    this.onSwitchAudioStreamId,
+    this.subtitleSearchSupported = true,
   });
 
   @override
@@ -51,19 +64,16 @@ class TrackSheet extends StatelessWidget {
       initialData: player.state.tracks,
       builder: (context, tracksSnapshot) {
         final tracks = tracksSnapshot.data;
-        final usePlexTrackFallback =
-            Platform.isWindows && playbackSession?.usesTranscodeEndpoint == true && plexMediaInfo != null;
-        final audioTracks = usePlexTrackFallback
-            ? _buildFallbackAudioTracks(plexMediaInfo!)
-            : TrackFilterHelper.extractAndFilterTracks<AudioTrack>(tracks, (t) => t?.audio ?? []);
-        final subtitleTracks = usePlexTrackFallback
-            ? _buildFallbackSubtitleTracks(plexMediaInfo!)
-            : TrackFilterHelper.extractAndFilterTracks<SubtitleTrack>(tracks, (t) => t?.subtitle ?? []);
+        final playerAudioTracks = TrackFilterHelper.extractAndFilterTracks<AudioTrack>(tracks, (t) => t?.audio ?? []);
+        final subtitleTracks = TrackFilterHelper.extractAndFilterTracks<SubtitleTrack>(
+          tracks,
+          (t) => t?.subtitle ?? [],
+        );
 
-        final showAudio = audioTracks.length > 1;
+        final useSourceAudio = isTranscoding && sourceAudioTracks.length > 1 && onSwitchAudioStreamId != null;
+        final showAudio = useSourceAudio || playerAudioTracks.length > 1;
         final showSubtitles = subtitleTracks.isNotEmpty;
 
-        // Determine title/icon based on what's shown
         final String title;
         final IconData icon;
         if (showAudio && showSubtitles) {
@@ -82,30 +92,35 @@ class TrackSheet extends StatelessWidget {
           icon: icon,
           child: StreamBuilder<TrackSelection>(
             stream: player.streams.track,
-            initialData: usePlexTrackFallback ? _buildFallbackSelection(plexMediaInfo!) : player.state.track,
+            initialData: player.state.track,
             builder: (context, selSnapshot) {
-              final selection = usePlexTrackFallback
-                  ? _buildFallbackSelection(plexMediaInfo!)
-                  : (selSnapshot.data ?? player.state.track);
+              final selection = selSnapshot.data ?? player.state.track;
 
-              final supportsSecondary = !usePlexTrackFallback && player.supportsSecondarySubtitles;
+              final supportsSecondary = player.supportsSecondarySubtitles;
+
+              Widget audioColumnFor(TrackSelection sel, bool showHeader) {
+                if (useSourceAudio) {
+                  return _SourceAudioColumn(
+                    tracks: sourceAudioTracks,
+                    selectedStreamId: selectedAudioStreamId,
+                    onSelected: onSwitchAudioStreamId!,
+                    showHeader: showHeader,
+                  );
+                }
+                return _AudioColumn(
+                  tracks: playerAudioTracks,
+                  selection: sel,
+                  player: player,
+                  onTrackChanged: onAudioTrackChanged,
+                  showHeader: showHeader,
+                );
+              }
 
               if (showAudio && showSubtitles) {
                 return Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Expanded(
-                      child: FocusTraversalGroup(
-                        child: _AudioColumn(
-                          tracks: audioTracks,
-                          selection: selection,
-                          player: player,
-                          onTrackChanged: onAudioTrackChanged,
-                          usePlexTrackFallback: usePlexTrackFallback,
-                          showHeader: true,
-                        ),
-                      ),
-                    ),
+                    Expanded(child: FocusTraversalGroup(child: audioColumnFor(selection, true))),
                     VerticalDivider(width: 1, color: Theme.of(context).dividerColor),
                     Expanded(
                       child: FocusTraversalGroup(
@@ -120,8 +135,8 @@ class TrackSheet extends StatelessWidget {
                           onTrackChanged: onSubtitleTrackChanged,
                           onSecondaryTrackChanged: onSecondarySubtitleTrackChanged,
                           supportsSecondary: supportsSecondary,
-                          usePlexTrackFallback: usePlexTrackFallback,
                           showHeader: true,
+                          subtitleSearchSupported: subtitleSearchSupported,
                         ),
                       ),
                     ),
@@ -130,14 +145,7 @@ class TrackSheet extends StatelessWidget {
               }
 
               if (showAudio) {
-                return _AudioColumn(
-                  tracks: audioTracks,
-                  selection: selection,
-                  player: player,
-                  onTrackChanged: onAudioTrackChanged,
-                  usePlexTrackFallback: usePlexTrackFallback,
-                  showHeader: false,
-                );
+                return audioColumnFor(selection, false);
               }
 
               return _SubtitleColumn(
@@ -151,8 +159,8 @@ class TrackSheet extends StatelessWidget {
                 onTrackChanged: onSubtitleTrackChanged,
                 onSecondaryTrackChanged: onSecondarySubtitleTrackChanged,
                 supportsSecondary: supportsSecondary,
-                usePlexTrackFallback: usePlexTrackFallback,
                 showHeader: false,
+                subtitleSearchSupported: subtitleSearchSupported,
               );
             },
           ),
@@ -160,77 +168,64 @@ class TrackSheet extends StatelessWidget {
       },
     );
   }
+}
 
-  static List<AudioTrack> _buildFallbackAudioTracks(PlexMediaInfo mediaInfo) {
-    return mediaInfo.audioTracks
-        .map(
-          (track) => AudioTrack(
-            id: 'plex-audio:${track.id}',
-            title: track.displayTitle ?? track.title,
-            language: track.languageCode ?? track.language,
-            codec: track.codec,
-            channels: track.channels,
-            isDefault: track.selected,
-          ),
-        )
-        .toList();
+class _SourceAudioColumn extends StatefulWidget {
+  final List<MediaAudioTrack> tracks;
+  final int? selectedStreamId;
+  final ValueChanged<int> onSelected;
+  final bool showHeader;
+
+  const _SourceAudioColumn({
+    required this.tracks,
+    required this.selectedStreamId,
+    required this.onSelected,
+    required this.showHeader,
+  });
+
+  @override
+  State<_SourceAudioColumn> createState() => _SourceAudioColumnState();
+}
+
+class _SourceAudioColumnState extends State<_SourceAudioColumn> {
+  final _initialScroll = InitialItemScrollController();
+
+  @override
+  void dispose() {
+    _initialScroll.dispose();
+    super.dispose();
   }
 
-  static List<SubtitleTrack> _buildFallbackSubtitleTracks(PlexMediaInfo mediaInfo) {
-    return mediaInfo.subtitleTracks
-        .map(
-          (track) => SubtitleTrack(
-            id: 'plex-subtitle:${track.id}',
-            title: track.displayTitle ?? track.title,
-            language: track.languageCode ?? track.language,
-            codec: track.codec,
-            isDefault: track.selected,
-            isForced: track.forced,
-            isExternal: track.isExternal,
+  @override
+  Widget build(BuildContext context) {
+    final selectedId = widget.selectedStreamId;
+    final selectedIndex = selectedId == null ? null : widget.tracks.indexWhere((t) => t.id == selectedId);
+    _initialScroll.maybeScrollTo(selectedIndex);
+
+    return Column(
+      children: [
+        if (widget.showHeader) SheetColumnHeader(label: t.videoControls.audioLabel),
+        Expanded(
+          child: ListView.builder(
+            controller: _initialScroll.controller,
+            itemCount: widget.tracks.length,
+            itemBuilder: (context, index) {
+              final track = widget.tracks[index];
+              final isSelected = track.id == selectedId;
+              return TrackSelectionHelper.buildTrackTile<AudioTrack>(
+                context: context,
+                key: index == 0 ? _initialScroll.firstItemKey : null,
+                label: track.label,
+                isSelected: isSelected,
+                onTap: () {
+                  OverlaySheetController.of(context).close();
+                  widget.onSelected(track.id);
+                },
+              );
+            },
           ),
-        )
-        .toList();
-  }
-
-  static TrackSelection _buildFallbackSelection(PlexMediaInfo mediaInfo) {
-    PlexAudioTrack? selectedAudio;
-    for (final track in mediaInfo.audioTracks) {
-      if (track.selected) {
-        selectedAudio = track;
-        break;
-      }
-    }
-
-    PlexSubtitleTrack? selectedSubtitle;
-    for (final track in mediaInfo.subtitleTracks) {
-      if (track.selected) {
-        selectedSubtitle = track;
-        break;
-      }
-    }
-
-    return TrackSelection(
-      audio: selectedAudio == null
-          ? null
-          : AudioTrack(
-              id: 'plex-audio:${selectedAudio.id}',
-              title: selectedAudio.displayTitle ?? selectedAudio.title,
-              language: selectedAudio.languageCode ?? selectedAudio.language,
-              codec: selectedAudio.codec,
-              channels: selectedAudio.channels,
-              isDefault: true,
-            ),
-      subtitle: selectedSubtitle == null
-          ? SubtitleTrack.off
-          : SubtitleTrack(
-              id: 'plex-subtitle:${selectedSubtitle.id}',
-              title: selectedSubtitle.displayTitle ?? selectedSubtitle.title,
-              language: selectedSubtitle.languageCode ?? selectedSubtitle.language,
-              codec: selectedSubtitle.codec,
-              isDefault: true,
-              isForced: selectedSubtitle.forced,
-              isExternal: selectedSubtitle.isExternal,
-            ),
+        ),
+      ],
     );
   }
 }
@@ -240,7 +235,6 @@ class _AudioColumn extends StatefulWidget {
   final TrackSelection selection;
   final Player player;
   final Function(AudioTrack)? onTrackChanged;
-  final bool usePlexTrackFallback;
   final bool showHeader;
 
   const _AudioColumn({
@@ -248,7 +242,6 @@ class _AudioColumn extends StatefulWidget {
     required this.selection,
     required this.player,
     this.onTrackChanged,
-    required this.usePlexTrackFallback,
     required this.showHeader,
   });
 
@@ -257,34 +250,26 @@ class _AudioColumn extends StatefulWidget {
 }
 
 class _AudioColumnState extends State<_AudioColumn> {
-  final _firstItemKey = GlobalKey();
-  final _scrollController = ScrollController();
-  bool _didInitialScroll = false;
+  final _initialScroll = InitialItemScrollController();
 
   @override
   void dispose() {
-    _scrollController.dispose();
+    _initialScroll.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     final selectedId = widget.selection.audio?.id ?? '';
-
-    if (!_didInitialScroll) {
-      final selectedIndex = widget.tracks.indexWhere((t) => t.id == selectedId);
-      if (selectedIndex > 0) {
-        _didInitialScroll = true;
-        scrollToCurrentItem(_scrollController, _firstItemKey, selectedIndex);
-      }
-    }
+    final selectedIndex = widget.tracks.indexWhere((t) => t.id == selectedId);
+    _initialScroll.maybeScrollTo(selectedIndex);
 
     return Column(
       children: [
-        if (widget.showHeader) _ColumnHeader(label: t.videoControls.audioLabel),
+        if (widget.showHeader) SheetColumnHeader(label: t.videoControls.audioLabel),
         Expanded(
           child: ListView.builder(
-            controller: _scrollController,
+            controller: _initialScroll.controller,
             itemCount: widget.tracks.length,
             itemBuilder: (context, index) {
               final track = widget.tracks[index];
@@ -297,13 +282,11 @@ class _AudioColumnState extends State<_AudioColumn> {
               );
               return TrackSelectionHelper.buildTrackTile<AudioTrack>(
                 context: context,
-                key: index == 0 ? _firstItemKey : null,
+                key: index == 0 ? _initialScroll.firstItemKey : null,
                 label: label,
                 isSelected: track.id == selectedId,
                 onTap: () {
-                  if (!widget.usePlexTrackFallback) {
-                    widget.player.selectAudioTrack(track);
-                  }
+                  widget.player.selectAudioTrack(track);
                   widget.onTrackChanged?.call(track);
                   OverlaySheetController.of(context).close();
                 },
@@ -327,8 +310,8 @@ class _SubtitleColumn extends StatefulWidget {
   final Function(SubtitleTrack)? onTrackChanged;
   final Function(SubtitleTrack)? onSecondaryTrackChanged;
   final bool supportsSecondary;
-  final bool usePlexTrackFallback;
   final bool showHeader;
+  final bool subtitleSearchSupported;
 
   const _SubtitleColumn({
     required this.tracks,
@@ -341,8 +324,8 @@ class _SubtitleColumn extends StatefulWidget {
     this.onTrackChanged,
     this.onSecondaryTrackChanged,
     this.supportsSecondary = false,
-    required this.usePlexTrackFallback,
     required this.showHeader,
+    this.subtitleSearchSupported = true,
   });
 
   @override
@@ -350,13 +333,11 @@ class _SubtitleColumn extends StatefulWidget {
 }
 
 class _SubtitleColumnState extends State<_SubtitleColumn> {
-  final _firstItemKey = GlobalKey();
-  final _scrollController = ScrollController();
-  bool _didInitialScroll = false;
+  final _initialScroll = InitialItemScrollController();
 
   @override
   void dispose() {
-    _scrollController.dispose();
+    _initialScroll.dispose();
     super.dispose();
   }
 
@@ -370,48 +351,39 @@ class _SubtitleColumnState extends State<_SubtitleColumn> {
     // +1 for "Off" row
     final itemCount = widget.tracks.length + 1;
 
-    if (!_didInitialScroll && !isOffSelected) {
-      // +1 because index 0 is the "Off" row
-      final selectedIndex = widget.tracks.indexWhere((t) => t.id == selectedSub.id) + 1;
-      if (selectedIndex > 0) {
-        _didInitialScroll = true;
-        scrollToCurrentItem(_scrollController, _firstItemKey, selectedIndex);
-      }
-    }
+    final selectedIndex = isOffSelected ? null : widget.tracks.indexWhere((t) => t.id == selectedSub.id) + 1;
+    _initialScroll.maybeScrollTo(selectedIndex);
 
     return Column(
       children: [
-        if (widget.showHeader) _ColumnHeader(label: t.videoControls.subtitlesLabel),
+        if (widget.showHeader) SheetColumnHeader(label: t.videoControls.subtitlesLabel),
         Expanded(
           child: ListView.builder(
-            controller: _scrollController,
+            controller: _initialScroll.controller,
             itemCount: itemCount,
             itemBuilder: (context, index) {
-              // "Off" row
               if (index == 0) {
                 return TrackSelectionHelper.buildOffTile<SubtitleTrack>(
                   context: context,
-                  key: _firstItemKey,
+                  key: _initialScroll.firstItemKey,
                   isSelected: isOffSelected,
                   onTap: () {
                     // Turning off primary also clears secondary
-                    if (!widget.usePlexTrackFallback && hasSecondary) {
+                    if (hasSecondary) {
                       widget.player.selectSecondarySubtitleTrack(SubtitleTrack.off);
                       widget.onSecondaryTrackChanged?.call(SubtitleTrack.off);
                     }
-                    if (!widget.usePlexTrackFallback) {
-                      widget.player.selectSubtitleTrack(SubtitleTrack.off);
-                    }
+                    widget.player.selectSubtitleTrack(SubtitleTrack.off);
                     widget.onTrackChanged?.call(SubtitleTrack.off);
                     OverlaySheetController.of(context).close();
                   },
-                  onLongPress: !widget.usePlexTrackFallback && widget.supportsSecondary && hasSecondary
+                  onLongPress: widget.supportsSecondary && hasSecondary
                       ? () {
                           widget.player.selectSecondarySubtitleTrack(SubtitleTrack.off);
                           widget.onSecondaryTrackChanged?.call(SubtitleTrack.off);
                         }
                       : null,
-                  onSecondaryTap: !widget.usePlexTrackFallback && widget.supportsSecondary && hasSecondary
+                  onSecondaryTap: widget.supportsSecondary && hasSecondary
                       ? () {
                           widget.player.selectSecondarySubtitleTrack(SubtitleTrack.off);
                           widget.onSecondaryTrackChanged?.call(SubtitleTrack.off);
@@ -430,7 +402,6 @@ class _SubtitleColumnState extends State<_SubtitleColumn> {
                 index: index - 1,
               );
 
-              // Determine badge
               Widget? badge;
               if (widget.supportsSecondary && hasSecondary) {
                 if (isPrimary) {
@@ -447,17 +418,15 @@ class _SubtitleColumnState extends State<_SubtitleColumn> {
                 badge: badge,
                 onTap: () {
                   // If tapping a track that is currently the secondary, clear secondary first
-                  if (!widget.usePlexTrackFallback && isSecondary) {
+                  if (isSecondary) {
                     widget.player.selectSecondarySubtitleTrack(SubtitleTrack.off);
                     widget.onSecondaryTrackChanged?.call(SubtitleTrack.off);
                   }
-                  if (!widget.usePlexTrackFallback) {
-                    widget.player.selectSubtitleTrack(track);
-                  }
+                  widget.player.selectSubtitleTrack(track);
                   widget.onTrackChanged?.call(track);
                   OverlaySheetController.of(context).close();
                 },
-                onLongPress: !widget.usePlexTrackFallback && widget.supportsSecondary
+                onLongPress: widget.supportsSecondary
                     ? () {
                         if (isSecondary) {
                           // Already secondary — clear it
@@ -470,7 +439,7 @@ class _SubtitleColumnState extends State<_SubtitleColumn> {
                         }
                       }
                     : null,
-                onSecondaryTap: !widget.usePlexTrackFallback && widget.supportsSecondary
+                onSecondaryTap: widget.supportsSecondary
                     ? () {
                         if (isSecondary) {
                           widget.player.selectSecondarySubtitleTrack(SubtitleTrack.off);
@@ -485,7 +454,7 @@ class _SubtitleColumnState extends State<_SubtitleColumn> {
             },
           ),
         ),
-        if (widget.ratingKey.isNotEmpty) ...[
+        if (widget.ratingKey.isNotEmpty && widget.subtitleSearchSupported) ...[
           Divider(height: 1, color: Theme.of(context).dividerColor),
           FocusableListTile(
             leading: const AppIcon(Symbols.search_rounded),
@@ -503,28 +472,6 @@ class _SubtitleColumnState extends State<_SubtitleColumn> {
           ),
         ],
       ],
-    );
-  }
-}
-
-class _ColumnHeader extends StatelessWidget {
-  final String label;
-
-  const _ColumnHeader({required this.label});
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-      child: Align(
-        alignment: Alignment.centerLeft,
-        child: Text(
-          label,
-          style: Theme.of(
-            context,
-          ).textTheme.titleSmall?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant),
-        ),
-      ),
     );
   }
 }

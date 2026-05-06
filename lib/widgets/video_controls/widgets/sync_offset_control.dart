@@ -54,13 +54,13 @@ class SyncOffsetControl extends StatefulWidget {
 
 class _SyncOffsetControlState extends State<SyncOffsetControl> {
   // Range constants
-  static const double _sliderMin = -5000; // ±5s for slider
-  static const double _sliderMax = 5000;
+  static const double _sliderMin = -60000; // ±60s for slider
+  static const double _sliderMax = 60000;
   static const double _absoluteMin = -60000; // ±60s absolute limit
   static const double _absoluteMax = 60000;
   static const double _tapStep = 100; // 100ms per tap
   static const double _longPressStep = 1000; // 1s per long-press tick
-  static const int _sliderDivisions = 200; // 50ms steps for ±5s range
+  static const int _sliderDivisions = 240; // 500ms steps for ±60s range
 
   late double _currentOffset;
   Timer? _longPressTimer;
@@ -171,7 +171,10 @@ class _SyncOffsetControlState extends State<SyncOffsetControl> {
       child: Container(
         width: size,
         height: size,
-        decoration: BoxDecoration(color: Theme.of(context).colorScheme.surfaceContainerHighest, borderRadius: const BorderRadius.all(Radius.circular(8))),
+        decoration: BoxDecoration(
+          color: Theme.of(context).colorScheme.surfaceContainerHighest,
+          borderRadius: const BorderRadius.all(Radius.circular(8)),
+        ),
         child: Icon(icon, color: tokens(context).text, size: iconSize),
       ),
     );
@@ -200,7 +203,10 @@ class _SyncOffsetControlState extends State<SyncOffsetControl> {
         child: Container(
           width: 36,
           height: 36,
-          decoration: BoxDecoration(color: Theme.of(context).colorScheme.surfaceContainerHighest, borderRadius: const BorderRadius.all(Radius.circular(8))),
+          decoration: BoxDecoration(
+            color: Theme.of(context).colorScheme.surfaceContainerHighest,
+            borderRadius: const BorderRadius.all(Radius.circular(8)),
+          ),
           child: Icon(icon, color: tokens(context).text, size: 22),
         ),
       ),
@@ -300,10 +306,7 @@ class _SyncOffsetControlState extends State<SyncOffsetControl> {
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           // Current offset display
-          Text(
-            formatSyncOffset(_currentOffset),
-            style: const TextStyle(fontSize: 48, fontWeight: FontWeight.bold),
-          ),
+          Text(formatSyncOffset(_currentOffset), style: const TextStyle(fontSize: 48, fontWeight: FontWeight.bold)),
           const SizedBox(height: 8),
           Text(_getDescriptionText(), style: TextStyle(color: tokens(context).textMuted, fontSize: 16)),
           const SizedBox(height: 48),
@@ -319,7 +322,7 @@ class _SyncOffsetControlState extends State<SyncOffsetControl> {
               const SizedBox(width: 12),
               // Slider section
               Text(
-                t.videoControls.minusTime(amount: "5", unit: "s"),
+                t.videoControls.minusTime(amount: "60", unit: "s"),
                 style: TextStyle(color: tokens(context).textMuted),
               ),
               Expanded(
@@ -341,7 +344,7 @@ class _SyncOffsetControlState extends State<SyncOffsetControl> {
                 ),
               ),
               Text(
-                t.videoControls.addTime(amount: "5", unit: "s"),
+                t.videoControls.addTime(amount: "60", unit: "s"),
                 style: TextStyle(color: tokens(context).textMuted),
               ),
               const SizedBox(width: 12),
@@ -359,9 +362,7 @@ class _SyncOffsetControlState extends State<SyncOffsetControl> {
             onPressed: _currentOffset != 0 ? _resetOffset : null,
             icon: const AppIcon(Symbols.restart_alt_rounded, fill: 1),
             label: Text(t.videoControls.resetToZero),
-            style: ElevatedButton.styleFrom(
-              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-            ),
+            style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12)),
           ),
         ],
       ),

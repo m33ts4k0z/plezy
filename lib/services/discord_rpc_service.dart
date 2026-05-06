@@ -1,14 +1,15 @@
 import 'dart:async';
-import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:dart_discord_presence/dart_discord_presence.dart';
-import 'package:dio/dio.dart';
+import 'package:http/http.dart' as http;
 
-import '../models/plex_metadata.dart';
-import '../utils/http_client.dart';
+import '../media/media_item.dart';
+import '../media/media_kind.dart';
+import '../media/media_server_client.dart';
 import '../utils/app_logger.dart';
-import 'plex_client.dart';
+import '../utils/future_extensions.dart';
+import '../utils/platform_detector.dart';
+import '../utils/media_server_http_client.dart';
 import 'settings_service.dart';
 
 /// Cached Litterbox URL with expiry timestamp
@@ -29,7 +30,9 @@ class DiscordRPCService {
   static const String _applicationId = '1453773470306402439';
   static const String _litterboxUrl = 'https://litterbox.catbox.moe/resources/internals/api.php';
 
-  /// Cache of Plex thumbnail paths to Litterbox URLs with expiry (1 hour)
+  /// Cache of thumbnail paths to Litterbox URLs with expiry (1 hour). Keyed
+  /// by `<backendId>:<thumbPath>` so the same path on different backends
+  /// doesn't collide.
   static final Map<String, _CachedUrl> _litterboxCache = {};
 
   static DiscordRPCService? _instance;
@@ -42,8 +45,8 @@ class DiscordRPCService {
   bool _isConnected = false;
   bool _isEnabled = false;
   bool _isInitialized = false;
-  PlexMetadata? _currentMetadata;
-  PlexClient? _currentClient;
+  MediaItem? _currentMetadata;
+  MediaServerClient? _currentClient;
   String? _cachedThumbnailUrl;
   DateTime? _playbackStartTime;
   Duration? _mediaDuration;
@@ -57,9 +60,8 @@ class DiscordRPCService {
 
   DiscordRPCService._();
 
-  /// Check if Discord RPC is available on this platform
   static bool get isAvailable {
-    if (!Platform.isMacOS && !Platform.isWindows && !Platform.isLinux) {
+    if (!PlatformDetector.isDesktopOS()) {
       return false;
     }
     return DiscordRPC.isAvailable;
@@ -76,14 +78,13 @@ class DiscordRPCService {
     _isInitialized = true;
 
     final settings = await SettingsService.getInstance();
-    _isEnabled = settings.getEnableDiscordRPC();
+    _isEnabled = settings.read(SettingsService.enableDiscordRPC);
 
     if (_isEnabled) {
       await _connect();
     }
   }
 
-  /// Enable or disable Discord RPC
   Future<void> setEnabled(bool enabled) async {
     if (_isEnabled == enabled) return;
 
@@ -100,19 +101,21 @@ class DiscordRPCService {
     }
   }
 
-  /// Start showing presence for media playback
-  Future<void> startPlayback(PlexMetadata metadata, PlexClient client) async {
+  /// Start showing presence for media playback. Works for any backend —
+  /// thumbnail upload uses the neutral [MediaServerClient.thumbnailUrl] /
+  /// [MediaServerClient.streamHeaders] surface.
+  Future<void> startPlayback(MediaItem metadata, MediaServerClient client) async {
     _currentMetadata = metadata;
     _currentClient = client;
     _playbackStartTime = DateTime.now();
-    _mediaDuration = metadata.duration != null ? Duration(milliseconds: metadata.duration!) : null;
+    _mediaDuration = metadata.durationMs != null ? Duration(milliseconds: metadata.durationMs!) : null;
     _currentPosition = Duration.zero;
     _cachedThumbnailUrl = null;
     _playbackSpeed = 1.0;
 
     if (_isEnabled && _isConnected) {
       // Upload thumbnail in background, don't block playback
-      _uploadThumbnailAndUpdatePresence();
+      unawaited(_uploadThumbnailAndUpdatePresence());
     }
   }
 
@@ -167,7 +170,6 @@ class DiscordRPCService {
     }
   }
 
-  /// Stop showing presence when playback ends
   Future<void> stopPlayback() async {
     _currentMetadata = null;
     _currentClient = null;
@@ -180,10 +182,9 @@ class DiscordRPCService {
     }
   }
 
-  /// Clear the presence
   Future<void> clearPresence() async {
     try {
-      _rpc?.clearPresence();
+      unawaited(_rpc?.clearPresence());
     } catch (e) {
       appLogger.d('Failed to clear Discord presence', error: e);
     }
@@ -194,8 +195,6 @@ class DiscordRPCService {
     _reconnectTimer?.cancel();
     await _disconnect();
   }
-
-  // Private methods
 
   Future<void> _connect() async {
     if (_rpc != null) return;
@@ -237,8 +236,10 @@ class DiscordRPCService {
       _disconnectedSubscription = null;
       _errorSubscription = null;
       try {
-        _rpc?.dispose();
-      } catch (_) {}
+        unawaited(_rpc?.dispose());
+      } catch (e) {
+        appLogger.d('DiscordRPC: dispose ignored', error: e);
+      }
       _rpc = null;
       _scheduleReconnect();
     }
@@ -256,7 +257,7 @@ class DiscordRPCService {
     _errorSubscription = null;
 
     try {
-      _rpc?.dispose();
+      unawaited(_rpc?.dispose());
     } catch (e) {
       appLogger.d('Error disposing Discord RPC', error: e);
     }
@@ -282,50 +283,48 @@ class DiscordRPCService {
     await _updatePresence();
   }
 
-  Future<String?> _uploadThumbnail(PlexMetadata metadata, PlexClient client) async {
+  Future<String?> _uploadThumbnail(MediaItem metadata, MediaServerClient client) async {
     try {
       // Get the thumbnail path (prefer show poster for episodes)
-      final thumbPath = metadata.grandparentThumb ?? metadata.thumb;
+      final thumbPath = metadata.grandparentThumbPath ?? metadata.thumbPath;
       if (thumbPath == null || thumbPath.isEmpty) return null;
 
-      // Check cache first (with expiry check)
-      final cached = _litterboxCache[thumbPath];
+      // Check cache first (with expiry check). Key by backend so the same
+      // path on Plex and Jellyfin doesn't collide.
+      final cacheKey = '${client.backend.id}:$thumbPath';
+      final cached = _litterboxCache[cacheKey];
       if (cached != null && !cached.isExpired) {
-        appLogger.d('Using cached Litterbox URL for: $thumbPath');
+        appLogger.d('Using cached Litterbox URL for: $cacheKey');
         return cached.url;
       }
 
-      // Get the full URL with auth token
-      final imageUrl = client.getThumbnailUrl(thumbPath);
+      // Build the image URL. Both backends embed auth in the URL — Plex via
+      // `?X-Plex-Token=...`, Jellyfin via `?api_key=...` — so no extra
+      // headers are needed for the fetch below. We still pass [streamHeaders]
+      // for Plex installs that prefer header-based auth.
+      final imageUrl = client.thumbnailUrl(thumbPath);
       if (imageUrl.isEmpty) return null;
 
-      // Fetch image data
-      final dio = createHttpClient();
-      final imageResponse = await dio.get<List<int>>(
+      final imageBytes = await httpClient.getBytes(
         imageUrl,
-        options: Options(responseType: ResponseType.bytes, receiveTimeout: const Duration(seconds: 10)),
+        headers: client.streamHeaders,
+        timeout: const Duration(seconds: 10),
       );
+      if (imageBytes.isEmpty) return null;
 
-      final imageBytes = imageResponse.data;
-      if (imageBytes == null || imageBytes.isEmpty) return null;
+      final uploadRequest = http.MultipartRequest('POST', Uri.parse(_litterboxUrl))
+        ..fields['reqtype'] = 'fileupload'
+        ..fields['time'] = '1h'
+        ..files.add(http.MultipartFile.fromBytes('fileToUpload', imageBytes, filename: 'thumbnail.jpg'));
 
-      // Upload to Litterbox
-      final formData = FormData.fromMap({
-        'reqtype': 'fileupload',
-        'time': '1h',
-        'fileToUpload': MultipartFile.fromBytes(Uint8List.fromList(imageBytes), filename: 'thumbnail.jpg'),
-      });
+      final uploadStreamed = await httpClient.inner
+          .send(uploadRequest)
+          .namedTimeout(const Duration(seconds: 15), operation: 'Litterbox upload');
+      final uploadedUrl = (await uploadStreamed.stream.bytesToString()).trim();
 
-      final uploadResponse = await dio.post<String>(
-        _litterboxUrl,
-        data: formData,
-        options: Options(receiveTimeout: const Duration(seconds: 15)),
-      );
-
-      final uploadedUrl = uploadResponse.data?.trim();
-      if (uploadedUrl != null && uploadedUrl.startsWith('http')) {
+      if (uploadedUrl.startsWith('http')) {
         // Cache the URL with 1 hour expiry (matching Litterbox)
-        _litterboxCache[thumbPath] = _CachedUrl(uploadedUrl, DateTime.now().add(const Duration(hours: 1)));
+        _litterboxCache[cacheKey] = _CachedUrl(uploadedUrl, DateTime.now().add(const Duration(hours: 1)));
         appLogger.d('Uploaded and cached thumbnail: $uploadedUrl');
         return uploadedUrl;
       }
@@ -351,7 +350,7 @@ class DiscordRPCService {
           timestamps: _buildTimestamps(),
           statusDisplayType: DiscordStatusDisplayType.details,
           largeAsset: _cachedThumbnailUrl != null
-              ? DiscordAsset(url: _cachedThumbnailUrl!, text: metadata.grandparentTitle ?? metadata.title!)
+              ? DiscordAsset(url: _cachedThumbnailUrl!, text: metadata.grandparentTitle ?? metadata.title ?? '')
               : null,
         ),
       );
@@ -388,34 +387,34 @@ class DiscordRPCService {
   }
 
   /// Build the main "details" line (first line of presence)
-  String _buildDetails(PlexMetadata metadata) {
-    switch (metadata.mediaType) {
-      case PlexMediaType.movie:
+  String _buildDetails(MediaItem metadata) {
+    switch (metadata.kind) {
+      case MediaKind.movie:
         final year = metadata.year != null ? ' (${metadata.year})' : '';
-        return metadata.title! + year;
+        return (metadata.title ?? '') + year;
 
-      case PlexMediaType.episode:
+      case MediaKind.episode:
         // Show: "Show Name" or just episode title if no show name
-        return metadata.grandparentTitle ?? metadata.title!;
+        return metadata.grandparentTitle ?? metadata.title ?? '';
 
       default:
-        return metadata.title!;
+        return metadata.title ?? '';
     }
   }
 
   /// Build the "state" line (second line of presence)
-  String? _buildState(PlexMetadata metadata) {
-    switch (metadata.mediaType) {
-      case PlexMediaType.episode:
+  String? _buildState(MediaItem metadata) {
+    switch (metadata.kind) {
+      case MediaKind.episode:
         // Format: "S1 E5 - Episode Title"
         final season = metadata.parentIndex;
         final episode = metadata.index;
         if (season != null && episode != null) {
-          return 'S$season E$episode - ${metadata.title!}';
+          return 'S$season E$episode - ${metadata.title ?? ''}';
         }
-        return metadata.title!;
+        return metadata.title;
 
-      case PlexMediaType.movie:
+      case MediaKind.movie:
         return metadata.studio;
 
       default:

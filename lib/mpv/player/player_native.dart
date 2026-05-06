@@ -112,7 +112,7 @@ class PlayerNative extends PlayerBase {
       await observeProperty('audio-device-list', _nodeFormat);
       await observeProperty('audio-device', 'string');
     } catch (e) {
-      errorController.add('Initialization failed: $e');
+      errorController.add(PlayerError('Initialization failed: $e'));
       rethrow;
     }
   }
@@ -321,9 +321,10 @@ class PlayerNative extends PlayerBase {
   }
 
   @override
-  Future<void> setVideoFrameRate(double fps, int durationMs) async {
-    if (!Platform.isAndroid || disposed || !initialized) return;
+  Future<bool> setVideoFrameRate(double fps, int durationMs, {int extraDelayMs = 0}) async {
+    if (!Platform.isAndroid || disposed || !initialized) return false;
     await invoke('setVideoFrameRate', {'fps': fps, 'duration': durationMs});
+    return true;
   }
 
   @override

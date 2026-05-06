@@ -2,32 +2,63 @@ import 'dart:io' show Platform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:material_symbols_icons/symbols.dart';
+import '../mixins/disposable_change_notifier_mixin.dart';
 import '../services/settings_service.dart' as settings;
 import '../theme/mono_theme.dart';
 
-class ThemeProvider extends ChangeNotifier {
-  late settings.SettingsService _settingsService;
+class ThemeProvider extends ChangeNotifier with DisposableChangeNotifierMixin {
+  settings.SettingsService? _settingsService;
+  ValueNotifier<settings.ThemeMode>? _themeModeListenable;
   settings.ThemeMode _themeMode = settings.ThemeMode.system;
   late Brightness _systemBrightness;
 
   ThemeProvider() {
     _systemBrightness = WidgetsBinding.instance.platformDispatcher.platformBrightness;
     _initializeSettings();
+    WidgetsBinding.instance.platformDispatcher.onPlatformBrightnessChanged = _onBrightnessChanged;
+  }
 
-    // Listen to system theme changes
-    WidgetsBinding.instance.platformDispatcher.onPlatformBrightnessChanged = () {
-      _systemBrightness = WidgetsBinding.instance.platformDispatcher.platformBrightness;
-      if (_themeMode == settings.ThemeMode.system) {
-        notifyListeners();
-      }
-    };
+  void _onBrightnessChanged() {
+    _systemBrightness = WidgetsBinding.instance.platformDispatcher.platformBrightness;
+    if (_themeMode == settings.ThemeMode.system) {
+      safeNotifyListeners();
+    }
+  }
+
+  @override
+  void dispose() {
+    _themeModeListenable?.removeListener(_onThemeModeSettingChanged);
+    if (WidgetsBinding.instance.platformDispatcher.onPlatformBrightnessChanged == _onBrightnessChanged) {
+      WidgetsBinding.instance.platformDispatcher.onPlatformBrightnessChanged = null;
+    }
+    super.dispose();
   }
 
   Future<void> _initializeSettings() async {
-    _settingsService = await settings.SettingsService.getInstance();
-    _themeMode = _settingsService.getThemeMode();
-    _updateSplashTheme(_themeMode);
-    notifyListeners();
+    final service = await settings.SettingsService.getInstance();
+    if (_settingsService == service && _themeModeListenable != null) {
+      _syncThemeMode(service.read(settings.SettingsService.themeMode));
+      return;
+    }
+
+    _themeModeListenable?.removeListener(_onThemeModeSettingChanged);
+    _settingsService = service;
+    _themeModeListenable = service.listenable(settings.SettingsService.themeMode)
+      ..addListener(_onThemeModeSettingChanged);
+    _syncThemeMode(_themeModeListenable!.value);
+  }
+
+  void _onThemeModeSettingChanged() {
+    final listenable = _themeModeListenable;
+    if (listenable == null) return;
+    _syncThemeMode(listenable.value);
+  }
+
+  void _syncThemeMode(settings.ThemeMode mode, {bool forceNotify = false}) {
+    final changed = _themeMode != mode;
+    _themeMode = mode;
+    _updateSplashTheme(mode);
+    if (changed || forceNotify) safeNotifyListeners();
   }
 
   settings.ThemeMode get themeMode => _themeMode;
@@ -69,12 +100,16 @@ class ThemeProvider extends ChangeNotifier {
   static const _themeChannel = MethodChannel('com.plezy/theme');
 
   Future<void> setThemeMode(settings.ThemeMode mode) async {
-    if (_themeMode != mode) {
-      _themeMode = mode;
-      await _settingsService.setThemeMode(mode);
-      _updateSplashTheme(mode);
-      notifyListeners();
-    }
+    if (_themeMode == mode) return;
+    final service = _settingsService ?? await settings.SettingsService.getInstance();
+    await service.write(settings.SettingsService.themeMode, mode);
+    if (_themeModeListenable == null) _syncThemeMode(mode);
+  }
+
+  Future<void> reload() async {
+    await _initializeSettings();
+    final service = _settingsService;
+    if (service != null) _syncThemeMode(service.read(settings.SettingsService.themeMode), forceNotify: true);
   }
 
   void _updateSplashTheme(settings.ThemeMode mode) {
@@ -113,5 +148,4 @@ class ThemeProvider extends ChangeNotifier {
         return Symbols.brightness_auto_rounded;
     }
   }
-
 }

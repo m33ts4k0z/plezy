@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import '../../../models/plex_media_info.dart';
+import '../../../media/media_source_info.dart';
 import '../../../mpv/models.dart';
 
 /// Custom painter that draws a segmented background track (split at chapter
@@ -7,7 +7,7 @@ import '../../../mpv/models.dart';
 class BufferRangePainter extends CustomPainter {
   final List<BufferRange> ranges;
   final Duration duration;
-  final List<PlexChapter> chapters;
+  final List<MediaChapter> chapters;
 
   BufferRangePainter({required this.ranges, required this.duration, this.chapters = const []});
 
@@ -44,7 +44,6 @@ class BufferRangePainter extends CustomPainter {
       if (right > left) segments.add((left, right));
     }
 
-    // Draw background segments
     for (final (left, right) in segments) {
       canvas.drawRRect(
         RRect.fromRectAndRadius(Rect.fromLTWH(left, y, right - left, trackHeight), Radius.circular(radius)),
@@ -54,7 +53,6 @@ class BufferRangePainter extends CustomPainter {
 
     if (durationMs <= 0) return;
 
-    // Draw buffer ranges clipped to segments
     final bufPaint = Paint()
       ..color = Colors.white.withValues(alpha: 0.5)
       ..style = PaintingStyle.fill;
@@ -70,7 +68,10 @@ class BufferRangePainter extends CustomPainter {
         final clippedRight = bufRight.clamp(segLeft, segRight);
         if (clippedRight <= clippedLeft) continue;
         canvas.drawRRect(
-          RRect.fromRectAndRadius(Rect.fromLTWH(clippedLeft, y, clippedRight - clippedLeft, trackHeight), Radius.circular(radius)),
+          RRect.fromRectAndRadius(
+            Rect.fromLTWH(clippedLeft, y, clippedRight - clippedLeft, trackHeight),
+            Radius.circular(radius),
+          ),
           bufPaint,
         );
       }

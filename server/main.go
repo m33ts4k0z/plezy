@@ -1,19 +1,24 @@
 package main
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"flag"
 	"io"
+	"io/fs"
 	"log"
 	"math/big"
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -35,6 +40,16 @@ const (
 	logIDLength        = 5
 	logRateInterval    = 1 * time.Minute
 	maxLogEntries      = 500
+	maxConnsPerIP      = 5
+	maxGlobalConns     = 100
+	maxRoomsPerIP      = 3
+	connRateBurst      = 5
+	connRateSustained  = 1
+
+	snapshotFormatVersion = 1
+	snapshotDebounce      = 100 * time.Millisecond
+	snapshotFlushTimeout  = 5 * time.Second
+	snapshotMaxFileSize   = 1 * 1024 * 1024
 )
 
 var upgrader = websocket.Upgrader{
@@ -82,6 +97,103 @@ func (rl *rateLimiter) allow() bool {
 	return true
 }
 
+// stale reports whether a limiter hasn't been touched in over 10 minutes —
+// safe to GC from a per-IP map.
+func (rl *rateLimiter) stale(now time.Time) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	return now.Sub(rl.lastTime) > 10*time.Minute
+}
+
+// --- Connection tracker (per-IP limits) ---
+
+type connTracker struct {
+	mu          sync.Mutex
+	perIP       map[string]int
+	ipRate      map[string]*rateLimiter
+	roomsPerIP  map[string]int
+	globalCount int
+}
+
+func newConnTracker() *connTracker {
+	return &connTracker{
+		perIP:      make(map[string]int),
+		ipRate:     make(map[string]*rateLimiter),
+		roomsPerIP: make(map[string]int),
+	}
+}
+
+func (ct *connTracker) tryConnect(ip string) bool {
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+
+	if ct.globalCount >= maxGlobalConns {
+		return false
+	}
+	if ct.perIP[ip] >= maxConnsPerIP {
+		return false
+	}
+
+	rl, ok := ct.ipRate[ip]
+	if !ok {
+		rl = newRateLimiter(connRateBurst, connRateSustained)
+		ct.ipRate[ip] = rl
+	}
+	// Unlock ct.mu before calling rl.allow() would be cleaner,
+	// but since rl has its own mutex this is safe (no deadlock).
+	if !rl.allow() {
+		return false
+	}
+
+	ct.perIP[ip]++
+	ct.globalCount++
+	return true
+}
+
+func (ct *connTracker) disconnect(ip string) {
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+
+	if ct.perIP[ip] > 0 {
+		ct.perIP[ip]--
+		ct.globalCount--
+	}
+	if ct.perIP[ip] == 0 {
+		delete(ct.perIP, ip)
+	}
+}
+
+func (ct *connTracker) tryCreateRoom(ip string) bool {
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+	if ct.roomsPerIP[ip] >= maxRoomsPerIP {
+		return false
+	}
+	ct.roomsPerIP[ip]++
+	return true
+}
+
+func (ct *connTracker) releaseRoom(ip string) {
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+	if ct.roomsPerIP[ip] > 0 {
+		ct.roomsPerIP[ip]--
+	}
+	if ct.roomsPerIP[ip] == 0 {
+		delete(ct.roomsPerIP, ip)
+	}
+}
+
+func (ct *connTracker) cleanup() {
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
+	for ip := range ct.ipRate {
+		if ct.perIP[ip] == 0 {
+			delete(ct.ipRate, ip)
+		}
+	}
+}
+
 // --- Messages ---
 
 type clientMsg struct {
@@ -103,14 +215,84 @@ type serverMsg struct {
 	Payload   json.RawMessage `json:"payload,omitempty"`
 }
 
+// --- Client (serializes writes to a single goroutine) ---
+
+type Client struct {
+	conn *websocket.Conn
+	send chan []byte
+	done chan struct{}
+}
+
+func newClient(conn *websocket.Conn) *Client {
+	c := &Client{conn: conn, send: make(chan []byte, 64), done: make(chan struct{})}
+	go c.writePump()
+	return c
+}
+
+func (c *Client) writePump() {
+	ticker := time.NewTicker(pingInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case data := <-c.send:
+			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			c.conn.WriteMessage(websocket.TextMessage, data)
+		case <-c.done:
+			c.conn.WriteMessage(websocket.CloseMessage, nil)
+			return
+		case <-ticker.C:
+			c.conn.SetWriteDeadline(time.Now().Add(writeWait))
+			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				return
+			}
+		}
+	}
+}
+
+func (c *Client) trySend(data []byte) {
+	select {
+	case c.send <- data:
+	case <-c.done:
+	default:
+	}
+}
+
+func (c *Client) sendJSON(msg serverMsg) {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return
+	}
+	c.trySend(data)
+}
+
+func (c *Client) close() {
+	close(c.done)
+}
+
 // --- Room ---
 
 type Room struct {
-	SessionID  string
-	HostPeerID string
-	Peers      map[string]*websocket.Conn
-	mu         sync.RWMutex
-	CreatedAt  time.Time
+	SessionID      string
+	HostPeerID     string
+	Peers          map[string]*Client `json:"-"`
+	mu             sync.RWMutex       `json:"-"`
+	CreatedAt      time.Time
+	LastActivityAt time.Time
+}
+
+// --- Snapshot types (on-disk JSON format) ---
+
+type roomSnapshot struct {
+	SessionID      string    `json:"sessionId"`
+	HostPeerID     string    `json:"hostPeerId"`
+	CreatedAt      time.Time `json:"createdAt"`
+	LastActivityAt time.Time `json:"lastActivityAt"`
+}
+
+type stateSnapshot struct {
+	Version int            `json:"version"`
+	SavedAt time.Time      `json:"savedAt"`
+	Rooms   []roomSnapshot `json:"rooms"`
 }
 
 func (r *Room) peerIDs() []string {
@@ -126,13 +308,18 @@ func (r *Room) broadcastExcept(senderID string, msg serverMsg) {
 	if err != nil {
 		return
 	}
+	// Copy peers under lock, then send without holding it
 	r.mu.RLock()
-	defer r.mu.RUnlock()
-	for id, conn := range r.Peers {
+	targets := make([]*Client, 0, len(r.Peers))
+	for id, client := range r.Peers {
 		if id != senderID {
-			conn.SetWriteDeadline(time.Now().Add(writeWait))
-			conn.WriteMessage(websocket.TextMessage, data)
+			targets = append(targets, client)
 		}
+	}
+	r.mu.RUnlock()
+
+	for _, client := range targets {
+		client.trySend(data)
 	}
 }
 
@@ -142,13 +329,12 @@ func (r *Room) sendTo(targetID string, msg serverMsg) bool {
 		return false
 	}
 	r.mu.RLock()
-	defer r.mu.RUnlock()
-	conn, ok := r.Peers[targetID]
+	client, ok := r.Peers[targetID]
+	r.mu.RUnlock()
 	if !ok {
 		return false
 	}
-	conn.SetWriteDeadline(time.Now().Add(writeWait))
-	conn.WriteMessage(websocket.TextMessage, data)
+	client.trySend(data)
 	return true
 }
 
@@ -215,51 +401,316 @@ func (ls *logStore) cleanup() {
 	}
 }
 
+// --- Snapshotter (single-writer, debounced, atomic disk persistence) ---
+
+type snapshotter struct {
+	path     string
+	dir      string
+	trigger  chan struct{}
+	flush    chan chan error
+	done     chan struct{}
+	exited   chan struct{}
+	build    func() stateSnapshot
+	writeMu  sync.Mutex
+	stopOnce sync.Once
+
+	errMu      sync.Mutex
+	lastErrLog time.Time
+}
+
+func newSnapshotter(path string, build func() stateSnapshot) *snapshotter {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		log.Printf("snapshot: mkdir %s: %v", dir, err)
+	}
+	return &snapshotter{
+		path:    path,
+		dir:     dir,
+		trigger: make(chan struct{}, 1),
+		flush:   make(chan chan error),
+		done:    make(chan struct{}),
+		exited:  make(chan struct{}),
+		build:   build,
+	}
+}
+
+func (sn *snapshotter) schedule() {
+	select {
+	case sn.trigger <- struct{}{}:
+	default:
+	}
+}
+
+func (sn *snapshotter) run() {
+	defer close(sn.exited)
+	for {
+		select {
+		case <-sn.trigger:
+			time.Sleep(snapshotDebounce)
+			// Drain triggers that piled up during the sleep window.
+			select {
+			case <-sn.trigger:
+			default:
+			}
+			sn.writeAndLog()
+		case reply := <-sn.flush:
+			reply <- sn.writeAndLog()
+		case <-sn.done:
+			// flushAndStop is the expected caller and has already written.
+			return
+		}
+	}
+}
+
+func (sn *snapshotter) writeAndLog() error {
+	err := sn.write()
+	if err != nil {
+		sn.logWriteErr(err)
+	}
+	return err
+}
+
+func (sn *snapshotter) write() error {
+	sn.writeMu.Lock()
+	defer sn.writeMu.Unlock()
+
+	data, err := json.Marshal(sn.build())
+	if err != nil {
+		return err
+	}
+
+	tmpPath := sn.path + ".tmp"
+	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	if err := os.Rename(tmpPath, sn.path); err != nil {
+		os.Remove(tmpPath)
+		return err
+	}
+	// Best-effort dir fsync so the rename is durable after host crash.
+	if d, err := os.Open(sn.dir); err == nil {
+		d.Sync()
+		d.Close()
+	}
+	return nil
+}
+
+func (sn *snapshotter) flushAndStop(timeout time.Duration) error {
+	var result error
+	sn.stopOnce.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+		reply := make(chan error, 1)
+		select {
+		case sn.flush <- reply:
+		case <-ctx.Done():
+			result = errors.New("snapshot flush: timed out sending flush signal")
+			return
+		}
+		select {
+		case result = <-reply:
+		case <-ctx.Done():
+			result = errors.New("snapshot flush: timed out waiting for write")
+			return
+		}
+		close(sn.done)
+		select {
+		case <-sn.exited:
+		case <-ctx.Done():
+		}
+	})
+	return result
+}
+
+// logWriteErr throttles snapshot-write error spam to at most once per hour.
+func (sn *snapshotter) logWriteErr(err error) {
+	sn.errMu.Lock()
+	defer sn.errMu.Unlock()
+	if time.Since(sn.lastErrLog) < time.Hour {
+		return
+	}
+	sn.lastErrLog = time.Now()
+	log.Printf("snapshot: write failed: %v", err)
+}
+
 // --- Server ---
 
 type Server struct {
 	rooms map[string]*Room
 	logs  *logStore
+	conns *connTracker
+	snap  *snapshotter
+	oauth *oauthProxy // nil when OAUTH_BASE_URL is unset
 	mu    sync.RWMutex
 }
 
-func newServer(logDir string) *Server {
-	s := &Server{rooms: make(map[string]*Room), logs: newLogStore(logDir)}
+func newServer(logDir, stateFile string) *Server {
+	s := &Server{rooms: make(map[string]*Room), logs: newLogStore(logDir), conns: newConnTracker()}
+	if p, ok := oauthConfigFromEnv(); ok {
+		s.oauth = p
+		log.Printf("oauth: proxy enabled (base=%s, services=%d)", p.baseURL, len(p.services))
+	}
+	s.snap = newSnapshotter(stateFile, s.buildSnapshot)
+	if err := s.loadSnapshot(stateFile); err != nil {
+		log.Printf("snapshot: load error: %v", err)
+	}
+	go s.snap.run()
 	go s.cleanupLoop()
 	return s
+}
+
+// buildSnapshot copies room identity into a serializable value with no locks held during marshal.
+// Lock order: s.mu before room.mu, matching cleanupLoop.
+func (s *Server) buildSnapshot() stateSnapshot {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	snap := stateSnapshot{
+		Version: snapshotFormatVersion,
+		SavedAt: time.Now(),
+		Rooms:   make([]roomSnapshot, 0, len(s.rooms)),
+	}
+	for _, room := range s.rooms {
+		room.mu.RLock()
+		snap.Rooms = append(snap.Rooms, roomSnapshot{
+			SessionID:      room.SessionID,
+			HostPeerID:     room.HostPeerID,
+			CreatedAt:      room.CreatedAt,
+			LastActivityAt: room.LastActivityAt,
+		})
+		room.mu.RUnlock()
+	}
+	return snap
+}
+
+// loadSnapshot restores rooms from disk on startup. Missing/corrupt files log
+// and return nil so the server always starts; only unexpected I/O paths bubble up.
+func (s *Server) loadSnapshot(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			log.Printf("snapshot: no file at %s, starting fresh", path)
+			return nil
+		}
+		log.Printf("snapshot: read error, starting fresh: %v", err)
+		return nil
+	}
+	if len(data) > snapshotMaxFileSize {
+		log.Printf("snapshot: file too large (%d bytes), starting fresh", len(data))
+		return nil
+	}
+	var snap stateSnapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		log.Printf("snapshot: corrupt file at %s, starting fresh: %v", path, err)
+		return nil
+	}
+	if snap.Version != snapshotFormatVersion {
+		log.Printf("snapshot: unknown version %d, starting fresh", snap.Version)
+		return nil
+	}
+	now := time.Now()
+	loaded, skipped := 0, 0
+	s.mu.Lock()
+	for _, r := range snap.Rooms {
+		if r.SessionID == "" || r.HostPeerID == "" {
+			skipped++
+			continue
+		}
+		if now.Sub(r.CreatedAt) > roomMaxAge {
+			skipped++
+			continue
+		}
+		if now.Sub(r.LastActivityAt) > emptyRoomMaxAge {
+			skipped++
+			continue
+		}
+		s.rooms[r.SessionID] = &Room{
+			SessionID:      r.SessionID,
+			HostPeerID:     r.HostPeerID,
+			Peers:          make(map[string]*Client),
+			CreatedAt:      r.CreatedAt,
+			LastActivityAt: r.LastActivityAt,
+		}
+		loaded++
+	}
+	s.mu.Unlock()
+	log.Printf("snapshot: loaded %d rooms, skipped %d expired", loaded, skipped)
+	return nil
 }
 
 func (s *Server) cleanupLoop() {
 	ticker := time.NewTicker(cleanupInterval)
 	defer ticker.Stop()
 	for range ticker.C {
-		s.mu.Lock()
-		now := time.Now()
-		for id, room := range s.rooms {
-			room.mu.RLock()
-			empty := len(room.Peers) == 0
-			age := now.Sub(room.CreatedAt)
-			room.mu.RUnlock()
-
-			if (empty && age > emptyRoomMaxAge) || age > roomMaxAge {
-				log.Printf("cleanup: removing room %s (empty=%v, age=%v)", id, empty, age)
-				delete(s.rooms, id)
-			}
-		}
-		s.mu.Unlock()
-		s.logs.cleanup()
+		s.runCleanupStep(time.Now())
 	}
 }
 
+func (s *Server) runCleanupStep(now time.Time) {
+	s.mu.Lock()
+	changed := false
+	for id, room := range s.rooms {
+		room.mu.RLock()
+		empty := len(room.Peers) == 0
+		age := now.Sub(room.CreatedAt)
+		idle := now.Sub(room.LastActivityAt)
+		room.mu.RUnlock()
+
+		if (empty && idle > emptyRoomMaxAge) || age > roomMaxAge {
+			log.Printf("cleanup: removing room %s (empty=%v, idle=%v, age=%v)", id, empty, idle, age)
+			delete(s.rooms, id)
+			changed = true
+		}
+	}
+	s.mu.Unlock()
+	if changed {
+		s.snap.schedule()
+	}
+	s.logs.cleanup()
+	s.conns.cleanup()
+	if s.oauth != nil {
+		s.oauth.cleanup()
+	}
+
+	s.conns.mu.Lock()
+	log.Printf("stats: conns=%d ips=%d rooms=%d",
+		s.conns.globalCount, len(s.conns.perIP), len(s.rooms))
+	s.conns.mu.Unlock()
+}
+
 func clientIP(r *http.Request) string {
+	var raw string
 	if fwd := r.Header.Get("X-Forwarded-For"); fwd != "" {
-		return strings.SplitN(fwd, ",", 2)[0]
+		raw = strings.TrimSpace(strings.SplitN(fwd, ",", 2)[0])
+	} else {
+		host, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			raw = r.RemoteAddr
+		} else {
+			raw = host
+		}
 	}
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
+	// Normalize IPv6 to /64 prefix to prevent per-address bypass
+	ip := net.ParseIP(raw)
+	if ip != nil && ip.To4() == nil {
+		mask := net.CIDRMask(64, 128)
+		return ip.Mask(mask).String()
 	}
-	return host
+	return raw
 }
 
 func (s *Server) handlePostLogs(w http.ResponseWriter, r *http.Request) {
@@ -352,19 +803,15 @@ func (s *Server) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
-func (s *Server) sendError(conn *websocket.Conn, code, message string) {
-	data, _ := json.Marshal(serverMsg{Type: "error", Code: code, Message: message})
-	conn.SetWriteDeadline(time.Now().Add(writeWait))
-	conn.WriteMessage(websocket.TextMessage, data)
-}
-
-func (s *Server) sendJSON(conn *websocket.Conn, msg serverMsg) {
-	data, _ := json.Marshal(msg)
-	conn.SetWriteDeadline(time.Now().Add(writeWait))
-	conn.WriteMessage(websocket.TextMessage, data)
-}
-
 func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
+	ip := clientIP(r)
+
+	if !s.conns.tryConnect(ip) {
+		http.Error(w, "Too many connections", http.StatusTooManyRequests)
+		return
+	}
+	defer s.conns.disconnect(ip)
+
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("upgrade error: %v", err)
@@ -379,33 +826,38 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 
-	// Ping ticker
-	ticker := time.NewTicker(pingInterval)
-	defer ticker.Stop()
-	go func() {
-		for range ticker.C {
-			conn.SetWriteDeadline(time.Now().Add(writeWait))
-			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				return
-			}
-		}
-	}()
+	// Client wraps the conn with a serialized write channel + ping ticker
+	client := newClient(conn)
+	defer client.close()
 
 	rl := newRateLimiter(rateBurst, rateSustained)
 	var currentRoom *Room
 	var currentPeerID string
+	var isHost bool
 
-	// Cleanup on disconnect
+	// Cleanup on disconnect — only if our Client is still the one in the room.
+	// A reconnecting peer reuses the same peerId, so the map entry may have
+	// been overwritten by a newer Client before this defer runs.
 	defer func() {
 		if currentRoom != nil && currentPeerID != "" {
 			currentRoom.mu.Lock()
-			delete(currentRoom.Peers, currentPeerID)
+			stale := currentRoom.Peers[currentPeerID] != client
+			if !stale {
+				delete(currentRoom.Peers, currentPeerID)
+				currentRoom.LastActivityAt = time.Now()
+			}
 			currentRoom.mu.Unlock()
-			currentRoom.broadcastExcept(currentPeerID, serverMsg{
-				Type:   "peerLeft",
-				PeerID: currentPeerID,
-			})
-			log.Printf("peer %s left room %s", currentPeerID, currentRoom.SessionID)
+			if !stale {
+				currentRoom.broadcastExcept(currentPeerID, serverMsg{
+					Type:   "peerLeft",
+					PeerID: currentPeerID,
+				})
+				s.snap.schedule()
+			}
+			if isHost {
+				s.conns.releaseRoom(ip)
+			}
+			log.Printf("peer %s left room %s (stale=%v)", currentPeerID, currentRoom.SessionID, stale)
 		}
 	}()
 
@@ -419,60 +871,77 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if !rl.allow() {
-			s.sendError(conn, "rate_limited", "Too many messages")
+			client.sendJSON(serverMsg{Type: "error", Code: "rate_limited", Message: "Too many messages"})
 			continue
 		}
 
 		var msg clientMsg
 		if err := json.Unmarshal(raw, &msg); err != nil {
-			s.sendError(conn, "invalid_message", "Invalid JSON")
+			client.sendJSON(serverMsg{Type: "error", Code: "invalid_message", Message: "Invalid JSON"})
 			continue
 		}
 
 		switch msg.Type {
 		case "create":
 			if msg.SessionID == "" || msg.PeerID == "" {
-				s.sendError(conn, "invalid_message", "sessionId and peerId required")
+				client.sendJSON(serverMsg{Type: "error", Code: "invalid_message", Message: "sessionId and peerId required"})
+				continue
+			}
+			if !s.conns.tryCreateRoom(ip) {
+				client.sendJSON(serverMsg{Type: "error", Code: "rate_limited", Message: "Too many rooms created"})
 				continue
 			}
 			s.mu.Lock()
-			if _, exists := s.rooms[msg.SessionID]; exists {
-				s.mu.Unlock()
-				s.sendError(conn, "room_exists", "Room already exists")
-				continue
+			if existing, exists := s.rooms[msg.SessionID]; exists {
+				existing.mu.RLock()
+				empty := len(existing.Peers) == 0
+				existing.mu.RUnlock()
+				if !empty {
+					s.mu.Unlock()
+					s.conns.releaseRoom(ip)
+					client.sendJSON(serverMsg{Type: "error", Code: "room_exists", Message: "Room already exists"})
+					continue
+				}
+				// Empty stale room — reclaim the ID
+				delete(s.rooms, msg.SessionID)
 			}
+			now := time.Now()
 			room := &Room{
-				SessionID:  msg.SessionID,
-				HostPeerID: msg.PeerID,
-				Peers:      map[string]*websocket.Conn{msg.PeerID: conn},
-				CreatedAt:  time.Now(),
+				SessionID:      msg.SessionID,
+				HostPeerID:     msg.PeerID,
+				Peers:          map[string]*Client{msg.PeerID: client},
+				CreatedAt:      now,
+				LastActivityAt: now,
 			}
 			s.rooms[msg.SessionID] = room
 			s.mu.Unlock()
 			currentRoom = room
 			currentPeerID = msg.PeerID
+			isHost = true
 			log.Printf("room %s created by %s", msg.SessionID, msg.PeerID)
-			s.sendJSON(conn, serverMsg{Type: "created", SessionID: msg.SessionID})
+			client.sendJSON(serverMsg{Type: "created", SessionID: msg.SessionID})
+			s.snap.schedule()
 
 		case "join":
 			if msg.SessionID == "" || msg.PeerID == "" {
-				s.sendError(conn, "invalid_message", "sessionId and peerId required")
+				client.sendJSON(serverMsg{Type: "error", Code: "invalid_message", Message: "sessionId and peerId required"})
 				continue
 			}
 			s.mu.RLock()
 			room, exists := s.rooms[msg.SessionID]
 			s.mu.RUnlock()
 			if !exists {
-				s.sendError(conn, "room_not_found", "Room does not exist")
+				client.sendJSON(serverMsg{Type: "error", Code: "room_not_found", Message: "Room does not exist"})
 				continue
 			}
 			room.mu.Lock()
 			if len(room.Peers) >= maxRoomSize {
 				room.mu.Unlock()
-				s.sendError(conn, "room_full", "Room is full")
+				client.sendJSON(serverMsg{Type: "error", Code: "room_full", Message: "Room is full"})
 				continue
 			}
-			room.Peers[msg.PeerID] = conn
+			room.Peers[msg.PeerID] = client
+			room.LastActivityAt = time.Now()
 			peers := room.peerIDs()
 			room.mu.Unlock()
 			currentRoom = room
@@ -486,12 +955,13 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 					existingPeers = append(existingPeers, p)
 				}
 			}
-			s.sendJSON(conn, serverMsg{Type: "joined", SessionID: msg.SessionID, Peers: existingPeers})
+			client.sendJSON(serverMsg{Type: "joined", SessionID: msg.SessionID, Peers: existingPeers})
 			room.broadcastExcept(msg.PeerID, serverMsg{Type: "peerJoined", PeerID: msg.PeerID})
+			s.snap.schedule()
 
 		case "broadcast":
 			if currentRoom == nil {
-				s.sendError(conn, "not_in_room", "Not in a room")
+				client.sendJSON(serverMsg{Type: "error", Code: "not_in_room", Message: "Not in a room"})
 				continue
 			}
 			currentRoom.broadcastExcept(currentPeerID, serverMsg{
@@ -502,11 +972,11 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 
 		case "sendTo":
 			if currentRoom == nil {
-				s.sendError(conn, "not_in_room", "Not in a room")
+				client.sendJSON(serverMsg{Type: "error", Code: "not_in_room", Message: "Not in a room"})
 				continue
 			}
 			if msg.To == "" {
-				s.sendError(conn, "invalid_message", "to field required")
+				client.sendJSON(serverMsg{Type: "error", Code: "invalid_message", Message: "to field required"})
 				continue
 			}
 			if !currentRoom.sendTo(msg.To, serverMsg{
@@ -514,14 +984,14 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 				From:    currentPeerID,
 				Payload: msg.Payload,
 			}) {
-				s.sendError(conn, "not_in_room", "Target peer not found")
+				client.sendJSON(serverMsg{Type: "error", Code: "not_in_room", Message: "Target peer not found"})
 			}
 
 		case "ping":
-			s.sendJSON(conn, serverMsg{Type: "pong"})
+			client.sendJSON(serverMsg{Type: "pong"})
 
 		default:
-			s.sendError(conn, "invalid_message", "Unknown message type")
+			client.sendJSON(serverMsg{Type: "error", Code: "invalid_message", Message: "Unknown message type"})
 		}
 	}
 }
@@ -529,9 +999,10 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 func main() {
 	addr := flag.String("addr", ":8080", "Listen address")
 	logDir := flag.String("log-dir", "/data/logs", "Directory for log file storage")
+	stateFile := flag.String("state-file", "/data/rooms.json", "Path to room snapshot file")
 	flag.Parse()
 
-	srv := newServer(*logDir)
+	srv := newServer(*logDir, *stateFile)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/relay", srv.handleWS)
@@ -541,7 +1012,38 @@ func main() {
 	})
 	mux.HandleFunc("/logs", srv.handlePostLogs)
 	mux.HandleFunc("/logs/", srv.handleGetLogs)
+	registerOAuthRoutes(mux, srv.oauth)
 
-	log.Printf("Starting relay server on %s", *addr)
-	log.Fatal(http.ListenAndServe(*addr, mux))
+	httpSrv := &http.Server{Addr: *addr, Handler: mux}
+
+	serveErr := make(chan error, 1)
+	go func() {
+		log.Printf("Starting relay server on %s", *addr)
+		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			serveErr <- err
+		}
+		close(serveErr)
+	}()
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+
+	select {
+	case err, ok := <-serveErr:
+		if ok {
+			log.Fatalf("listen: %v", err)
+		}
+	case s := <-sig:
+		log.Printf("shutdown signal received (%s), draining...", s)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := httpSrv.Shutdown(ctx); err != nil {
+		log.Printf("http shutdown: %v", err)
+	}
+	if err := srv.snap.flushAndStop(snapshotFlushTimeout); err != nil {
+		log.Printf("snapshot flush: %v", err)
+	}
+	log.Printf("shutdown complete")
 }

@@ -11,7 +11,7 @@ import 'package:slang/generated.dart';
 import 'strings.g.dart';
 
 // Path: <root>
-class TranslationsSv with BaseTranslations<AppLocale, Translations> implements Translations {
+class TranslationsSv extends Translations with BaseTranslations<AppLocale, Translations> {
 	/// You can call this constructor and build your own translation instance of this locale.
 	/// Constructing via the enum [AppLocale.build] is preferred.
 	TranslationsSv({Map<String, Node>? overrides, PluralResolver? cardinalResolver, PluralResolver? ordinalResolver, TranslationMetadata<AppLocale, Translations>? meta})
@@ -21,7 +21,9 @@ class TranslationsSv with BaseTranslations<AppLocale, Translations> implements T
 		    overrides: overrides ?? {},
 		    cardinalResolver: cardinalResolver,
 		    ordinalResolver: ordinalResolver,
-		  ) {
+		  ),
+		  super(cardinalResolver: cardinalResolver, ordinalResolver: ordinalResolver) {
+		super.$meta.setFlatMapFunction($meta.getTranslation); // copy base translations to super.$meta
 		$meta.setFlatMapFunction(_flatMapFunction);
 	}
 
@@ -29,7 +31,7 @@ class TranslationsSv with BaseTranslations<AppLocale, Translations> implements T
 	@override final TranslationMetadata<AppLocale, Translations> $meta;
 
 	/// Access flat map
-	@override dynamic operator[](String key) => $meta.getTranslation(key);
+	@override dynamic operator[](String key) => $meta.getTranslation(key) ?? super.$meta.getTranslation(key);
 
 	late final TranslationsSv _root = this; // ignore: unused_field
 
@@ -55,6 +57,8 @@ class TranslationsSv with BaseTranslations<AppLocale, Translations> implements T
 	@override late final _TranslationsSubtitlingStylingSv subtitlingStyling = _TranslationsSubtitlingStylingSv._(_root);
 	@override late final _TranslationsMpvConfigSv mpvConfig = _TranslationsMpvConfigSv._(_root);
 	@override late final _TranslationsDialogSv dialog = _TranslationsDialogSv._(_root);
+	@override late final _TranslationsProfilesSv profiles = _TranslationsProfilesSv._(_root);
+	@override late final _TranslationsConnectionsSv connections = _TranslationsConnectionsSv._(_root);
 	@override late final _TranslationsDiscoverSv discover = _TranslationsDiscoverSv._(_root);
 	@override late final _TranslationsErrorsSv errors = _TranslationsErrorsSv._(_root);
 	@override late final _TranslationsLibrariesSv libraries = _TranslationsLibrariesSv._(_root);
@@ -65,21 +69,25 @@ class TranslationsSv with BaseTranslations<AppLocale, Translations> implements T
 	@override late final _TranslationsLicensesSv licenses = _TranslationsLicensesSv._(_root);
 	@override late final _TranslationsNavigationSv navigation = _TranslationsNavigationSv._(_root);
 	@override late final _TranslationsLiveTvSv liveTv = _TranslationsLiveTvSv._(_root);
-	@override late final _TranslationsDownloadsSv downloads = _TranslationsDownloadsSv._(_root);
-	@override late final _TranslationsPlaylistsSv playlists = _TranslationsPlaylistsSv._(_root);
 	@override late final _TranslationsCollectionsSv collections = _TranslationsCollectionsSv._(_root);
+	@override late final _TranslationsPlaylistsSv playlists = _TranslationsPlaylistsSv._(_root);
 	@override late final _TranslationsWatchTogetherSv watchTogether = _TranslationsWatchTogetherSv._(_root);
+	@override late final _TranslationsDownloadsSv downloads = _TranslationsDownloadsSv._(_root);
 	@override late final _TranslationsShadersSv shaders = _TranslationsShadersSv._(_root);
 	@override late final _TranslationsCompanionRemoteSv companionRemote = _TranslationsCompanionRemoteSv._(_root);
 	@override late final _TranslationsVideoSettingsSv videoSettings = _TranslationsVideoSettingsSv._(_root);
 	@override late final _TranslationsExternalPlayerSv externalPlayer = _TranslationsExternalPlayerSv._(_root);
 	@override late final _TranslationsMetadataEditSv metadataEdit = _TranslationsMetadataEditSv._(_root);
+	@override late final _TranslationsMatchScreenSv matchScreen = _TranslationsMatchScreenSv._(_root);
 	@override late final _TranslationsServerTasksSv serverTasks = _TranslationsServerTasksSv._(_root);
+	@override late final _TranslationsTraktSv trakt = _TranslationsTraktSv._(_root);
+	@override late final _TranslationsTrackersSv trackers = _TranslationsTrackersSv._(_root);
+	@override late final _TranslationsAddServerSv addServer = _TranslationsAddServerSv._(_root);
 }
 
 // Path: app
-class _TranslationsAppSv implements TranslationsAppEn {
-	_TranslationsAppSv._(this._root);
+class _TranslationsAppSv extends TranslationsAppEn {
+	_TranslationsAppSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
@@ -88,12 +96,13 @@ class _TranslationsAppSv implements TranslationsAppEn {
 }
 
 // Path: auth
-class _TranslationsAuthSv implements TranslationsAuthEn {
-	_TranslationsAuthSv._(this._root);
+class _TranslationsAuthSv extends TranslationsAuthEn {
+	_TranslationsAuthSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
 	// Translations
+	@override String get signIn => 'Logga in';
 	@override String get signInWithPlex => 'Logga in med Plex';
 	@override String get showQRCode => 'Visa QR-kod';
 	@override String get authenticate => 'Autentisera';
@@ -101,11 +110,19 @@ class _TranslationsAuthSv implements TranslationsAuthEn {
 	@override String get scanQRToSignIn => 'Skanna QR-koden för att logga in';
 	@override String get waitingForAuth => 'Väntar på autentisering...\nVänligen slutför inloggning i din webbläsare.';
 	@override String get useBrowser => 'Använd webbläsare';
+	@override String get or => 'eller';
+	@override String get connectToJellyfin => 'Anslut till Jellyfin';
+	@override String get useQuickConnect => 'Använd Quick Connect';
+	@override String get quickConnectCode => 'Quick Connect-kod';
+	@override String get quickConnectInstructions => 'Öppna din Jellyfin-server i en webbläsare, logga in och välj Quick Connect i användarmenyn. Ange denna kod för att godkänna inloggningen.';
+	@override String get quickConnectWaiting => 'Väntar på godkännande…';
+	@override String get quickConnectCancel => 'Avbryt';
+	@override String get quickConnectExpired => 'Quick Connect-koden gick ut innan den godkändes. Försök igen.';
 }
 
 // Path: common
-class _TranslationsCommonSv implements TranslationsCommonEn {
-	_TranslationsCommonSv._(this._root);
+class _TranslationsCommonSv extends TranslationsCommonEn {
+	_TranslationsCommonSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
@@ -128,7 +145,6 @@ class _TranslationsCommonSv implements TranslationsCommonEn {
 	@override String get shuffle => 'Blanda';
 	@override String get addTo => 'Lägg till i...';
 	@override String get createNew => 'Skapa ny';
-	@override String get paste => 'Klistra in';
 	@override String get connect => 'Anslut';
 	@override String get disconnect => 'Koppla från';
 	@override String get play => 'Spela';
@@ -153,11 +169,13 @@ class _TranslationsCommonSv implements TranslationsCommonEn {
 	@override String get connectingToServers => 'Ansluter till servrar...';
 	@override String get startingOfflineMode => 'Startar offlineläge...';
 	@override String get loading => 'Laddar...';
+	@override String get fullscreen => 'Helskärm';
+	@override String get exitFullscreen => 'Avsluta helskärm';
 }
 
 // Path: screens
-class _TranslationsScreensSv implements TranslationsScreensEn {
-	_TranslationsScreensSv._(this._root);
+class _TranslationsScreensSv extends TranslationsScreensEn {
+	_TranslationsScreensSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
@@ -170,8 +188,8 @@ class _TranslationsScreensSv implements TranslationsScreensEn {
 }
 
 // Path: update
-class _TranslationsUpdateSv implements TranslationsUpdateEn {
-	_TranslationsUpdateSv._(this._root);
+class _TranslationsUpdateSv extends TranslationsUpdateEn {
+	_TranslationsUpdateSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
@@ -186,25 +204,25 @@ class _TranslationsUpdateSv implements TranslationsUpdateEn {
 }
 
 // Path: settings
-class _TranslationsSettingsSv implements TranslationsSettingsEn {
-	_TranslationsSettingsSv._(this._root);
+class _TranslationsSettingsSv extends TranslationsSettingsEn {
+	_TranslationsSettingsSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
 	// Translations
 	@override String get title => 'Inställningar';
+	@override String get supportDeveloper => 'Stöd Plezy';
+	@override String get supportDeveloperDescription => 'Donera via Liberapay för att finansiera utvecklingen';
 	@override String get language => 'Språk';
 	@override String get theme => 'Tema';
 	@override String get appearance => 'Utseende';
 	@override String get videoPlayback => 'Videouppspelning';
+	@override String get videoPlaybackDescription => 'Konfigurera uppspelningsbeteende';
 	@override String get advanced => 'Avancerat';
 	@override String get episodePosterMode => 'Avsnittsaffisch-stil';
 	@override String get seriesPoster => 'Serieaffisch';
-	@override String get seriesPosterDescription => 'Visa seriens affisch för alla avsnitt';
 	@override String get seasonPoster => 'Säsongsaffisch';
-	@override String get seasonPosterDescription => 'Visa säsongens affisch för avsnitt';
-	@override String get episodeThumbnail => 'Avsnittsminiatyr';
-	@override String get episodeThumbnailDescription => 'Visa 16:9 skärmbild från avsnittet';
+	@override String get episodeThumbnail => 'Miniatyr';
 	@override String get showHeroSectionDescription => 'Visa utvalda innehållskarusell på startsidan';
 	@override String get secondsLabel => 'Sekunder';
 	@override String get minutesLabel => 'Minuter';
@@ -212,56 +230,55 @@ class _TranslationsSettingsSv implements TranslationsSettingsEn {
 	@override String get minutesShort => 'm';
 	@override String durationHint({required Object min, required Object max}) => 'Ange tid (${min}-${max})';
 	@override String get systemTheme => 'System';
-	@override String get systemThemeDescription => 'Följ systeminställningar';
 	@override String get lightTheme => 'Ljust';
 	@override String get darkTheme => 'Mörkt';
 	@override String get oledTheme => 'OLED';
-	@override String get oledThemeDescription => 'Rent svart för OLED-skärmar';
 	@override String get libraryDensity => 'Biblioteksdensitet';
 	@override String get compact => 'Kompakt';
-	@override String get compactDescription => 'Mindre kort, fler objekt synliga';
-	@override String get normal => 'Normal';
-	@override String get normalDescription => 'Standardstorlek';
 	@override String get comfortable => 'Bekväm';
-	@override String get comfortableDescription => 'Större kort, färre objekt synliga';
 	@override String get viewMode => 'Visningsläge';
 	@override String get gridView => 'Rutnät';
-	@override String get gridViewDescription => 'Visa objekt i rutnätslayout';
 	@override String get listView => 'Lista';
-	@override String get listViewDescription => 'Visa objekt i listlayout';
 	@override String get showHeroSection => 'Visa hjältesektion';
-	@override String get useGlobalHubs => 'Använd Plex hem-layout';
-	@override String get useGlobalHubsDescription => 'Visar startsidans hubbar som den officiella Plex-klienten. När av visas rekommendationer per bibliotek istället.';
+	@override String get useGlobalHubs => 'Använd startlayout';
+	@override String get useGlobalHubsDescription => 'Visa startsidans hubbar som den officiella klienten. När av, visas rekommendationer per bibliotek istället.';
 	@override String get showServerNameOnHubs => 'Visa servernamn på hubbar';
 	@override String get showServerNameOnHubsDescription => 'Visa alltid servernamnet i hubbtitlar. När av visas endast för duplicerade hubbnamn.';
+	@override String get groupLibrariesByServer => 'Gruppera bibliotek efter server';
+	@override String get groupLibrariesByServerDescription => 'Visa en rubrik för varje mediaserver i sidofältet när du är ansluten till flera servrar.';
 	@override String get alwaysKeepSidebarOpen => 'Håll sidofältet alltid öppet';
 	@override String get alwaysKeepSidebarOpenDescription => 'Sidofältet förblir expanderat och innehållsytan anpassas';
 	@override String get showUnwatchedCount => 'Visa antal osedda';
 	@override String get showUnwatchedCountDescription => 'Visa antal osedda avsnitt för serier och säsonger';
+	@override String get showEpisodeNumberOnCards => 'Visa avsnittsnummer på kort';
+	@override String get showEpisodeNumberOnCardsDescription => 'Visa avsnittsnummer tillsammans med säsongen (t.ex. S2 E3) på avsnittskort';
+	@override String get showSeasonPostersOnTabs => 'Visa säsongsaffischer på flikar';
+	@override String get showSeasonPostersOnTabsDescription => 'Visa säsongens affisch ovanför varje säsongsflik på en series detaljsida';
 	@override String get hideSpoilers => 'Dölj spoilers för osedda avsnitt';
 	@override String get hideSpoilersDescription => 'Gör miniatyrer suddiga och dölj beskrivningar för avsnitt du inte har sett ännu';
 	@override String get playerBackend => 'Spelarmotor';
 	@override String get exoPlayer => 'ExoPlayer (Rekommenderad)';
-	@override String get exoPlayerDescription => 'Android-nativ spelare med bättre hårdvarustöd';
 	@override String get mpv => 'mpv';
-	@override String get mpvDescription => 'Avancerad spelare med fler funktioner och ASS-undertextstöd';
 	@override String get hardwareDecoding => 'Hårdvaruavkodning';
 	@override String get hardwareDecodingDescription => 'Använd hårdvaruacceleration när tillgängligt';
 	@override String get bufferSize => 'Bufferstorlek';
 	@override String bufferSizeMB({required Object size}) => '${size}MB';
 	@override String get bufferSizeAuto => 'Auto (Rekommenderat)';
 	@override String bufferSizeWarning({required Object heap, required Object size}) => 'Din enhet har ${heap}MB minne. En buffert på ${size}MB kan orsaka uppspelningsproblem.';
+	@override String get defaultQualityTitle => 'Standardkvalitet';
+	@override String get defaultQualityDescription => 'Används vid start av uppspelning. Lägre värden minskar bandbredden.';
 	@override String get subtitleStyling => 'Undertext-styling';
 	@override String get subtitleStylingDescription => 'Anpassa undertextutseende';
 	@override String get smallSkipDuration => 'Kort hoppvaraktighet';
 	@override String get largeSkipDuration => 'Lång hoppvaraktighet';
 	@override String get rewindOnResume => 'Spola tillbaka vid återupptagning';
-	@override String get rewindOnResumeDescription => 'Spola tillbaka med denna tid vid återupptagning av uppspelning';
 	@override String secondsUnit({required Object seconds}) => '${seconds} sekunder';
 	@override String get defaultSleepTimer => 'Standard sovtimer';
 	@override String minutesUnit({required Object minutes}) => '${minutes} minuter';
 	@override String get rememberTrackSelections => 'Kom ihåg spårval per serie/film';
 	@override String get rememberTrackSelectionsDescription => 'Spara automatiskt ljud- och undertextspråkpreferenser när du ändrar spår under uppspelning';
+	@override String get showChapterMarkersOnTimeline => 'Visa kapitelmarkörer på tidslinjen';
+	@override String get showChapterMarkersOnTimelineDescription => 'Dela upp tidslinjen vid kapitelgränser';
 	@override String get clickVideoTogglesPlayback => 'Klicka på videon för att växla mellan spela upp och pausa.';
 	@override String get clickVideoTogglesPlaybackDescription => 'Om detta är aktiverat kommer ett klick på videospelaren att starta eller pausa videon. Annars visas eller döljs uppspelningskontrollerna när du klickar.';
 	@override String get videoPlayerControls => 'Videospelar-kontroller';
@@ -270,7 +287,6 @@ class _TranslationsSettingsSv implements TranslationsSettingsEn {
 	@override String get videoPlayerNavigation => 'Navigering i videospelaren';
 	@override String get videoPlayerNavigationDescription => 'Använd piltangenter för att navigera videospelarens kontroller';
 	@override String get watchTogetherRelay => 'Titta Tillsammans-relay';
-	@override String get watchTogetherRelayDefault => 'Standard';
 	@override String get watchTogetherRelayDescription => 'Ange en anpassad relay-server för Titta Tillsammans. Alla deltagare måste använda samma server.';
 	@override String get watchTogetherRelayHint => 'https://min-relay.exempel.se';
 	@override String get crashReporting => 'Kraschrapportering';
@@ -285,12 +301,26 @@ class _TranslationsSettingsSv implements TranslationsSettingsEn {
 	@override String get resetSettings => 'Återställ inställningar';
 	@override String get resetSettingsDescription => 'Detta återställer alla inställningar till standardvärden. Denna åtgärd kan inte ångras.';
 	@override String get resetSettingsSuccess => 'Inställningar återställda framgångsrikt';
+	@override String get backup => 'Säkerhetskopia';
+	@override String get exportSettings => 'Exportera inställningar';
+	@override String get exportSettingsDescription => 'Spara dina inställningar till en fil';
+	@override String get exportSettingsSuccess => 'Inställningar exporterade';
+	@override String get exportSettingsFailed => 'Kunde inte exportera inställningar';
+	@override String get importSettings => 'Importera inställningar';
+	@override String get importSettingsDescription => 'Återställ inställningar från en fil';
+	@override String get importSettingsConfirm => 'Detta ersätter dina nuvarande inställningar. Fortsätta?';
+	@override String get importSettingsSuccess => 'Inställningar importerade';
+	@override String get importSettingsFailed => 'Kunde inte importera inställningar';
+	@override String get importSettingsInvalidFile => 'Denna fil är inte en giltig Plezy-export';
+	@override String get importSettingsNoUser => 'Logga in innan du importerar inställningar';
 	@override String get shortcutsReset => 'Genvägar återställda till standard';
 	@override String get about => 'Om';
 	@override String get aboutDescription => 'Appinformation och licenser';
 	@override String get updates => 'Uppdateringar';
 	@override String get updateAvailable => 'Uppdatering tillgänglig';
 	@override String get checkForUpdates => 'Kontrollera uppdateringar';
+	@override String get autoCheckUpdatesOnStartup => 'Kontrollera uppdateringar automatiskt vid start';
+	@override String get autoCheckUpdatesOnStartupDescription => 'Visa en avisering när en ny version är tillgänglig vid start';
 	@override String get validationErrorEnterNumber => 'Vänligen ange ett giltigt nummer';
 	@override String validationErrorDuration({required Object min, required Object max, required Object unit}) => 'Tiden måste vara mellan ${min} och ${max} ${unit}';
 	@override String shortcutAlreadyAssigned({required Object action}) => 'Genväg redan tilldelad ${action}';
@@ -300,6 +330,8 @@ class _TranslationsSettingsSv implements TranslationsSettingsEn {
 	@override String get autoSkipIntroDescription => 'Hoppa automatiskt över intro-markörer efter några sekunder';
 	@override String get autoSkipCredits => 'Hoppa Över Credits Automatiskt';
 	@override String get autoSkipCreditsDescription => 'Hoppa automatiskt över credits och spela nästa avsnitt';
+	@override String get forceSkipMarkerFallback => 'Tvinga reservmarkörer';
+	@override String get forceSkipMarkerFallbackDescription => 'Använd kapiteltitelmönster för hoppmarkörer även när Plex tillhandahåller inbyggda markörer';
 	@override String get autoSkipDelay => 'Fördröjning Auto Hoppa Över';
 	@override String autoSkipDelayDescription({required Object seconds}) => 'Vänta ${seconds} sekunder innan automatisk överhoppning';
 	@override String get introPattern => 'Intromarkörsmönster';
@@ -320,12 +352,20 @@ class _TranslationsSettingsSv implements TranslationsSettingsEn {
 	@override String get downloadLocationSelectError => 'Kunde inte välja mapp';
 	@override String get downloadOnWifiOnly => 'Ladda ner endast på WiFi';
 	@override String get downloadOnWifiOnlyDescription => 'Förhindra nedladdningar vid användning av mobildata';
+	@override String get autoRemoveWatchedDownloads => 'Ta bort sedda nedladdningar automatiskt';
+	@override String get autoRemoveWatchedDownloadsDescription => 'Ta automatiskt bort nedladdade avsnitt och filmer när de markerats som sedda';
 	@override String get cellularDownloadBlocked => 'Nedladdningar är inaktiverade på mobildata. Anslut till WiFi eller ändra inställningen.';
 	@override String get maxVolume => 'Maximal volym';
 	@override String get maxVolumeDescription => 'Tillåt volym över 100% för tyst media';
 	@override String maxVolumePercent({required Object percent}) => '${percent}%';
 	@override String get discordRichPresence => 'Discord Rich Presence';
 	@override String get discordRichPresenceDescription => 'Visa vad du tittar på i Discord';
+	@override String get trakt => 'Trakt';
+	@override String get traktDescription => 'Synkronisera visningshistorik med Trakt';
+	@override String get trackers => 'Spårare';
+	@override String get trackersDescription => 'Synkronisera framsteg till Trakt, MyAnimeList, AniList och Simkl';
+	@override String get companionRemoteServer => 'Companion Remote-server';
+	@override String get companionRemoteServerDescription => 'Tillåt mobila enheter i ditt nätverk att styra denna app';
 	@override String get autoPip => 'Automatisk bild-i-bild';
 	@override String get autoPipDescription => 'Aktivera bild-i-bild automatiskt när appen lämnas under uppspelning';
 	@override String get matchContentFrameRate => 'Matcha innehållets bildfrekvens';
@@ -335,30 +375,36 @@ class _TranslationsSettingsSv implements TranslationsSettingsEn {
 	@override String get matchDynamicRange => 'Matcha dynamiskt omfång';
 	@override String get matchDynamicRangeDescription => 'Aktivera HDR automatiskt för HDR-innehåll och återgå till SDR när spelaren stängs';
 	@override String get displaySwitchDelay => 'Fördröjning vid skärmbyte';
-	@override String get displaySwitchDelayDescription => 'Sekunder att vänta efter ett skärmlägesbyte innan uppspelning startar';
 	@override String get tunneledPlayback => 'Tunneluppspelning';
 	@override String get tunneledPlaybackDescription => 'Använd hårdvaruaccelererad videotunnling. Inaktivera om du ser en svart skärm med ljud vid HDR-innehåll';
 	@override String get requireProfileSelectionOnOpen => 'Fråga efter profil vid appstart';
 	@override String get requireProfileSelectionOnOpenDescription => 'Visa profilval varje gång appen öppnas';
 	@override String get confirmExitOnBack => 'Bekräfta innan avslut';
 	@override String get confirmExitOnBackDescription => 'Visa en bekräftelsedialog när du trycker tillbaka för att avsluta appen';
+	@override String get forceTvMode => 'Tvinga TV-läge';
+	@override String get forceTvModeDescription => 'Använd TV-layouten oavsett automatisk identifiering. Användbart på Android TV-enheter som inte rapporterar leanback-funktionen. Startar om appen vid ändring.';
+	@override String get startInFullscreen => 'Starta i helskärm';
+	@override String get startInFullscreenDescription => 'Öppna Plezy i helskärm vid start';
+	@override String get autoHidePerformanceOverlay => 'Dölj prestandaöverlagring automatiskt';
+	@override String get autoHidePerformanceOverlayDescription => 'Tona prestandaöverlagringen med uppspelningskontrollerna';
 	@override String get showNavBarLabels => 'Visa navigeringsfältets etiketter';
 	@override String get showNavBarLabelsDescription => 'Visa textetiketter under navigeringsfältets ikoner';
 	@override String get liveTvDefaultFavorites => 'Standard till favoritkanaler';
 	@override String get liveTvDefaultFavoritesDescription => 'Visa bara favoritkanaler när du öppnar Live TV';
-	@override String get display => 'Display';
-	@override String get homeScreen => 'Home Screen';
-	@override String get navigation => 'Navigation';
-	@override String get content => 'Content';
-	@override String get player => 'Player';
-	@override String get subtitlesAndConfig => 'Subtitles & Configuration';
-	@override String get seekAndTiming => 'Seek & Timing';
-	@override String get behavior => 'Behavior';
+	@override String get display => 'Skärm';
+	@override String get homeScreen => 'Hemskärm';
+	@override String get navigation => 'Navigering';
+	@override String get window => 'Fönster';
+	@override String get content => 'Innehåll';
+	@override String get player => 'Spelare';
+	@override String get subtitlesAndConfig => 'Undertexter och konfiguration';
+	@override String get seekAndTiming => 'Sök och timing';
+	@override String get behavior => 'Beteende';
 }
 
 // Path: search
-class _TranslationsSearchSv implements TranslationsSearchEn {
-	_TranslationsSearchSv._(this._root);
+class _TranslationsSearchSv extends TranslationsSearchEn {
+	_TranslationsSearchSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
@@ -370,8 +416,8 @@ class _TranslationsSearchSv implements TranslationsSearchEn {
 }
 
 // Path: hotkeys
-class _TranslationsHotkeysSv implements TranslationsHotkeysEn {
-	_TranslationsHotkeysSv._(this._root);
+class _TranslationsHotkeysSv extends TranslationsHotkeysEn {
+	_TranslationsHotkeysSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
@@ -382,8 +428,8 @@ class _TranslationsHotkeysSv implements TranslationsHotkeysEn {
 }
 
 // Path: fileInfo
-class _TranslationsFileInfoSv implements TranslationsFileInfoEn {
-	_TranslationsFileInfoSv._(this._root);
+class _TranslationsFileInfoSv extends TranslationsFileInfoEn {
+	_TranslationsFileInfoSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
@@ -405,6 +451,8 @@ class _TranslationsFileInfoSv implements TranslationsFileInfoEn {
 	@override String get colorPrimaries => 'Färggrunder';
 	@override String get chromaSubsampling => 'Kroma-undersampling';
 	@override String get channels => 'Kanaler';
+	@override String get subtitles => 'Undertexter';
+	@override String get overallBitrate => 'Total bithastighet';
 	@override String get path => 'Sökväg';
 	@override String get size => 'Storlek';
 	@override String get container => 'Container';
@@ -414,8 +462,8 @@ class _TranslationsFileInfoSv implements TranslationsFileInfoEn {
 }
 
 // Path: mediaMenu
-class _TranslationsMediaMenuSv implements TranslationsMediaMenuEn {
-	_TranslationsMediaMenuSv._(this._root);
+class _TranslationsMediaMenuSv extends TranslationsMediaMenuEn {
+	_TranslationsMediaMenuSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
@@ -438,8 +486,8 @@ class _TranslationsMediaMenuSv implements TranslationsMediaMenuEn {
 }
 
 // Path: accessibility
-class _TranslationsAccessibilitySv implements TranslationsAccessibilityEn {
-	_TranslationsAccessibilitySv._(this._root);
+class _TranslationsAccessibilitySv extends TranslationsAccessibilityEn {
+	_TranslationsAccessibilitySv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
@@ -455,8 +503,8 @@ class _TranslationsAccessibilitySv implements TranslationsAccessibilityEn {
 }
 
 // Path: tooltips
-class _TranslationsTooltipsSv implements TranslationsTooltipsEn {
-	_TranslationsTooltipsSv._(this._root);
+class _TranslationsTooltipsSv extends TranslationsTooltipsEn {
+	_TranslationsTooltipsSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
@@ -468,8 +516,8 @@ class _TranslationsTooltipsSv implements TranslationsTooltipsEn {
 }
 
 // Path: videoControls
-class _TranslationsVideoControlsSv implements TranslationsVideoControlsEn {
-	_TranslationsVideoControlsSv._(this._root);
+class _TranslationsVideoControlsSv extends TranslationsVideoControlsEn {
+	_TranslationsVideoControlsSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
@@ -508,6 +556,13 @@ class _TranslationsVideoControlsSv implements TranslationsVideoControlsEn {
 	@override String get tracksButton => 'Ljud och undertexter';
 	@override String get chaptersButton => 'Kapitel';
 	@override String get versionsButton => 'Videoversioner';
+	@override String get versionQualityButton => 'Version och kvalitet';
+	@override String get versionColumnHeader => 'Version';
+	@override String get qualityColumnHeader => 'Kvalitet';
+	@override String get qualityOriginal => 'Original';
+	@override String qualityPresetLabel({required Object resolution, required Object bitrate}) => '${resolution}p ${bitrate} Mbps';
+	@override String qualityBandwidthEstimate({required Object bitrate}) => '~${bitrate} Mbps';
+	@override String get transcodeUnavailableFallback => 'Transkodning otillgänglig — spelar upp i originalkvalitet';
 	@override String get pipButton => 'Bild-i-bild läge';
 	@override String get aspectRatioButton => 'Bildförhållande';
 	@override String get ambientLighting => 'Ambientbelysning';
@@ -516,7 +571,6 @@ class _TranslationsVideoControlsSv implements TranslationsVideoControlsEn {
 	@override String get alwaysOnTopButton => 'Alltid överst';
 	@override String get rotationLockButton => 'Rotationslås';
 	@override String get lockScreen => 'Lås skärm';
-	@override String get unlockScreen => 'Lås upp skärm';
 	@override String get screenLockButton => 'Skärmlås';
 	@override String get longPressToUnlock => 'Tryck länge för att låsa upp';
 	@override String get timelineSlider => 'Videotidslinje';
@@ -538,8 +592,8 @@ class _TranslationsVideoControlsSv implements TranslationsVideoControlsEn {
 }
 
 // Path: userStatus
-class _TranslationsUserStatusSv implements TranslationsUserStatusEn {
-	_TranslationsUserStatusSv._(this._root);
+class _TranslationsUserStatusSv extends TranslationsUserStatusEn {
+	_TranslationsUserStatusSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
@@ -551,8 +605,8 @@ class _TranslationsUserStatusSv implements TranslationsUserStatusEn {
 }
 
 // Path: messages
-class _TranslationsMessagesSv implements TranslationsMessagesEn {
-	_TranslationsMessagesSv._(this._root);
+class _TranslationsMessagesSv extends TranslationsMessagesEn {
+	_TranslationsMessagesSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
@@ -561,6 +615,7 @@ class _TranslationsMessagesSv implements TranslationsMessagesEn {
 	@override String get markedAsUnwatched => 'Markerad som osedd';
 	@override String get markedAsWatchedOffline => 'Markerad som sedd (synkroniseras när online)';
 	@override String get markedAsUnwatchedOffline => 'Markerad som osedd (synkroniseras när online)';
+	@override String autoRemovedWatchedDownload({required Object title}) => 'Automatiskt borttagen: ${title}';
 	@override String get removedFromContinueWatching => 'Borttagen från Fortsätt titta';
 	@override String errorLoading({required Object error}) => 'Fel: ${error}';
 	@override String get fileInfoNotAvailable => 'Filinformation inte tillgänglig';
@@ -568,6 +623,10 @@ class _TranslationsMessagesSv implements TranslationsMessagesEn {
 	@override String get errorLoadingSeries => 'Fel vid laddning av serie';
 	@override String get errorLoadingSeason => 'Fel vid laddning av säsong';
 	@override String get musicNotSupported => 'Musikuppspelning stöds inte ännu';
+	@override String get noDescriptionAvailable => 'Ingen beskrivning tillgänglig';
+	@override String get noProfilesAvailable => 'Inga profiler tillgängliga';
+	@override String get contactAdminForProfiles => 'Kontakta din serveradministratör för att lägga till profiler';
+	@override String get unableToDetermineLibrarySection => 'Kan inte avgöra biblioteksavdelningen för detta objekt';
 	@override String get logsCleared => 'Loggar rensade';
 	@override String get logsCopied => 'Loggar kopierade till urklipp';
 	@override String get noLogsAvailable => 'Inga loggar tillgängliga';
@@ -587,19 +646,20 @@ class _TranslationsMessagesSv implements TranslationsMessagesEn {
 	@override String get failedToCreatePlayQueueNoItems => 'Det gick inte att skapa uppspelningskö – inga objekt';
 	@override String failedPlayback({required Object action, required Object error}) => 'Kunde inte ${action}: ${error}';
 	@override String get switchingToCompatiblePlayer => 'Byter till kompatibel spelare...';
+	@override String get serverLimitTitle => 'Uppspelningen misslyckades';
+	@override String get serverLimitBody => 'Servern returnerade ett fel (HTTP 500). Det betyder oftast att serverägaren har satt en gräns för bandbredd eller transkodning som avvisar din session. Det finns inget du kan göra från klienten — serverägaren behöver justera sina inställningar.';
 	@override String get logsUploaded => 'Loggar uppladdade';
 	@override String get logsUploadFailed => 'Uppladdning av loggar misslyckades';
 	@override String get logId => 'Logg-ID';
 }
 
 // Path: subtitlingStyling
-class _TranslationsSubtitlingStylingSv implements TranslationsSubtitlingStylingEn {
-	_TranslationsSubtitlingStylingSv._(this._root);
+class _TranslationsSubtitlingStylingSv extends TranslationsSubtitlingStylingEn {
+	_TranslationsSubtitlingStylingSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
 	// Translations
-	@override String get stylingOptions => 'Stilalternativ';
 	@override String get text => 'Text';
 	@override String get border => 'Kantlinje';
 	@override String get background => 'Bakgrund';
@@ -610,11 +670,14 @@ class _TranslationsSubtitlingStylingSv implements TranslationsSubtitlingStylingE
 	@override String get backgroundOpacity => 'Bakgrundsopacitet';
 	@override String get backgroundColor => 'Bakgrundsfärg';
 	@override String get position => 'Position';
+	@override String get assOverride => 'ASS-åsidosättning';
+	@override String get bold => 'Fet';
+	@override String get italic => 'Kursiv';
 }
 
 // Path: mpvConfig
-class _TranslationsMpvConfigSv implements TranslationsMpvConfigEn {
-	_TranslationsMpvConfigSv._(this._root);
+class _TranslationsMpvConfigSv extends TranslationsMpvConfigEn {
+	_TranslationsMpvConfigSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
@@ -636,8 +699,8 @@ class _TranslationsMpvConfigSv implements TranslationsMpvConfigEn {
 }
 
 // Path: dialog
-class _TranslationsDialogSv implements TranslationsDialogEn {
-	_TranslationsDialogSv._(this._root);
+class _TranslationsDialogSv extends TranslationsDialogEn {
+	_TranslationsDialogSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
@@ -645,9 +708,77 @@ class _TranslationsDialogSv implements TranslationsDialogEn {
 	@override String get confirmAction => 'Bekräfta åtgärd';
 }
 
+// Path: profiles
+class _TranslationsProfilesSv extends TranslationsProfilesEn {
+	_TranslationsProfilesSv._(TranslationsSv root) : this._root = root, super.internal(root);
+
+	final TranslationsSv _root; // ignore: unused_field
+
+	// Translations
+	@override String get addPlezyProfile => 'Lägg till Plezy-profil';
+	@override String get switchingProfile => 'Byter profil…';
+	@override String get deleteThisProfileTitle => 'Ta bort denna profil?';
+	@override String deleteThisProfileMessage({required Object displayName}) => '${displayName} tas bort. Anslutningar påverkas inte.';
+	@override String get active => 'Aktiv';
+	@override String get manage => 'Hantera';
+	@override String get delete => 'Ta bort';
+	@override String get signOut => 'Logga ut';
+	@override String get signOutPlexTitle => 'Logga ut från Plex?';
+	@override String signOutPlexMessage({required Object displayName}) => '${displayName} och alla Plex Home-användare på det här kontot tas bort från den här enheten. Du kan logga in igen när som helst.';
+	@override String get signedOutPlex => 'Utloggad från Plex.';
+	@override String get signOutFailed => 'Utloggningen misslyckades.';
+	@override String get sectionTitle => 'Profiler';
+	@override String get summarySingle => 'Lägg till profiler för att blanda hanterade användare och lokala identiteter';
+	@override String summaryMultipleWithActive({required Object count, required Object activeName}) => '${count} profiler · aktiv: ${activeName}';
+	@override String summaryMultiple({required Object count}) => '${count} profiler';
+	@override String get removeConnectionTitle => 'Ta bort anslutning?';
+	@override String removeConnectionMessage({required Object displayName, required Object connectionLabel}) => '${displayName} förlorar tillgång till ${connectionLabel}. Anslutningen är fortfarande tillgänglig för andra profiler.';
+	@override String get deleteProfileTitle => 'Ta bort profil?';
+	@override String deleteProfileMessage({required Object displayName}) => 'Detta tar bort ${displayName} och alla dess anslutningar från den här enheten. De underliggande Plex/Jellyfin-servrarna påverkas inte.';
+	@override String get profileNameLabel => 'Profilnamn';
+	@override String get pinProtectionLabel => 'PIN-skydd';
+	@override String get pinManagedByPlex => 'PIN hanteras av Plex. Redigera på plex.tv.';
+	@override String get noPinSetEditOnPlex => 'Ingen PIN angiven. För att kräva en, redigera Home-användaren på plex.tv.';
+	@override String get setPin => 'Ange PIN';
+	@override String get connectionsLabel => 'Anslutningar';
+	@override String get add => 'Lägg till';
+	@override String get deleteProfileButton => 'Ta bort profil';
+	@override String get noConnectionsHint => 'Inga anslutningar — lägg till en för att använda den här profilen.';
+	@override String get plexHomeAccount => 'Plex Home-konto';
+	@override String get connectionDefault => 'Standard';
+	@override String get makeDefault => 'Gör till standard';
+	@override String get removeConnection => 'Ta bort';
+	@override String borrowAddTo({required Object displayName}) => 'Lägg till i ${displayName}';
+	@override String get borrowExplain => 'Låna en anslutning från en annan profil. PIN-skyddade källprofiler ber om PIN före delning.';
+	@override String get borrowEmpty => 'Inget att låna ännu.';
+	@override String get borrowEmptySubtitle => 'Anslut först ett Plex-konto eller en Jellyfin-server till en annan profil och kom sedan tillbaka hit.';
+	@override String get newProfile => 'Ny profil';
+	@override String get profileNameHint => 't.ex. Gäster, Barn, Familjerum';
+	@override String get pinProtectionOptional => 'PIN-skydd (valfritt)';
+	@override String get pinExplain => '4-siffrig PIN krävs för att växla till den här profilen. Mjuk barriär — vem som helst som kan rensa appdata kan kringgå den.';
+	@override String get continueButton => 'Fortsätt';
+	@override String get pinsDontMatch => 'PIN-koderna stämmer inte överens';
+}
+
+// Path: connections
+class _TranslationsConnectionsSv extends TranslationsConnectionsEn {
+	_TranslationsConnectionsSv._(TranslationsSv root) : this._root = root, super.internal(root);
+
+	final TranslationsSv _root; // ignore: unused_field
+
+	// Translations
+	@override String get sectionTitle => 'Anslutningar';
+	@override String get addConnection => 'Lägg till anslutning';
+	@override String get addConnectionSubtitleNoProfile => 'Logga in med Plex eller anslut en Jellyfin-server';
+	@override String addConnectionSubtitleScoped({required Object displayName}) => 'Lägg till ${displayName} — Plex-konto, Jellyfin-server eller låna från en annan profil';
+	@override String sessionExpiredOne({required Object name}) => 'Sessionen har gått ut för ${name}';
+	@override String sessionExpiredMany({required Object count}) => 'Sessionen har gått ut för ${count} servrar';
+	@override String get signInAgain => 'Logga in igen';
+}
+
 // Path: discover
-class _TranslationsDiscoverSv implements TranslationsDiscoverEn {
-	_TranslationsDiscoverSv._(this._root);
+class _TranslationsDiscoverSv extends TranslationsDiscoverEn {
+	_TranslationsDiscoverSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
@@ -657,6 +788,11 @@ class _TranslationsDiscoverSv implements TranslationsDiscoverEn {
 	@override String get noContentAvailable => 'Inget innehåll tillgängligt';
 	@override String get addMediaToLibraries => 'Lägg till media till dina bibliotek';
 	@override String get continueWatching => 'Fortsätt titta';
+	@override String continueWatchingIn({required Object library}) => 'Fortsätt titta i ${library}';
+	@override String get nextUp => 'Nästa';
+	@override String nextUpIn({required Object library}) => 'Nästa i ${library}';
+	@override String get recentlyAdded => 'Nyligen tillagda';
+	@override String recentlyAddedIn({required Object library}) => 'Nyligen tillagda i ${library}';
 	@override String playEpisode({required Object season, required Object episode}) => 'S${season}E${episode}';
 	@override String get overview => 'Översikt';
 	@override String get cast => 'Rollbesättning';
@@ -669,15 +805,15 @@ class _TranslationsDiscoverSv implements TranslationsDiscoverEn {
 }
 
 // Path: errors
-class _TranslationsErrorsSv implements TranslationsErrorsEn {
-	_TranslationsErrorsSv._(this._root);
+class _TranslationsErrorsSv extends TranslationsErrorsEn {
+	_TranslationsErrorsSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
 	// Translations
 	@override String searchFailed({required Object error}) => 'Sökning misslyckades: ${error}';
 	@override String connectionTimeout({required Object context}) => 'Anslutnings-timeout vid laddning ${context}';
-	@override String get connectionFailed => 'Kan inte ansluta till Plex-server';
+	@override String get connectionFailed => 'Kan inte ansluta till mediaserver';
 	@override String failedToLoad({required Object context, required Object error}) => 'Misslyckades att ladda ${context}: ${error}';
 	@override String get noClientAvailable => 'Ingen klient tillgänglig';
 	@override String authenticationFailed({required Object error}) => 'Autentisering misslyckades: ${error}';
@@ -686,11 +822,13 @@ class _TranslationsErrorsSv implements TranslationsErrorsEn {
 	@override String get invalidToken => 'Ogiltig token';
 	@override String failedToVerifyToken({required Object error}) => 'Misslyckades att verifiera token: ${error}';
 	@override String failedToSwitchProfile({required Object displayName}) => 'Misslyckades att byta till ${displayName}';
+	@override String failedToDeleteProfile({required Object displayName}) => 'Misslyckades att ta bort ${displayName}';
+	@override String get failedToRate => 'Det gick inte att uppdatera betyget';
 }
 
 // Path: libraries
-class _TranslationsLibrariesSv implements TranslationsLibrariesEn {
-	_TranslationsLibrariesSv._(this._root);
+class _TranslationsLibrariesSv extends TranslationsLibrariesEn {
+	_TranslationsLibrariesSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
@@ -709,6 +847,8 @@ class _TranslationsLibrariesSv implements TranslationsLibrariesEn {
 	@override String analysisStarted({required Object title}) => 'Analys startad för "${title}"';
 	@override String failedToAnalyze({required Object error}) => 'Misslyckades att analysera bibliotek: ${error}';
 	@override String get noLibrariesFound => 'Inga bibliotek hittades';
+	@override String get allLibrariesHidden => 'Alla bibliotek är dolda';
+	@override String hiddenLibrariesCount({required Object count}) => 'Dolda bibliotek (${count})';
 	@override String get thisLibraryIsEmpty => 'Detta bibliotek är tomt';
 	@override String get all => 'Alla';
 	@override String get clearAll => 'Rensa alla';
@@ -733,11 +873,13 @@ class _TranslationsLibrariesSv implements TranslationsLibrariesEn {
 	@override String get folders => 'mappar';
 	@override late final _TranslationsLibrariesTabsSv tabs = _TranslationsLibrariesTabsSv._(_root);
 	@override late final _TranslationsLibrariesGroupingsSv groupings = _TranslationsLibrariesGroupingsSv._(_root);
+	@override late final _TranslationsLibrariesFilterCategoriesSv filterCategories = _TranslationsLibrariesFilterCategoriesSv._(_root);
+	@override late final _TranslationsLibrariesSortLabelsSv sortLabels = _TranslationsLibrariesSortLabelsSv._(_root);
 }
 
 // Path: about
-class _TranslationsAboutSv implements TranslationsAboutEn {
-	_TranslationsAboutSv._(this._root);
+class _TranslationsAboutSv extends TranslationsAboutEn {
+	_TranslationsAboutSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
@@ -745,13 +887,13 @@ class _TranslationsAboutSv implements TranslationsAboutEn {
 	@override String get title => 'Om';
 	@override String get openSourceLicenses => 'Öppen källkod-licenser';
 	@override String versionLabel({required Object version}) => 'Version ${version}';
-	@override String get appDescription => 'En vacker Plex-klient för Flutter';
+	@override String get appDescription => 'En vacker Plex- och Jellyfin-klient för Flutter';
 	@override String get viewLicensesDescription => 'Visa licenser för tredjepartsbibliotek';
 }
 
 // Path: serverSelection
-class _TranslationsServerSelectionSv implements TranslationsServerSelectionEn {
-	_TranslationsServerSelectionSv._(this._root);
+class _TranslationsServerSelectionSv extends TranslationsServerSelectionEn {
+	_TranslationsServerSelectionSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
@@ -762,8 +904,8 @@ class _TranslationsServerSelectionSv implements TranslationsServerSelectionEn {
 }
 
 // Path: hubDetail
-class _TranslationsHubDetailSv implements TranslationsHubDetailEn {
-	_TranslationsHubDetailSv._(this._root);
+class _TranslationsHubDetailSv extends TranslationsHubDetailEn {
+	_TranslationsHubDetailSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
@@ -776,8 +918,8 @@ class _TranslationsHubDetailSv implements TranslationsHubDetailEn {
 }
 
 // Path: logs
-class _TranslationsLogsSv implements TranslationsLogsEn {
-	_TranslationsLogsSv._(this._root);
+class _TranslationsLogsSv extends TranslationsLogsEn {
+	_TranslationsLogsSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
@@ -788,8 +930,8 @@ class _TranslationsLogsSv implements TranslationsLogsEn {
 }
 
 // Path: licenses
-class _TranslationsLicensesSv implements TranslationsLicensesEn {
-	_TranslationsLicensesSv._(this._root);
+class _TranslationsLicensesSv extends TranslationsLicensesEn {
+	_TranslationsLicensesSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
@@ -801,8 +943,8 @@ class _TranslationsLicensesSv implements TranslationsLicensesEn {
 }
 
 // Path: navigation
-class _TranslationsNavigationSv implements TranslationsNavigationEn {
-	_TranslationsNavigationSv._(this._root);
+class _TranslationsNavigationSv extends TranslationsNavigationEn {
+	_TranslationsNavigationSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
@@ -813,8 +955,8 @@ class _TranslationsNavigationSv implements TranslationsNavigationEn {
 }
 
 // Path: liveTv
-class _TranslationsLiveTvSv implements TranslationsLiveTvEn {
-	_TranslationsLiveTvSv._(this._root);
+class _TranslationsLiveTvSv extends TranslationsLiveTvEn {
+	_TranslationsLiveTvSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
@@ -828,6 +970,7 @@ class _TranslationsLiveTvSv implements TranslationsLiveTvEn {
 	@override String get reloadGuide => 'Ladda om programguide';
 	@override String get now => 'Nu';
 	@override String get today => 'Idag';
+	@override String get tomorrow => 'I morgon';
 	@override String get midnight => 'Midnatt';
 	@override String get overnight => 'Natt';
 	@override String get morning => 'Morgon';
@@ -842,73 +985,45 @@ class _TranslationsLiveTvSv implements TranslationsLiveTvEn {
 	@override String watchFromStart({required Object minutes}) => 'Titta från början (${minutes} min sedan)';
 	@override String get watchLive => 'Titta live';
 	@override String get goToLive => 'Gå till live';
-}
-
-// Path: downloads
-class _TranslationsDownloadsSv implements TranslationsDownloadsEn {
-	_TranslationsDownloadsSv._(this._root);
-
-	final TranslationsSv _root; // ignore: unused_field
-
-	// Translations
-	@override String get title => 'Nedladdningar';
-	@override String get manage => 'Hantera';
-	@override String get tvShows => 'TV-serier';
-	@override String get movies => 'Filmer';
-	@override String get noDownloads => 'Inga nedladdningar ännu';
-	@override String get noDownloadsDescription => 'Nedladdat innehåll visas här för offline-visning';
-	@override String get downloadNow => 'Ladda ner';
-	@override String get deleteDownload => 'Ta bort nedladdning';
-	@override String get retryDownload => 'Försök igen';
-	@override String get downloadQueued => 'Nedladdning köad';
-	@override String episodesQueued({required Object count}) => '${count} avsnitt köade för nedladdning';
-	@override String get downloadDeleted => 'Nedladdning borttagen';
-	@override String deleteConfirm({required Object title}) => 'Är du säker på att du vill ta bort "${title}"? Den nedladdade filen kommer att tas bort från din enhet.';
-	@override String deletingWithProgress({required Object title, required Object current, required Object total}) => 'Tar bort ${title}... (${current} av ${total})';
-	@override String get noDownloadsTree => 'Inga nedladdningar';
-	@override String get pauseAll => 'Pausa alla';
-	@override String get resumeAll => 'Återuppta alla';
-	@override String get deleteAll => 'Ta bort alla';
-	@override String get selectVersion => 'Välj version';
-}
-
-// Path: playlists
-class _TranslationsPlaylistsSv implements TranslationsPlaylistsEn {
-	_TranslationsPlaylistsSv._(this._root);
-
-	final TranslationsSv _root; // ignore: unused_field
-
-	// Translations
-	@override String get title => 'Spellistor';
-	@override String get noPlaylists => 'Inga spellistor hittades';
-	@override String get create => 'Skapa spellista';
-	@override String get playlistName => 'Spellistans namn';
-	@override String get enterPlaylistName => 'Ange spellistans namn';
-	@override String get delete => 'Ta bort spellista';
-	@override String get removeItem => 'Ta bort från spellista';
-	@override String get smartPlaylist => 'Smart spellista';
-	@override String itemCount({required Object count}) => '${count} objekt';
-	@override String get oneItem => '1 objekt';
-	@override String get emptyPlaylist => 'Denna spellista är tom';
-	@override String get deleteConfirm => 'Ta bort spellista?';
-	@override String deleteMessage({required Object name}) => 'Är du säker på att du vill ta bort "${name}"?';
-	@override String get created => 'Spellista skapad';
-	@override String get deleted => 'Spellista borttagen';
-	@override String get itemAdded => 'Tillagd i spellista';
-	@override String get itemRemoved => 'Borttagen från spellista';
-	@override String get selectPlaylist => 'Välj spellista';
-	@override String get errorCreating => 'Det gick inte att skapa spellista';
-	@override String get errorDeleting => 'Det gick inte att ta bort spellista';
-	@override String get errorLoading => 'Det gick inte att ladda spellistor';
-	@override String get errorAdding => 'Det gick inte att lägga till i spellista';
-	@override String get errorReordering => 'Det gick inte att omordna spellisteobjekt';
-	@override String get errorRemoving => 'Det gick inte att ta bort från spellista';
-	@override String get playlist => 'Spellista';
+	@override String get record => 'Spela in';
+	@override String get recordEpisode => 'Spela in avsnitt';
+	@override String get recordSeries => 'Spela in serie';
+	@override String get recordOptions => 'Inspelningsalternativ';
+	@override String get recordings => 'Inspelningar';
+	@override String get scheduledRecordings => 'Schemalagda';
+	@override String get recordingRules => 'Inspelningsregler';
+	@override String get noScheduledRecordings => 'Inga schemalagda inspelningar';
+	@override String get noRecordingRules => 'Inga inspelningsregler än';
+	@override String get manageRecording => 'Hantera inspelning';
+	@override String get cancelRecording => 'Avbryt inspelning';
+	@override String get cancelRecordingTitle => 'Avbryt denna inspelning?';
+	@override String cancelRecordingMessage({required Object title}) => '${title} kommer inte längre att spelas in.';
+	@override String get deleteRule => 'Ta bort regel';
+	@override String get deleteRuleTitle => 'Ta bort inspelningsregel?';
+	@override String deleteRuleMessage({required Object title}) => 'Kommande avsnitt av ${title} kommer inte att spelas in.';
+	@override String get recordingScheduled => 'Inspelning schemalagd';
+	@override String get alreadyScheduled => 'Detta program är redan schemalagt';
+	@override String get dvrAdminRequired => 'DVR-inställningar kräver ett administratörskonto';
+	@override String get recordingFailed => 'Det gick inte att schemalägga inspelning';
+	@override String get recordingTargetMissing => 'Det gick inte att hitta inspelningsbibliotek';
+	@override String get recordNotAvailable => 'Inspelning är inte tillgänglig för detta program';
+	@override String get recordingCancelled => 'Inspelning avbruten';
+	@override String get recordingRuleDeleted => 'Inspelningsregel borttagen';
+	@override String get processRecordingRules => 'Utvärdera regler igen';
+	@override String get loadingRecordings => 'Laddar inspelningar ...';
+	@override String get recordingInProgress => 'Spelar in nu';
+	@override String recordingsCount({required Object count}) => '${count} schemalagda';
+	@override String get editRule => 'Redigera regel';
+	@override String get editRuleAction => 'Redigera';
+	@override String get recordingRuleUpdated => 'Inspelningsregel uppdaterad';
+	@override String get guideReloadRequested => 'Begärde guidens uppdatering';
+	@override String get rulesProcessRequested => 'Begärde regelutvärdering';
+	@override String get recordShow => 'Spela in program';
 }
 
 // Path: collections
-class _TranslationsCollectionsSv implements TranslationsCollectionsEn {
-	_TranslationsCollectionsSv._(this._root);
+class _TranslationsCollectionsSv extends TranslationsCollectionsEn {
+	_TranslationsCollectionsSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
@@ -937,9 +1052,43 @@ class _TranslationsCollectionsSv implements TranslationsCollectionsEn {
 	@override String get searchCollections => 'Sök samlingar...';
 }
 
+// Path: playlists
+class _TranslationsPlaylistsSv extends TranslationsPlaylistsEn {
+	_TranslationsPlaylistsSv._(TranslationsSv root) : this._root = root, super.internal(root);
+
+	final TranslationsSv _root; // ignore: unused_field
+
+	// Translations
+	@override String get title => 'Spellistor';
+	@override String get playlist => 'Spellista';
+	@override String get noPlaylists => 'Inga spellistor hittades';
+	@override String get create => 'Skapa spellista';
+	@override String get playlistName => 'Spellistans namn';
+	@override String get enterPlaylistName => 'Ange spellistans namn';
+	@override String get delete => 'Ta bort spellista';
+	@override String get removeItem => 'Ta bort från spellista';
+	@override String get smartPlaylist => 'Smart spellista';
+	@override String itemCount({required Object count}) => '${count} objekt';
+	@override String get oneItem => '1 objekt';
+	@override String get emptyPlaylist => 'Denna spellista är tom';
+	@override String get deleteConfirm => 'Ta bort spellista?';
+	@override String deleteMessage({required Object name}) => 'Är du säker på att du vill ta bort "${name}"?';
+	@override String get created => 'Spellista skapad';
+	@override String get deleted => 'Spellista borttagen';
+	@override String get itemAdded => 'Tillagd i spellista';
+	@override String get itemRemoved => 'Borttagen från spellista';
+	@override String get selectPlaylist => 'Välj spellista';
+	@override String get errorCreating => 'Det gick inte att skapa spellista';
+	@override String get errorDeleting => 'Det gick inte att ta bort spellista';
+	@override String get errorLoading => 'Det gick inte att ladda spellistor';
+	@override String get errorAdding => 'Det gick inte att lägga till i spellista';
+	@override String get errorReordering => 'Det gick inte att omordna spellisteobjekt';
+	@override String get errorRemoving => 'Det gick inte att ta bort från spellista';
+}
+
 // Path: watchTogether
-class _TranslationsWatchTogetherSv implements TranslationsWatchTogetherEn {
-	_TranslationsWatchTogetherSv._(this._root);
+class _TranslationsWatchTogetherSv extends TranslationsWatchTogetherEn {
+	_TranslationsWatchTogetherSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
@@ -978,10 +1127,10 @@ class _TranslationsWatchTogetherSv implements TranslationsWatchTogetherEn {
 	@override String get leave => 'Lämna';
 	@override String get syncing => 'Synkroniserar...';
 	@override String get joinWatchSession => 'Gå med i Tittarsession';
-	@override String get enterCodeHint => 'Ange 8-teckens kod';
+	@override String get enterCodeHint => 'Ange 5-teckens kod';
 	@override String get pasteFromClipboard => 'Klistra in från urklipp';
 	@override String get pleaseEnterCode => 'Vänligen ange en sessionskod';
-	@override String get codeMustBe8Chars => 'Sessionskod måste vara 8 tecken';
+	@override String get codeMustBe5Chars => 'Sessionskod måste vara 5 tecken';
 	@override String get joinInstructions => 'Ange sessionskoden som delats av värden för att gå med i deras tittarsession.';
 	@override String get failedToCreate => 'Det gick inte att skapa session';
 	@override String get failedToJoin => 'Det gick inte att gå med i session';
@@ -994,11 +1143,85 @@ class _TranslationsWatchTogetherSv implements TranslationsWatchTogetherEn {
 	@override String get failedToOpenCurrentPlayback => 'Kunde inte öppna aktuell uppspelning';
 	@override String participantJoined({required Object name}) => '${name} gick med';
 	@override String participantLeft({required Object name}) => '${name} lämnade';
+	@override String participantPaused({required Object name}) => '${name} pausade';
+	@override String participantResumed({required Object name}) => '${name} återupptog';
+	@override String participantSeeked({required Object name}) => '${name} spolade';
+	@override String participantBuffering({required Object name}) => '${name} buffrar';
+	@override String get waitingForParticipants => 'Väntar på att andra laddar...';
+	@override String get recentRooms => 'Senaste rum';
+	@override String get renameRoom => 'Byt namn på rum';
+	@override String get removeRoom => 'Ta bort';
+	@override String get guestSwitchUnavailable => 'Kunde inte byta — server inte tillgänglig för synkronisering';
+	@override String get guestSwitchFailed => 'Kunde inte byta — innehåll hittades inte på denna server';
+}
+
+// Path: downloads
+class _TranslationsDownloadsSv extends TranslationsDownloadsEn {
+	_TranslationsDownloadsSv._(TranslationsSv root) : this._root = root, super.internal(root);
+
+	final TranslationsSv _root; // ignore: unused_field
+
+	// Translations
+	@override String get title => 'Nedladdningar';
+	@override String get manage => 'Hantera';
+	@override String get tvShows => 'TV-serier';
+	@override String get movies => 'Filmer';
+	@override String get noDownloads => 'Inga nedladdningar ännu';
+	@override String get noDownloadsDescription => 'Nedladdat innehåll visas här för offline-visning';
+	@override String get downloadNow => 'Ladda ner';
+	@override String get deleteDownload => 'Ta bort nedladdning';
+	@override String get retryDownload => 'Försök igen';
+	@override String get downloadQueued => 'Nedladdning köad';
+	@override String get serverErrorBitrate => 'Serverfel — filen överskrider möjligen gränsen för fjärrströmning-bitrate';
+	@override String episodesQueued({required Object count}) => '${count} avsnitt köade för nedladdning';
+	@override String get downloadDeleted => 'Nedladdning borttagen';
+	@override String deleteConfirm({required Object title}) => 'Är du säker på att du vill ta bort "${title}"? Den nedladdade filen kommer att tas bort från din enhet.';
+	@override String deletingWithProgress({required Object title, required Object current, required Object total}) => 'Tar bort ${title}... (${current} av ${total})';
+	@override String get deleting => 'Tar bort...';
+	@override String get queuedTooltip => 'I kö';
+	@override String queuedFilesTooltip({required Object files}) => 'I kö: ${files}';
+	@override String get downloadingTooltip => 'Laddar ned...';
+	@override String downloadingFilesTooltip({required Object files}) => 'Laddar ned ${files}';
+	@override String get noDownloadsTree => 'Inga nedladdningar';
+	@override String get pauseAll => 'Pausa alla';
+	@override String get resumeAll => 'Återuppta alla';
+	@override String get deleteAll => 'Ta bort alla';
+	@override String get selectVersion => 'Välj version';
+	@override String get allEpisodes => 'Alla avsnitt';
+	@override String get unwatchedOnly => 'Endast osedda';
+	@override String nextNUnwatched({required Object count}) => 'Nästa ${count} osedda';
+	@override String get customAmount => 'Ange antal...';
+	@override String get howManyEpisodes => 'Hur många avsnitt?';
+	@override String itemsQueued({required Object count}) => '${count} objekt köade för nedladdning';
+	@override String get keepSynced => 'Håll synkroniserad';
+	@override String get downloadOnce => 'Ladda ner en gång';
+	@override String keepNUnwatched({required Object count}) => 'Behåll ${count} osedda';
+	@override String get editSyncRule => 'Redigera synkregel';
+	@override String get removeSyncRule => 'Ta bort synkregel';
+	@override String removeSyncRuleConfirm({required Object title}) => 'Sluta synkronisera "${title}"? Nedladdade avsnitt behålls.';
+	@override String syncRuleCreated({required Object count}) => 'Synkregel skapad — behåller ${count} osedda avsnitt';
+	@override String get syncRuleUpdated => 'Synkregel uppdaterad';
+	@override String get syncRuleRemoved => 'Synkregel borttagen';
+	@override String syncedNewEpisodes({required Object count, required Object title}) => 'Synkroniserade ${count} nya avsnitt för ${title}';
+	@override String get activeSyncRules => 'Synkregler';
+	@override String get noSyncRules => 'Inga synkregler';
+	@override String get manageSyncRule => 'Hantera synkronisering';
+	@override String get editEpisodeCount => 'Antal avsnitt';
+	@override String get editSyncFilter => 'Synkroniseringsfilter';
+	@override String get syncAllItems => 'Synkroniserar alla objekt';
+	@override String get syncUnwatchedItems => 'Synkroniserar osedda objekt';
+	@override String syncRuleServerContext({required Object server, required Object status}) => 'Server: ${server} • ${status}';
+	@override String get syncRuleAvailable => 'Tillgänglig';
+	@override String get syncRuleOffline => 'Offline';
+	@override String get syncRuleSignInRequired => 'Inloggning krävs';
+	@override String get syncRuleNotAvailableForProfile => 'Inte tillgänglig för aktuell profil';
+	@override String get syncRuleUnknownServer => 'Okänd server';
+	@override String get syncRuleListCreated => 'Synkroniseringsregel skapad';
 }
 
 // Path: shaders
-class _TranslationsShadersSv implements TranslationsShadersEn {
-	_TranslationsShadersSv._(this._root);
+class _TranslationsShadersSv extends TranslationsShadersEn {
+	_TranslationsShadersSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
@@ -1006,6 +1229,9 @@ class _TranslationsShadersSv implements TranslationsShadersEn {
 	@override String get title => 'Shaders';
 	@override String get noShaderDescription => 'Ingen videoförbättring';
 	@override String get nvscalerDescription => 'NVIDIA-bildskalning för skarpare video';
+	@override String get artcnnVariantNeutral => 'Neutral';
+	@override String get artcnnVariantDenoise => 'Brusreducering';
+	@override String get artcnnVariantDenoiseSharpen => 'Brusreducering + skärpa';
 	@override String get qualityFast => 'Snabb';
 	@override String get qualityHQ => 'Hög kvalitet';
 	@override String get mode => 'Läge';
@@ -1018,18 +1244,13 @@ class _TranslationsShadersSv implements TranslationsShadersEn {
 }
 
 // Path: companionRemote
-class _TranslationsCompanionRemoteSv implements TranslationsCompanionRemoteEn {
-	_TranslationsCompanionRemoteSv._(this._root);
+class _TranslationsCompanionRemoteSv extends TranslationsCompanionRemoteEn {
+	_TranslationsCompanionRemoteSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
 	// Translations
 	@override String get title => 'Fjärrkontroll';
-	@override String get connectToDevice => 'Anslut till enhet';
-	@override String get hostRemoteSession => 'Starta fjärrsession';
-	@override String get controlThisDevice => 'Styr den här enheten med din telefon';
-	@override String get remoteControl => 'Fjärrkontroll';
-	@override String get controlDesktop => 'Styr en datorenhet';
 	@override String connectedTo({required Object name}) => 'Ansluten till ${name}';
 	@override late final _TranslationsCompanionRemoteSessionSv session = _TranslationsCompanionRemoteSessionSv._(_root);
 	@override late final _TranslationsCompanionRemotePairingSv pairing = _TranslationsCompanionRemotePairingSv._(_root);
@@ -1037,8 +1258,8 @@ class _TranslationsCompanionRemoteSv implements TranslationsCompanionRemoteEn {
 }
 
 // Path: videoSettings
-class _TranslationsVideoSettingsSv implements TranslationsVideoSettingsEn {
-	_TranslationsVideoSettingsSv._(this._root);
+class _TranslationsVideoSettingsSv extends TranslationsVideoSettingsEn {
+	_TranslationsVideoSettingsSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
@@ -1052,12 +1273,12 @@ class _TranslationsVideoSettingsSv implements TranslationsVideoSettingsEn {
 	@override String get audioOutput => 'Ljudutgång';
 	@override String get performanceOverlay => 'Prestandaöverlägg';
 	@override String get audioPassthrough => 'Ljudgenomkoppling';
-	@override String get audioNormalization => 'Ljudnormalisering';
+	@override String get audioNormalization => 'Normalisera ljudstyrka';
 }
 
 // Path: externalPlayer
-class _TranslationsExternalPlayerSv implements TranslationsExternalPlayerEn {
-	_TranslationsExternalPlayerSv._(this._root);
+class _TranslationsExternalPlayerSv extends TranslationsExternalPlayerEn {
+	_TranslationsExternalPlayerSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
@@ -1080,8 +1301,8 @@ class _TranslationsExternalPlayerSv implements TranslationsExternalPlayerEn {
 }
 
 // Path: metadataEdit
-class _TranslationsMetadataEditSv implements TranslationsMetadataEditEn {
-	_TranslationsMetadataEditSv._(this._root);
+class _TranslationsMetadataEditSv extends TranslationsMetadataEditEn {
+	_TranslationsMetadataEditSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
@@ -1101,8 +1322,12 @@ class _TranslationsMetadataEditSv implements TranslationsMetadataEditEn {
 	@override String get summary => 'Sammanfattning';
 	@override String get poster => 'Poster';
 	@override String get background => 'Bakgrund';
+	@override String get logo => 'Logotyp';
+	@override String get squareArt => 'Kvadratisk bild';
 	@override String get selectPoster => 'Välj poster';
 	@override String get selectBackground => 'Välj bakgrund';
+	@override String get selectLogo => 'Välj logotyp';
+	@override String get selectSquareArt => 'Välj kvadratisk bild';
 	@override String get fromUrl => 'Från URL';
 	@override String get uploadFile => 'Ladda upp fil';
 	@override String get enterImageUrl => 'Ange bild-URL';
@@ -1158,9 +1383,30 @@ class _TranslationsMetadataEditSv implements TranslationsMetadataEditEn {
 	@override String get mood => 'Stämning';
 }
 
+// Path: matchScreen
+class _TranslationsMatchScreenSv extends TranslationsMatchScreenEn {
+	_TranslationsMatchScreenSv._(TranslationsSv root) : this._root = root, super.internal(root);
+
+	final TranslationsSv _root; // ignore: unused_field
+
+	// Translations
+	@override String get match => 'Matcha...';
+	@override String get fixMatch => 'Rätta matchning...';
+	@override String get unmatch => 'Ta bort matchning';
+	@override String get unmatchConfirm => 'Ta bort den aktuella matchningen för det här objektet? Plex behandlar det som omatchat tills du matchar det igen.';
+	@override String get unmatchSuccess => 'Matchning borttagen';
+	@override String get unmatchFailed => 'Det gick inte att ta bort matchningen';
+	@override String get matchApplied => 'Matchning tillämpad';
+	@override String get matchFailed => 'Det gick inte att tillämpa matchningen';
+	@override String get titleHint => 'Titel';
+	@override String get yearHint => 'År';
+	@override String get search => 'Sök';
+	@override String get noMatchesFound => 'Inga matchningar hittades';
+}
+
 // Path: serverTasks
-class _TranslationsServerTasksSv implements TranslationsServerTasksEn {
-	_TranslationsServerTasksSv._(this._root);
+class _TranslationsServerTasksSv extends TranslationsServerTasksEn {
+	_TranslationsServerTasksSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
@@ -1170,9 +1416,90 @@ class _TranslationsServerTasksSv implements TranslationsServerTasksEn {
 	@override String get noTasks => 'Inga pågående uppgifter';
 }
 
+// Path: trakt
+class _TranslationsTraktSv extends TranslationsTraktEn {
+	_TranslationsTraktSv._(TranslationsSv root) : this._root = root, super.internal(root);
+
+	final TranslationsSv _root; // ignore: unused_field
+
+	// Translations
+	@override String get title => 'Trakt';
+	@override String get connected => 'Ansluten';
+	@override String connectedAs({required Object username}) => 'Ansluten som @${username}';
+	@override String get disconnectConfirm => 'Koppla från Trakt-konto?';
+	@override String get disconnectConfirmBody => 'Plezy slutar skicka uppspelningshändelser till Trakt. Du kan ansluta igen när som helst.';
+	@override String get scrobble => 'Realtids-scrobbling';
+	@override String get scrobbleDescription => 'Skicka uppspelnings-, paus- och stopphändelser till Trakt under uppspelning.';
+	@override String get watchedSync => 'Synkronisera tittad-status';
+	@override String get watchedSyncDescription => 'När du markerar något som tittat i Plezy markeras det också på Trakt.';
+}
+
+// Path: trackers
+class _TranslationsTrackersSv extends TranslationsTrackersEn {
+	_TranslationsTrackersSv._(TranslationsSv root) : this._root = root, super.internal(root);
+
+	final TranslationsSv _root; // ignore: unused_field
+
+	// Translations
+	@override String get title => 'Spårare';
+	@override String get hubSubtitle => 'Håll ditt tittarprogress synkroniserat med Trakt och andra tjänster.';
+	@override String get notConnected => 'Ej ansluten';
+	@override String connectedAs({required Object username}) => 'Ansluten som @${username}';
+	@override String get scrobble => 'Spåra framsteg automatiskt';
+	@override String get scrobbleDescription => 'Uppdaterar din lista när du är klar med ett avsnitt eller en film.';
+	@override String disconnectConfirm({required Object service}) => 'Koppla från ${service}?';
+	@override String disconnectConfirmBody({required Object service}) => 'Plezy slutar uppdatera din ${service}-lista. Du kan ansluta igen när som helst.';
+	@override String connectFailed({required Object service}) => 'Kunde inte ansluta till ${service}. Försök igen.';
+	@override late final _TranslationsTrackersServicesSv services = _TranslationsTrackersServicesSv._(_root);
+	@override late final _TranslationsTrackersDeviceCodeSv deviceCode = _TranslationsTrackersDeviceCodeSv._(_root);
+	@override late final _TranslationsTrackersOauthProxySv oauthProxy = _TranslationsTrackersOauthProxySv._(_root);
+	@override late final _TranslationsTrackersLibraryFilterSv libraryFilter = _TranslationsTrackersLibraryFilterSv._(_root);
+}
+
+// Path: addServer
+class _TranslationsAddServerSv extends TranslationsAddServerEn {
+	_TranslationsAddServerSv._(TranslationsSv root) : this._root = root, super.internal(root);
+
+	final TranslationsSv _root; // ignore: unused_field
+
+	// Translations
+	@override String get addJellyfinTitle => 'Lägg till Jellyfin-server';
+	@override String get jellyfinUrlIntro => 'Ange URL till din Jellyfin-server — t.ex. `https://jellyfin.example.com`. Du kan logga in efteråt.';
+	@override String get serverUrl => 'Server-URL';
+	@override String get findServer => 'Hitta server';
+	@override String get username => 'Användarnamn';
+	@override String get password => 'Lösenord';
+	@override String get signIn => 'Logga in';
+	@override String get change => 'Ändra';
+	@override String get required => 'Krävs';
+	@override String couldNotReachServer({required Object error}) => 'Kunde inte nå servern: ${error}';
+	@override String signInFailed({required Object error}) => 'Inloggning misslyckades: ${error}';
+	@override String quickConnectFailed({required Object error}) => 'Quick Connect misslyckades: ${error}';
+	@override String get addPlexTitle => 'Logga in med Plex';
+	@override String get plexAuthIntro => 'Välj hur du vill logga in på Plex. Webbläsarflödet öppnar plex.tv där du bekräftar anslutningen; QR-alternativet är praktiskt för TV / fjärrenheter.';
+	@override String get plexQRPrompt => 'Skanna denna QR-kod för att logga in.';
+	@override String get waitingForPlexConfirmation => 'Väntar på att plex.tv ska bekräfta inloggningen…';
+	@override String get pinExpired => 'PIN-koden gick ut innan inloggning. Försök igen.';
+	@override String get duplicatePlexAccount => 'Den här enheten är redan inloggad på ett Plex-konto. Logga ut från inställningarna för att byta konto.';
+	@override String failedToRegisterAccount({required Object error}) => 'Kunde inte registrera kontot: ${error}';
+	@override String get enterJellyfinUrlError => 'Ange URL till din Jellyfin-server';
+	@override String get addConnectionTitle => 'Lägg till anslutning';
+	@override String addConnectionTitleScoped({required Object name}) => 'Lägg till i ${name}';
+	@override String get addConnectionIntroGlobal => 'Lägg till ytterligare en medieserver. Du kan blanda Plex-konton och Jellyfin-servrar — innehåll från alla anslutna backends visas tillsammans på startskärmen.';
+	@override String get addConnectionIntroScoped => 'Lägg till en ny server, eller låna en från en annan profil.';
+	@override String get signInWithPlexCard => 'Logga in med Plex';
+	@override String get signInWithPlexCardSubtitle => 'Auktorisera den här enheten mot ditt Plex-konto. Servrar delade med kontot följer med automatiskt.';
+	@override String get signInWithPlexCardSubtitleScoped => 'Auktorisera ett nytt Plex-konto. Dess Home-användare visas som profiler.';
+	@override String get connectToJellyfinCard => 'Anslut till Jellyfin';
+	@override String get connectToJellyfinCardSubtitle => 'Ange URL till din Jellyfin-server och logga in med användarnamn + lösenord (Quick Connect kommer snart).';
+	@override String connectToJellyfinCardSubtitleScoped({required Object name}) => 'Logga in på en Jellyfin-server. Kopplas till ${name}.';
+	@override String get borrowFromAnotherProfile => 'Låna från en annan profil';
+	@override String get borrowFromAnotherProfileSubtitle => 'Återanvänd en anslutning som redan är kopplad till en annan profil. PIN-skyddade källprofiler ber om PIN.';
+}
+
 // Path: hotkeys.actions
-class _TranslationsHotkeysActionsSv implements TranslationsHotkeysActionsEn {
-	_TranslationsHotkeysActionsSv._(this._root);
+class _TranslationsHotkeysActionsSv extends TranslationsHotkeysActionsEn {
+	_TranslationsHotkeysActionsSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
@@ -1189,6 +1516,8 @@ class _TranslationsHotkeysActionsSv implements TranslationsHotkeysActionsEn {
 	@override String get subtitleTrackNext => 'Nästa undertextspår';
 	@override String get chapterNext => 'Nästa kapitel';
 	@override String get chapterPrevious => 'Föregående kapitel';
+	@override String get episodeNext => 'Nästa avsnitt';
+	@override String get episodePrevious => 'Föregående avsnitt';
 	@override String get speedIncrease => 'Öka hastighet';
 	@override String get speedDecrease => 'Minska hastighet';
 	@override String get speedReset => 'Återställ hastighet';
@@ -1199,8 +1528,8 @@ class _TranslationsHotkeysActionsSv implements TranslationsHotkeysActionsEn {
 }
 
 // Path: videoControls.pipErrors
-class _TranslationsVideoControlsPipErrorsSv implements TranslationsVideoControlsPipErrorsEn {
-	_TranslationsVideoControlsPipErrorsSv._(this._root);
+class _TranslationsVideoControlsPipErrorsSv extends TranslationsVideoControlsPipErrorsEn {
+	_TranslationsVideoControlsPipErrorsSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
@@ -1215,8 +1544,8 @@ class _TranslationsVideoControlsPipErrorsSv implements TranslationsVideoControls
 }
 
 // Path: libraries.tabs
-class _TranslationsLibrariesTabsSv implements TranslationsLibrariesTabsEn {
-	_TranslationsLibrariesTabsSv._(this._root);
+class _TranslationsLibrariesTabsSv extends TranslationsLibrariesTabsEn {
+	_TranslationsLibrariesTabsSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
@@ -1228,8 +1557,8 @@ class _TranslationsLibrariesTabsSv implements TranslationsLibrariesTabsEn {
 }
 
 // Path: libraries.groupings
-class _TranslationsLibrariesGroupingsSv implements TranslationsLibrariesGroupingsEn {
-	_TranslationsLibrariesGroupingsSv._(this._root);
+class _TranslationsLibrariesGroupingsSv extends TranslationsLibrariesGroupingsEn {
+	_TranslationsLibrariesGroupingsSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
@@ -1243,67 +1572,85 @@ class _TranslationsLibrariesGroupingsSv implements TranslationsLibrariesGrouping
 	@override String get folders => 'Mappar';
 }
 
-// Path: companionRemote.session
-class _TranslationsCompanionRemoteSessionSv implements TranslationsCompanionRemoteSessionEn {
-	_TranslationsCompanionRemoteSessionSv._(this._root);
+// Path: libraries.filterCategories
+class _TranslationsLibrariesFilterCategoriesSv extends TranslationsLibrariesFilterCategoriesEn {
+	_TranslationsLibrariesFilterCategoriesSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
 	// Translations
-	@override String get creatingSession => 'Skapar fjärrsession...';
-	@override String get failedToCreate => 'Kunde inte skapa fjärrsession:';
-	@override String get noSession => 'Ingen session tillgänglig';
-	@override String get scanQrCode => 'Skanna QR-kod';
-	@override String get orEnterManually => 'Eller ange manuellt';
+	@override String get genre => 'Genre';
+	@override String get year => 'År';
+	@override String get contentRating => 'Åldersgräns';
+	@override String get tag => 'Tagg';
+}
+
+// Path: libraries.sortLabels
+class _TranslationsLibrariesSortLabelsSv extends TranslationsLibrariesSortLabelsEn {
+	_TranslationsLibrariesSortLabelsSv._(TranslationsSv root) : this._root = root, super.internal(root);
+
+	final TranslationsSv _root; // ignore: unused_field
+
+	// Translations
+	@override String get title => 'Titel';
+	@override String get dateAdded => 'Tillagd';
+	@override String get releaseDate => 'Releasedatum';
+	@override String get rating => 'Betyg';
+	@override String get lastPlayed => 'Senast spelad';
+	@override String get playCount => 'Antal spelningar';
+	@override String get random => 'Slumpmässigt';
+	@override String get dateShared => 'Delningsdatum';
+	@override String get latestEpisodeAirDate => 'Senaste avsnittets sändningsdatum';
+}
+
+// Path: companionRemote.session
+class _TranslationsCompanionRemoteSessionSv extends TranslationsCompanionRemoteSessionEn {
+	_TranslationsCompanionRemoteSessionSv._(TranslationsSv root) : this._root = root, super.internal(root);
+
+	final TranslationsSv _root; // ignore: unused_field
+
+	// Translations
+	@override String get startingServer => 'Startar fjärrserver...';
+	@override String get failedToCreate => 'Kunde inte starta fjärrserver:';
 	@override String get hostAddress => 'Värdadress';
-	@override String get sessionId => 'Sessions-ID';
-	@override String get pin => 'PIN';
 	@override String get connected => 'Ansluten';
-	@override String get waitingForConnection => 'Väntar på anslutning...';
+	@override String get serverRunning => 'Fjärrserver aktiv';
+	@override String get serverStopped => 'Fjärrserver stoppad';
+	@override String get serverRunningDescription => 'Mobila enheter i ditt nätverk kan upptäcka och ansluta till denna app';
+	@override String get serverStoppedDescription => 'Starta servern för att tillåta mobila enheter att ansluta';
 	@override String get usePhoneToControl => 'Använd din mobila enhet för att styra denna app';
-	@override String copiedToClipboard({required Object label}) => '${label} kopierad till urklipp';
-	@override String get copyToClipboard => 'Kopiera till urklipp';
-	@override String get newSession => 'Ny session';
+	@override String get startServer => 'Starta server';
+	@override String get stopServer => 'Stoppa server';
 	@override String get minimize => 'Minimera';
 }
 
 // Path: companionRemote.pairing
-class _TranslationsCompanionRemotePairingSv implements TranslationsCompanionRemotePairingEn {
-	_TranslationsCompanionRemotePairingSv._(this._root);
+class _TranslationsCompanionRemotePairingSv extends TranslationsCompanionRemotePairingEn {
+	_TranslationsCompanionRemotePairingSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
 	// Translations
-	@override String get scan => 'Skanna';
-	@override String get manual => 'Manuell';
-	@override String get pairWithDesktop => 'Parkoppla med dator';
-	@override String get enterSessionDetails => 'Ange sessionsuppgifterna som visas på din datorenhet';
+	@override String get discoveryDescription => 'Enheter i ditt nätverk som kör Plezy med samma Plex-konto visas automatiskt';
 	@override String get hostAddressHint => '192.168.1.100:48632';
-	@override String get sessionIdHint => 'Ange 8-teckens sessions-ID';
-	@override String get pinHint => 'Ange 6-siffrig PIN';
 	@override String get connecting => 'Ansluter...';
-	@override String get tips => 'Tips';
-	@override String get tipDesktop => 'Öppna Plezy på din dator och aktivera Companion Remote via inställningar eller meny';
-	@override String get tipScan => 'Använd fliken Skanna för att snabbt parkoppla genom att skanna QR-koden på din dator';
-	@override String get tipWifi => 'Se till att båda enheterna är på samma WiFi-nätverk';
-	@override String get cameraPermissionRequired => 'Kamerabehörighet krävs för att skanna QR-koder.\nVänligen ge kameraåtkomst i enhetsinställningarna.';
-	@override String cameraError({required Object error}) => 'Kunde inte starta kameran: ${error}';
-	@override String get scanInstruction => 'Rikta kameran mot QR-koden som visas på din dator';
-	@override String get invalidQrCode => 'Ogiltigt QR-kodformat';
-	@override String get validationHostRequired => 'Ange en värdadress';
+	@override String get searchingForDevices => 'Söker efter enheter...';
+	@override String get noDevicesFound => 'Inga enheter hittades i ditt nätverk';
+	@override String get noDevicesHint => 'Se till att Plezy är öppet på din dator och att båda enheterna är på samma WiFi-nätverk';
+	@override String get availableDevices => 'Tillgängliga enheter';
+	@override String get manualConnection => 'Manuell anslutning';
+	@override String get cryptoInitFailed => 'Kunde inte initiera säker anslutning. Se till att du är inloggad på ett Plex-konto.';
+	@override String get validationHostRequired => 'Ange värdadress';
 	@override String get validationHostFormat => 'Format måste vara IP:port (t.ex. 192.168.1.100:48632)';
-	@override String get validationSessionIdRequired => 'Ange ett sessions-ID';
-	@override String get validationSessionIdLength => 'Sessions-ID måste vara 8 tecken';
-	@override String get validationPinRequired => 'Ange en PIN';
-	@override String get validationPinLength => 'PIN måste vara 6 siffror';
-	@override String get connectionTimedOut => 'Anslutningen tog för lång tid. Kontrollera sessions-ID och PIN.';
-	@override String get sessionNotFound => 'Kunde inte hitta sessionen. Kontrollera dina uppgifter.';
+	@override String get connectionTimedOut => 'Anslutningen tog för lång tid. Se till att båda enheterna är på samma nätverk.';
+	@override String get sessionNotFound => 'Kunde inte hitta enheten. Se till att Plezy körs på värden.';
+	@override String get authFailed => 'Autentisering misslyckades. Se till att båda enheterna använder samma Plex-konto.';
 	@override String failedToConnect({required Object error}) => 'Kunde inte ansluta: ${error}';
 }
 
 // Path: companionRemote.remote
-class _TranslationsCompanionRemoteRemoteSv implements TranslationsCompanionRemoteRemoteEn {
-	_TranslationsCompanionRemoteRemoteSv._(this._root);
+class _TranslationsCompanionRemoteRemoteSv extends TranslationsCompanionRemoteRemoteEn {
+	_TranslationsCompanionRemoteRemoteSv._(TranslationsSv root) : this._root = root, super.internal(root);
 
 	final TranslationsSv _root; // ignore: unused_field
 
@@ -1312,8 +1659,6 @@ class _TranslationsCompanionRemoteRemoteSv implements TranslationsCompanionRemot
 	@override String get reconnecting => 'Återansluter...';
 	@override String attemptOf({required Object current}) => 'Försök ${current} av 5';
 	@override String get retryNow => 'Försök nu';
-	@override String get connectionError => 'Anslutningsfel';
-	@override String get notConnected => 'Inte ansluten';
 	@override String get tabRemote => 'Fjärrkontroll';
 	@override String get tabPlay => 'Spela';
 	@override String get tabMore => 'Mer';
@@ -1339,6 +1684,66 @@ class _TranslationsCompanionRemoteRemoteSv implements TranslationsCompanionRemot
 	@override String get searchHint => 'Sök på datorn...';
 }
 
+// Path: trackers.services
+class _TranslationsTrackersServicesSv extends TranslationsTrackersServicesEn {
+	_TranslationsTrackersServicesSv._(TranslationsSv root) : this._root = root, super.internal(root);
+
+	final TranslationsSv _root; // ignore: unused_field
+
+	// Translations
+	@override String get mal => 'MyAnimeList';
+	@override String get anilist => 'AniList';
+	@override String get simkl => 'Simkl';
+}
+
+// Path: trackers.deviceCode
+class _TranslationsTrackersDeviceCodeSv extends TranslationsTrackersDeviceCodeEn {
+	_TranslationsTrackersDeviceCodeSv._(TranslationsSv root) : this._root = root, super.internal(root);
+
+	final TranslationsSv _root; // ignore: unused_field
+
+	// Translations
+	@override String title({required Object service}) => 'Aktivera Plezy på ${service}';
+	@override String body({required Object url}) => 'Besök ${url} och ange den här koden:';
+	@override String openToActivate({required Object service}) => 'Öppna ${service} för att aktivera';
+	@override String get waitingForAuthorization => 'Väntar på auktorisering…';
+	@override String get codeCopied => 'Kod kopierad';
+}
+
+// Path: trackers.oauthProxy
+class _TranslationsTrackersOauthProxySv extends TranslationsTrackersOauthProxyEn {
+	_TranslationsTrackersOauthProxySv._(TranslationsSv root) : this._root = root, super.internal(root);
+
+	final TranslationsSv _root; // ignore: unused_field
+
+	// Translations
+	@override String title({required Object service}) => 'Logga in på ${service}';
+	@override String get body => 'Skanna den här QR-koden med din telefon, eller öppna URL:en nedan på en enhet med webbläsare.';
+	@override String openToSignIn({required Object service}) => 'Öppna ${service} för att logga in';
+	@override String get urlCopied => 'URL kopierad';
+}
+
+// Path: trackers.libraryFilter
+class _TranslationsTrackersLibraryFilterSv extends TranslationsTrackersLibraryFilterEn {
+	_TranslationsTrackersLibraryFilterSv._(TranslationsSv root) : this._root = root, super.internal(root);
+
+	final TranslationsSv _root; // ignore: unused_field
+
+	// Translations
+	@override String get title => 'Biblioteksfilter';
+	@override String get subtitleAllSyncing => 'Synkroniserar alla bibliotek';
+	@override String get subtitleNoneSyncing => 'Ingenting synkroniseras';
+	@override String subtitleBlocked({required Object count}) => '${count} blockerade';
+	@override String subtitleAllowed({required Object count}) => '${count} tillåtna';
+	@override String get mode => 'Filterläge';
+	@override String get modeBlacklist => 'Svartlista';
+	@override String get modeWhitelist => 'Vitlista';
+	@override String get modeHintBlacklist => 'Synkronisera alla bibliotek utom de som markerats nedan.';
+	@override String get modeHintWhitelist => 'Synkronisera endast de bibliotek som markerats nedan.';
+	@override String get libraries => 'Bibliotek';
+	@override String get noLibraries => 'Inga bibliotek tillgängliga';
+}
+
 /// The flat map containing all translations for locale <sv>.
 /// Only for edge cases! For simple maps, use the map function of this library.
 ///
@@ -1348,6 +1753,7 @@ extension on TranslationsSv {
 	dynamic _flatMapFunction(String path) {
 		return switch (path) {
 			'app.title' => 'Plezy',
+			'auth.signIn' => 'Logga in',
 			'auth.signInWithPlex' => 'Logga in med Plex',
 			'auth.showQRCode' => 'Visa QR-kod',
 			'auth.authenticate' => 'Autentisera',
@@ -1355,6 +1761,14 @@ extension on TranslationsSv {
 			'auth.scanQRToSignIn' => 'Skanna QR-koden för att logga in',
 			'auth.waitingForAuth' => 'Väntar på autentisering...\nVänligen slutför inloggning i din webbläsare.',
 			'auth.useBrowser' => 'Använd webbläsare',
+			'auth.or' => 'eller',
+			'auth.connectToJellyfin' => 'Anslut till Jellyfin',
+			'auth.useQuickConnect' => 'Använd Quick Connect',
+			'auth.quickConnectCode' => 'Quick Connect-kod',
+			'auth.quickConnectInstructions' => 'Öppna din Jellyfin-server i en webbläsare, logga in och välj Quick Connect i användarmenyn. Ange denna kod för att godkänna inloggningen.',
+			'auth.quickConnectWaiting' => 'Väntar på godkännande…',
+			'auth.quickConnectCancel' => 'Avbryt',
+			'auth.quickConnectExpired' => 'Quick Connect-koden gick ut innan den godkändes. Försök igen.',
 			'common.cancel' => 'Avbryt',
 			'common.save' => 'Spara',
 			'common.close' => 'Stäng',
@@ -1373,7 +1787,6 @@ extension on TranslationsSv {
 			'common.shuffle' => 'Blanda',
 			'common.addTo' => 'Lägg till i...',
 			'common.createNew' => 'Skapa ny',
-			'common.paste' => 'Klistra in',
 			'common.connect' => 'Anslut',
 			'common.disconnect' => 'Koppla från',
 			'common.play' => 'Spela',
@@ -1398,6 +1811,8 @@ extension on TranslationsSv {
 			'common.connectingToServers' => 'Ansluter till servrar...',
 			'common.startingOfflineMode' => 'Startar offlineläge...',
 			'common.loading' => 'Laddar...',
+			'common.fullscreen' => 'Helskärm',
+			'common.exitFullscreen' => 'Avsluta helskärm',
 			'screens.licenses' => 'Licenser',
 			'screens.switchProfile' => 'Byt profil',
 			'screens.subtitleStyling' => 'Undertext-styling',
@@ -1411,18 +1826,18 @@ extension on TranslationsSv {
 			'update.latestVersion' => 'Du har den senaste versionen',
 			'update.checkFailed' => 'Misslyckades att kontrollera uppdateringar',
 			'settings.title' => 'Inställningar',
+			'settings.supportDeveloper' => 'Stöd Plezy',
+			'settings.supportDeveloperDescription' => 'Donera via Liberapay för att finansiera utvecklingen',
 			'settings.language' => 'Språk',
 			'settings.theme' => 'Tema',
 			'settings.appearance' => 'Utseende',
 			'settings.videoPlayback' => 'Videouppspelning',
+			'settings.videoPlaybackDescription' => 'Konfigurera uppspelningsbeteende',
 			'settings.advanced' => 'Avancerat',
 			'settings.episodePosterMode' => 'Avsnittsaffisch-stil',
 			'settings.seriesPoster' => 'Serieaffisch',
-			'settings.seriesPosterDescription' => 'Visa seriens affisch för alla avsnitt',
 			'settings.seasonPoster' => 'Säsongsaffisch',
-			'settings.seasonPosterDescription' => 'Visa säsongens affisch för avsnitt',
-			'settings.episodeThumbnail' => 'Avsnittsminiatyr',
-			'settings.episodeThumbnailDescription' => 'Visa 16:9 skärmbild från avsnittet',
+			'settings.episodeThumbnail' => 'Miniatyr',
 			'settings.showHeroSectionDescription' => 'Visa utvalda innehållskarusell på startsidan',
 			'settings.secondsLabel' => 'Sekunder',
 			'settings.minutesLabel' => 'Minuter',
@@ -1430,56 +1845,55 @@ extension on TranslationsSv {
 			'settings.minutesShort' => 'm',
 			'settings.durationHint' => ({required Object min, required Object max}) => 'Ange tid (${min}-${max})',
 			'settings.systemTheme' => 'System',
-			'settings.systemThemeDescription' => 'Följ systeminställningar',
 			'settings.lightTheme' => 'Ljust',
 			'settings.darkTheme' => 'Mörkt',
 			'settings.oledTheme' => 'OLED',
-			'settings.oledThemeDescription' => 'Rent svart för OLED-skärmar',
 			'settings.libraryDensity' => 'Biblioteksdensitet',
 			'settings.compact' => 'Kompakt',
-			'settings.compactDescription' => 'Mindre kort, fler objekt synliga',
-			'settings.normal' => 'Normal',
-			'settings.normalDescription' => 'Standardstorlek',
 			'settings.comfortable' => 'Bekväm',
-			'settings.comfortableDescription' => 'Större kort, färre objekt synliga',
 			'settings.viewMode' => 'Visningsläge',
 			'settings.gridView' => 'Rutnät',
-			'settings.gridViewDescription' => 'Visa objekt i rutnätslayout',
 			'settings.listView' => 'Lista',
-			'settings.listViewDescription' => 'Visa objekt i listlayout',
 			'settings.showHeroSection' => 'Visa hjältesektion',
-			'settings.useGlobalHubs' => 'Använd Plex hem-layout',
-			'settings.useGlobalHubsDescription' => 'Visar startsidans hubbar som den officiella Plex-klienten. När av visas rekommendationer per bibliotek istället.',
+			'settings.useGlobalHubs' => 'Använd startlayout',
+			'settings.useGlobalHubsDescription' => 'Visa startsidans hubbar som den officiella klienten. När av, visas rekommendationer per bibliotek istället.',
 			'settings.showServerNameOnHubs' => 'Visa servernamn på hubbar',
 			'settings.showServerNameOnHubsDescription' => 'Visa alltid servernamnet i hubbtitlar. När av visas endast för duplicerade hubbnamn.',
+			'settings.groupLibrariesByServer' => 'Gruppera bibliotek efter server',
+			'settings.groupLibrariesByServerDescription' => 'Visa en rubrik för varje mediaserver i sidofältet när du är ansluten till flera servrar.',
 			'settings.alwaysKeepSidebarOpen' => 'Håll sidofältet alltid öppet',
 			'settings.alwaysKeepSidebarOpenDescription' => 'Sidofältet förblir expanderat och innehållsytan anpassas',
 			'settings.showUnwatchedCount' => 'Visa antal osedda',
 			'settings.showUnwatchedCountDescription' => 'Visa antal osedda avsnitt för serier och säsonger',
+			'settings.showEpisodeNumberOnCards' => 'Visa avsnittsnummer på kort',
+			'settings.showEpisodeNumberOnCardsDescription' => 'Visa avsnittsnummer tillsammans med säsongen (t.ex. S2 E3) på avsnittskort',
+			'settings.showSeasonPostersOnTabs' => 'Visa säsongsaffischer på flikar',
+			'settings.showSeasonPostersOnTabsDescription' => 'Visa säsongens affisch ovanför varje säsongsflik på en series detaljsida',
 			'settings.hideSpoilers' => 'Dölj spoilers för osedda avsnitt',
 			'settings.hideSpoilersDescription' => 'Gör miniatyrer suddiga och dölj beskrivningar för avsnitt du inte har sett ännu',
 			'settings.playerBackend' => 'Spelarmotor',
 			'settings.exoPlayer' => 'ExoPlayer (Rekommenderad)',
-			'settings.exoPlayerDescription' => 'Android-nativ spelare med bättre hårdvarustöd',
 			'settings.mpv' => 'mpv',
-			'settings.mpvDescription' => 'Avancerad spelare med fler funktioner och ASS-undertextstöd',
 			'settings.hardwareDecoding' => 'Hårdvaruavkodning',
 			'settings.hardwareDecodingDescription' => 'Använd hårdvaruacceleration när tillgängligt',
 			'settings.bufferSize' => 'Bufferstorlek',
 			'settings.bufferSizeMB' => ({required Object size}) => '${size}MB',
 			'settings.bufferSizeAuto' => 'Auto (Rekommenderat)',
 			'settings.bufferSizeWarning' => ({required Object heap, required Object size}) => 'Din enhet har ${heap}MB minne. En buffert på ${size}MB kan orsaka uppspelningsproblem.',
+			'settings.defaultQualityTitle' => 'Standardkvalitet',
+			'settings.defaultQualityDescription' => 'Används vid start av uppspelning. Lägre värden minskar bandbredden.',
 			'settings.subtitleStyling' => 'Undertext-styling',
 			'settings.subtitleStylingDescription' => 'Anpassa undertextutseende',
 			'settings.smallSkipDuration' => 'Kort hoppvaraktighet',
 			'settings.largeSkipDuration' => 'Lång hoppvaraktighet',
 			'settings.rewindOnResume' => 'Spola tillbaka vid återupptagning',
-			'settings.rewindOnResumeDescription' => 'Spola tillbaka med denna tid vid återupptagning av uppspelning',
 			'settings.secondsUnit' => ({required Object seconds}) => '${seconds} sekunder',
 			'settings.defaultSleepTimer' => 'Standard sovtimer',
 			'settings.minutesUnit' => ({required Object minutes}) => '${minutes} minuter',
 			'settings.rememberTrackSelections' => 'Kom ihåg spårval per serie/film',
 			'settings.rememberTrackSelectionsDescription' => 'Spara automatiskt ljud- och undertextspråkpreferenser när du ändrar spår under uppspelning',
+			'settings.showChapterMarkersOnTimeline' => 'Visa kapitelmarkörer på tidslinjen',
+			'settings.showChapterMarkersOnTimelineDescription' => 'Dela upp tidslinjen vid kapitelgränser',
 			'settings.clickVideoTogglesPlayback' => 'Klicka på videon för att växla mellan spela upp och pausa.',
 			'settings.clickVideoTogglesPlaybackDescription' => 'Om detta är aktiverat kommer ett klick på videospelaren att starta eller pausa videon. Annars visas eller döljs uppspelningskontrollerna när du klickar.',
 			'settings.videoPlayerControls' => 'Videospelar-kontroller',
@@ -1488,7 +1902,6 @@ extension on TranslationsSv {
 			'settings.videoPlayerNavigation' => 'Navigering i videospelaren',
 			'settings.videoPlayerNavigationDescription' => 'Använd piltangenter för att navigera videospelarens kontroller',
 			'settings.watchTogetherRelay' => 'Titta Tillsammans-relay',
-			'settings.watchTogetherRelayDefault' => 'Standard',
 			'settings.watchTogetherRelayDescription' => 'Ange en anpassad relay-server för Titta Tillsammans. Alla deltagare måste använda samma server.',
 			'settings.watchTogetherRelayHint' => 'https://min-relay.exempel.se',
 			'settings.crashReporting' => 'Kraschrapportering',
@@ -1503,12 +1916,26 @@ extension on TranslationsSv {
 			'settings.resetSettings' => 'Återställ inställningar',
 			'settings.resetSettingsDescription' => 'Detta återställer alla inställningar till standardvärden. Denna åtgärd kan inte ångras.',
 			'settings.resetSettingsSuccess' => 'Inställningar återställda framgångsrikt',
+			'settings.backup' => 'Säkerhetskopia',
+			'settings.exportSettings' => 'Exportera inställningar',
+			'settings.exportSettingsDescription' => 'Spara dina inställningar till en fil',
+			'settings.exportSettingsSuccess' => 'Inställningar exporterade',
+			'settings.exportSettingsFailed' => 'Kunde inte exportera inställningar',
+			'settings.importSettings' => 'Importera inställningar',
+			'settings.importSettingsDescription' => 'Återställ inställningar från en fil',
+			'settings.importSettingsConfirm' => 'Detta ersätter dina nuvarande inställningar. Fortsätta?',
+			'settings.importSettingsSuccess' => 'Inställningar importerade',
+			'settings.importSettingsFailed' => 'Kunde inte importera inställningar',
+			'settings.importSettingsInvalidFile' => 'Denna fil är inte en giltig Plezy-export',
+			'settings.importSettingsNoUser' => 'Logga in innan du importerar inställningar',
 			'settings.shortcutsReset' => 'Genvägar återställda till standard',
 			'settings.about' => 'Om',
 			'settings.aboutDescription' => 'Appinformation och licenser',
 			'settings.updates' => 'Uppdateringar',
 			'settings.updateAvailable' => 'Uppdatering tillgänglig',
 			'settings.checkForUpdates' => 'Kontrollera uppdateringar',
+			'settings.autoCheckUpdatesOnStartup' => 'Kontrollera uppdateringar automatiskt vid start',
+			'settings.autoCheckUpdatesOnStartupDescription' => 'Visa en avisering när en ny version är tillgänglig vid start',
 			'settings.validationErrorEnterNumber' => 'Vänligen ange ett giltigt nummer',
 			'settings.validationErrorDuration' => ({required Object min, required Object max, required Object unit}) => 'Tiden måste vara mellan ${min} och ${max} ${unit}',
 			'settings.shortcutAlreadyAssigned' => ({required Object action}) => 'Genväg redan tilldelad ${action}',
@@ -1518,6 +1945,8 @@ extension on TranslationsSv {
 			'settings.autoSkipIntroDescription' => 'Hoppa automatiskt över intro-markörer efter några sekunder',
 			'settings.autoSkipCredits' => 'Hoppa Över Credits Automatiskt',
 			'settings.autoSkipCreditsDescription' => 'Hoppa automatiskt över credits och spela nästa avsnitt',
+			'settings.forceSkipMarkerFallback' => 'Tvinga reservmarkörer',
+			'settings.forceSkipMarkerFallbackDescription' => 'Använd kapiteltitelmönster för hoppmarkörer även när Plex tillhandahåller inbyggda markörer',
 			'settings.autoSkipDelay' => 'Fördröjning Auto Hoppa Över',
 			'settings.autoSkipDelayDescription' => ({required Object seconds}) => 'Vänta ${seconds} sekunder innan automatisk överhoppning',
 			'settings.introPattern' => 'Intromarkörsmönster',
@@ -1538,12 +1967,20 @@ extension on TranslationsSv {
 			'settings.downloadLocationSelectError' => 'Kunde inte välja mapp',
 			'settings.downloadOnWifiOnly' => 'Ladda ner endast på WiFi',
 			'settings.downloadOnWifiOnlyDescription' => 'Förhindra nedladdningar vid användning av mobildata',
+			'settings.autoRemoveWatchedDownloads' => 'Ta bort sedda nedladdningar automatiskt',
+			'settings.autoRemoveWatchedDownloadsDescription' => 'Ta automatiskt bort nedladdade avsnitt och filmer när de markerats som sedda',
 			'settings.cellularDownloadBlocked' => 'Nedladdningar är inaktiverade på mobildata. Anslut till WiFi eller ändra inställningen.',
 			'settings.maxVolume' => 'Maximal volym',
 			'settings.maxVolumeDescription' => 'Tillåt volym över 100% för tyst media',
 			'settings.maxVolumePercent' => ({required Object percent}) => '${percent}%',
 			'settings.discordRichPresence' => 'Discord Rich Presence',
 			'settings.discordRichPresenceDescription' => 'Visa vad du tittar på i Discord',
+			'settings.trakt' => 'Trakt',
+			'settings.traktDescription' => 'Synkronisera visningshistorik med Trakt',
+			'settings.trackers' => 'Spårare',
+			'settings.trackersDescription' => 'Synkronisera framsteg till Trakt, MyAnimeList, AniList och Simkl',
+			'settings.companionRemoteServer' => 'Companion Remote-server',
+			'settings.companionRemoteServerDescription' => 'Tillåt mobila enheter i ditt nätverk att styra denna app',
 			'settings.autoPip' => 'Automatisk bild-i-bild',
 			'settings.autoPipDescription' => 'Aktivera bild-i-bild automatiskt när appen lämnas under uppspelning',
 			'settings.matchContentFrameRate' => 'Matcha innehållets bildfrekvens',
@@ -1553,25 +1990,31 @@ extension on TranslationsSv {
 			'settings.matchDynamicRange' => 'Matcha dynamiskt omfång',
 			'settings.matchDynamicRangeDescription' => 'Aktivera HDR automatiskt för HDR-innehåll och återgå till SDR när spelaren stängs',
 			'settings.displaySwitchDelay' => 'Fördröjning vid skärmbyte',
-			'settings.displaySwitchDelayDescription' => 'Sekunder att vänta efter ett skärmlägesbyte innan uppspelning startar',
 			'settings.tunneledPlayback' => 'Tunneluppspelning',
 			'settings.tunneledPlaybackDescription' => 'Använd hårdvaruaccelererad videotunnling. Inaktivera om du ser en svart skärm med ljud vid HDR-innehåll',
 			'settings.requireProfileSelectionOnOpen' => 'Fråga efter profil vid appstart',
 			'settings.requireProfileSelectionOnOpenDescription' => 'Visa profilval varje gång appen öppnas',
 			'settings.confirmExitOnBack' => 'Bekräfta innan avslut',
 			'settings.confirmExitOnBackDescription' => 'Visa en bekräftelsedialog när du trycker tillbaka för att avsluta appen',
+			'settings.forceTvMode' => 'Tvinga TV-läge',
+			'settings.forceTvModeDescription' => 'Använd TV-layouten oavsett automatisk identifiering. Användbart på Android TV-enheter som inte rapporterar leanback-funktionen. Startar om appen vid ändring.',
+			'settings.startInFullscreen' => 'Starta i helskärm',
+			'settings.startInFullscreenDescription' => 'Öppna Plezy i helskärm vid start',
+			'settings.autoHidePerformanceOverlay' => 'Dölj prestandaöverlagring automatiskt',
+			'settings.autoHidePerformanceOverlayDescription' => 'Tona prestandaöverlagringen med uppspelningskontrollerna',
 			'settings.showNavBarLabels' => 'Visa navigeringsfältets etiketter',
 			'settings.showNavBarLabelsDescription' => 'Visa textetiketter under navigeringsfältets ikoner',
 			'settings.liveTvDefaultFavorites' => 'Standard till favoritkanaler',
 			'settings.liveTvDefaultFavoritesDescription' => 'Visa bara favoritkanaler när du öppnar Live TV',
-			'settings.display' => 'Display',
-			'settings.homeScreen' => 'Home Screen',
-			'settings.navigation' => 'Navigation',
-			'settings.content' => 'Content',
-			'settings.player' => 'Player',
-			'settings.subtitlesAndConfig' => 'Subtitles & Configuration',
-			'settings.seekAndTiming' => 'Seek & Timing',
-			'settings.behavior' => 'Behavior',
+			'settings.display' => 'Skärm',
+			'settings.homeScreen' => 'Hemskärm',
+			'settings.navigation' => 'Navigering',
+			'settings.window' => 'Fönster',
+			'settings.content' => 'Innehåll',
+			'settings.player' => 'Spelare',
+			'settings.subtitlesAndConfig' => 'Undertexter och konfiguration',
+			'settings.seekAndTiming' => 'Sök och timing',
+			'settings.behavior' => 'Beteende',
 			'search.hint' => 'Sök filmer, serier, musik...',
 			'search.tryDifferentTerm' => 'Prova en annan sökterm',
 			'search.searchYourMedia' => 'Sök i dina media',
@@ -1590,6 +2033,8 @@ extension on TranslationsSv {
 			'hotkeys.actions.subtitleTrackNext' => 'Nästa undertextspår',
 			'hotkeys.actions.chapterNext' => 'Nästa kapitel',
 			'hotkeys.actions.chapterPrevious' => 'Föregående kapitel',
+			'hotkeys.actions.episodeNext' => 'Nästa avsnitt',
+			'hotkeys.actions.episodePrevious' => 'Föregående avsnitt',
 			'hotkeys.actions.speedIncrease' => 'Öka hastighet',
 			'hotkeys.actions.speedDecrease' => 'Minska hastighet',
 			'hotkeys.actions.speedReset' => 'Återställ hastighet',
@@ -1614,6 +2059,8 @@ extension on TranslationsSv {
 			'fileInfo.colorPrimaries' => 'Färggrunder',
 			'fileInfo.chromaSubsampling' => 'Kroma-undersampling',
 			'fileInfo.channels' => 'Kanaler',
+			'fileInfo.subtitles' => 'Undertexter',
+			'fileInfo.overallBitrate' => 'Total bithastighet',
 			'fileInfo.path' => 'Sökväg',
 			'fileInfo.size' => 'Storlek',
 			'fileInfo.container' => 'Container',
@@ -1681,6 +2128,13 @@ extension on TranslationsSv {
 			'videoControls.tracksButton' => 'Ljud och undertexter',
 			'videoControls.chaptersButton' => 'Kapitel',
 			'videoControls.versionsButton' => 'Videoversioner',
+			'videoControls.versionQualityButton' => 'Version och kvalitet',
+			'videoControls.versionColumnHeader' => 'Version',
+			'videoControls.qualityColumnHeader' => 'Kvalitet',
+			'videoControls.qualityOriginal' => 'Original',
+			'videoControls.qualityPresetLabel' => ({required Object resolution, required Object bitrate}) => '${resolution}p ${bitrate} Mbps',
+			'videoControls.qualityBandwidthEstimate' => ({required Object bitrate}) => '~${bitrate} Mbps',
+			'videoControls.transcodeUnavailableFallback' => 'Transkodning otillgänglig — spelar upp i originalkvalitet',
 			'videoControls.pipButton' => 'Bild-i-bild läge',
 			'videoControls.aspectRatioButton' => 'Bildförhållande',
 			'videoControls.ambientLighting' => 'Ambientbelysning',
@@ -1689,7 +2143,6 @@ extension on TranslationsSv {
 			'videoControls.alwaysOnTopButton' => 'Alltid överst',
 			'videoControls.rotationLockButton' => 'Rotationslås',
 			'videoControls.lockScreen' => 'Lås skärm',
-			'videoControls.unlockScreen' => 'Lås upp skärm',
 			'videoControls.screenLockButton' => 'Skärmlås',
 			'videoControls.longPressToUnlock' => 'Tryck länge för att låsa upp',
 			'videoControls.timelineSlider' => 'Videotidslinje',
@@ -1722,6 +2175,7 @@ extension on TranslationsSv {
 			'messages.markedAsUnwatched' => 'Markerad som osedd',
 			'messages.markedAsWatchedOffline' => 'Markerad som sedd (synkroniseras när online)',
 			'messages.markedAsUnwatchedOffline' => 'Markerad som osedd (synkroniseras när online)',
+			'messages.autoRemovedWatchedDownload' => ({required Object title}) => 'Automatiskt borttagen: ${title}',
 			'messages.removedFromContinueWatching' => 'Borttagen från Fortsätt titta',
 			'messages.errorLoading' => ({required Object error}) => 'Fel: ${error}',
 			'messages.fileInfoNotAvailable' => 'Filinformation inte tillgänglig',
@@ -1729,6 +2183,10 @@ extension on TranslationsSv {
 			'messages.errorLoadingSeries' => 'Fel vid laddning av serie',
 			'messages.errorLoadingSeason' => 'Fel vid laddning av säsong',
 			'messages.musicNotSupported' => 'Musikuppspelning stöds inte ännu',
+			'messages.noDescriptionAvailable' => 'Ingen beskrivning tillgänglig',
+			'messages.noProfilesAvailable' => 'Inga profiler tillgängliga',
+			'messages.contactAdminForProfiles' => 'Kontakta din serveradministratör för att lägga till profiler',
+			'messages.unableToDetermineLibrarySection' => 'Kan inte avgöra biblioteksavdelningen för detta objekt',
 			'messages.logsCleared' => 'Loggar rensade',
 			'messages.logsCopied' => 'Loggar kopierade till urklipp',
 			'messages.noLogsAvailable' => 'Inga loggar tillgängliga',
@@ -1748,10 +2206,11 @@ extension on TranslationsSv {
 			'messages.failedToCreatePlayQueueNoItems' => 'Det gick inte att skapa uppspelningskö – inga objekt',
 			'messages.failedPlayback' => ({required Object action, required Object error}) => 'Kunde inte ${action}: ${error}',
 			'messages.switchingToCompatiblePlayer' => 'Byter till kompatibel spelare...',
+			'messages.serverLimitTitle' => 'Uppspelningen misslyckades',
+			'messages.serverLimitBody' => 'Servern returnerade ett fel (HTTP 500). Det betyder oftast att serverägaren har satt en gräns för bandbredd eller transkodning som avvisar din session. Det finns inget du kan göra från klienten — serverägaren behöver justera sina inställningar.',
 			'messages.logsUploaded' => 'Loggar uppladdade',
 			'messages.logsUploadFailed' => 'Uppladdning av loggar misslyckades',
 			'messages.logId' => 'Logg-ID',
-			'subtitlingStyling.stylingOptions' => 'Stilalternativ',
 			'subtitlingStyling.text' => 'Text',
 			'subtitlingStyling.border' => 'Kantlinje',
 			'subtitlingStyling.background' => 'Bakgrund',
@@ -1762,6 +2221,9 @@ extension on TranslationsSv {
 			'subtitlingStyling.backgroundOpacity' => 'Bakgrundsopacitet',
 			'subtitlingStyling.backgroundColor' => 'Bakgrundsfärg',
 			'subtitlingStyling.position' => 'Position',
+			'subtitlingStyling.assOverride' => 'ASS-åsidosättning',
+			'subtitlingStyling.bold' => 'Fet',
+			'subtitlingStyling.italic' => 'Kursiv',
 			'mpvConfig.title' => 'mpv-konfiguration',
 			'mpvConfig.description' => 'Avancerade videospelares inställningar',
 			'mpvConfig.presets' => 'Förval',
@@ -1777,11 +2239,68 @@ extension on TranslationsSv {
 			'mpvConfig.confirmDeletePreset' => 'Är du säker på att du vill ta bort detta förval?',
 			'mpvConfig.configPlaceholder' => 'gpu-api=vulkan\nhwdec=auto\n# comment',
 			'dialog.confirmAction' => 'Bekräfta åtgärd',
+			'profiles.addPlezyProfile' => 'Lägg till Plezy-profil',
+			'profiles.switchingProfile' => 'Byter profil…',
+			'profiles.deleteThisProfileTitle' => 'Ta bort denna profil?',
+			'profiles.deleteThisProfileMessage' => ({required Object displayName}) => '${displayName} tas bort. Anslutningar påverkas inte.',
+			'profiles.active' => 'Aktiv',
+			'profiles.manage' => 'Hantera',
+			'profiles.delete' => 'Ta bort',
+			'profiles.signOut' => 'Logga ut',
+			'profiles.signOutPlexTitle' => 'Logga ut från Plex?',
+			'profiles.signOutPlexMessage' => ({required Object displayName}) => '${displayName} och alla Plex Home-användare på det här kontot tas bort från den här enheten. Du kan logga in igen när som helst.',
+			'profiles.signedOutPlex' => 'Utloggad från Plex.',
+			'profiles.signOutFailed' => 'Utloggningen misslyckades.',
+			'profiles.sectionTitle' => 'Profiler',
+			'profiles.summarySingle' => 'Lägg till profiler för att blanda hanterade användare och lokala identiteter',
+			'profiles.summaryMultipleWithActive' => ({required Object count, required Object activeName}) => '${count} profiler · aktiv: ${activeName}',
+			'profiles.summaryMultiple' => ({required Object count}) => '${count} profiler',
+			'profiles.removeConnectionTitle' => 'Ta bort anslutning?',
+			'profiles.removeConnectionMessage' => ({required Object displayName, required Object connectionLabel}) => '${displayName} förlorar tillgång till ${connectionLabel}. Anslutningen är fortfarande tillgänglig för andra profiler.',
+			'profiles.deleteProfileTitle' => 'Ta bort profil?',
+			'profiles.deleteProfileMessage' => ({required Object displayName}) => 'Detta tar bort ${displayName} och alla dess anslutningar från den här enheten. De underliggande Plex/Jellyfin-servrarna påverkas inte.',
+			'profiles.profileNameLabel' => 'Profilnamn',
+			'profiles.pinProtectionLabel' => 'PIN-skydd',
+			'profiles.pinManagedByPlex' => 'PIN hanteras av Plex. Redigera på plex.tv.',
+			'profiles.noPinSetEditOnPlex' => 'Ingen PIN angiven. För att kräva en, redigera Home-användaren på plex.tv.',
+			'profiles.setPin' => 'Ange PIN',
+			_ => null,
+		} ?? switch (path) {
+			'profiles.connectionsLabel' => 'Anslutningar',
+			'profiles.add' => 'Lägg till',
+			'profiles.deleteProfileButton' => 'Ta bort profil',
+			'profiles.noConnectionsHint' => 'Inga anslutningar — lägg till en för att använda den här profilen.',
+			'profiles.plexHomeAccount' => 'Plex Home-konto',
+			'profiles.connectionDefault' => 'Standard',
+			'profiles.makeDefault' => 'Gör till standard',
+			'profiles.removeConnection' => 'Ta bort',
+			'profiles.borrowAddTo' => ({required Object displayName}) => 'Lägg till i ${displayName}',
+			'profiles.borrowExplain' => 'Låna en anslutning från en annan profil. PIN-skyddade källprofiler ber om PIN före delning.',
+			'profiles.borrowEmpty' => 'Inget att låna ännu.',
+			'profiles.borrowEmptySubtitle' => 'Anslut först ett Plex-konto eller en Jellyfin-server till en annan profil och kom sedan tillbaka hit.',
+			'profiles.newProfile' => 'Ny profil',
+			'profiles.profileNameHint' => 't.ex. Gäster, Barn, Familjerum',
+			'profiles.pinProtectionOptional' => 'PIN-skydd (valfritt)',
+			'profiles.pinExplain' => '4-siffrig PIN krävs för att växla till den här profilen. Mjuk barriär — vem som helst som kan rensa appdata kan kringgå den.',
+			'profiles.continueButton' => 'Fortsätt',
+			'profiles.pinsDontMatch' => 'PIN-koderna stämmer inte överens',
+			'connections.sectionTitle' => 'Anslutningar',
+			'connections.addConnection' => 'Lägg till anslutning',
+			'connections.addConnectionSubtitleNoProfile' => 'Logga in med Plex eller anslut en Jellyfin-server',
+			'connections.addConnectionSubtitleScoped' => ({required Object displayName}) => 'Lägg till ${displayName} — Plex-konto, Jellyfin-server eller låna från en annan profil',
+			'connections.sessionExpiredOne' => ({required Object name}) => 'Sessionen har gått ut för ${name}',
+			'connections.sessionExpiredMany' => ({required Object count}) => 'Sessionen har gått ut för ${count} servrar',
+			'connections.signInAgain' => 'Logga in igen',
 			'discover.title' => 'Upptäck',
 			'discover.switchProfile' => 'Byt profil',
 			'discover.noContentAvailable' => 'Inget innehåll tillgängligt',
 			'discover.addMediaToLibraries' => 'Lägg till media till dina bibliotek',
 			'discover.continueWatching' => 'Fortsätt titta',
+			'discover.continueWatchingIn' => ({required Object library}) => 'Fortsätt titta i ${library}',
+			'discover.nextUp' => 'Nästa',
+			'discover.nextUpIn' => ({required Object library}) => 'Nästa i ${library}',
+			'discover.recentlyAdded' => 'Nyligen tillagda',
+			'discover.recentlyAddedIn' => ({required Object library}) => 'Nyligen tillagda i ${library}',
 			'discover.playEpisode' => ({required Object season, required Object episode}) => 'S${season}E${episode}',
 			'discover.overview' => 'Översikt',
 			'discover.cast' => 'Rollbesättning',
@@ -1793,7 +2312,7 @@ extension on TranslationsSv {
 			'discover.minutesLeft' => ({required Object minutes}) => '${minutes} min kvar',
 			'errors.searchFailed' => ({required Object error}) => 'Sökning misslyckades: ${error}',
 			'errors.connectionTimeout' => ({required Object context}) => 'Anslutnings-timeout vid laddning ${context}',
-			'errors.connectionFailed' => 'Kan inte ansluta till Plex-server',
+			'errors.connectionFailed' => 'Kan inte ansluta till mediaserver',
 			'errors.failedToLoad' => ({required Object context, required Object error}) => 'Misslyckades att ladda ${context}: ${error}',
 			'errors.noClientAvailable' => 'Ingen klient tillgänglig',
 			'errors.authenticationFailed' => ({required Object error}) => 'Autentisering misslyckades: ${error}',
@@ -1802,6 +2321,8 @@ extension on TranslationsSv {
 			'errors.invalidToken' => 'Ogiltig token',
 			'errors.failedToVerifyToken' => ({required Object error}) => 'Misslyckades att verifiera token: ${error}',
 			'errors.failedToSwitchProfile' => ({required Object displayName}) => 'Misslyckades att byta till ${displayName}',
+			'errors.failedToDeleteProfile' => ({required Object displayName}) => 'Misslyckades att ta bort ${displayName}',
+			'errors.failedToRate' => 'Det gick inte att uppdatera betyget',
 			'libraries.title' => 'Bibliotek',
 			'libraries.scanLibraryFiles' => 'Skanna biblioteksfiler',
 			'libraries.scanLibrary' => 'Skanna bibliotek',
@@ -1816,6 +2337,8 @@ extension on TranslationsSv {
 			'libraries.analysisStarted' => ({required Object title}) => 'Analys startad för "${title}"',
 			'libraries.failedToAnalyze' => ({required Object error}) => 'Misslyckades att analysera bibliotek: ${error}',
 			'libraries.noLibrariesFound' => 'Inga bibliotek hittades',
+			'libraries.allLibrariesHidden' => 'Alla bibliotek är dolda',
+			'libraries.hiddenLibrariesCount' => ({required Object count}) => 'Dolda bibliotek (${count})',
 			'libraries.thisLibraryIsEmpty' => 'Detta bibliotek är tomt',
 			'libraries.all' => 'Alla',
 			'libraries.clearAll' => 'Rensa alla',
@@ -1849,18 +2372,29 @@ extension on TranslationsSv {
 			'libraries.groupings.seasons' => 'Säsonger',
 			'libraries.groupings.episodes' => 'Avsnitt',
 			'libraries.groupings.folders' => 'Mappar',
+			'libraries.filterCategories.genre' => 'Genre',
+			'libraries.filterCategories.year' => 'År',
+			'libraries.filterCategories.contentRating' => 'Åldersgräns',
+			'libraries.filterCategories.tag' => 'Tagg',
+			'libraries.sortLabels.title' => 'Titel',
+			'libraries.sortLabels.dateAdded' => 'Tillagd',
+			'libraries.sortLabels.releaseDate' => 'Releasedatum',
+			'libraries.sortLabels.rating' => 'Betyg',
+			'libraries.sortLabels.lastPlayed' => 'Senast spelad',
+			'libraries.sortLabels.playCount' => 'Antal spelningar',
+			'libraries.sortLabels.random' => 'Slumpmässigt',
+			'libraries.sortLabels.dateShared' => 'Delningsdatum',
+			'libraries.sortLabels.latestEpisodeAirDate' => 'Senaste avsnittets sändningsdatum',
 			'about.title' => 'Om',
 			'about.openSourceLicenses' => 'Öppen källkod-licenser',
 			'about.versionLabel' => ({required Object version}) => 'Version ${version}',
-			'about.appDescription' => 'En vacker Plex-klient för Flutter',
+			'about.appDescription' => 'En vacker Plex- och Jellyfin-klient för Flutter',
 			'about.viewLicensesDescription' => 'Visa licenser för tredjepartsbibliotek',
 			'serverSelection.allServerConnectionsFailed' => 'Misslyckades att ansluta till servrar. Kontrollera ditt nätverk och försök igen.',
 			'serverSelection.noServersFoundForAccount' => ({required Object username, required Object email}) => 'Inga servrar hittades för ${username} (${email})',
 			'serverSelection.failedToLoadServers' => ({required Object error}) => 'Misslyckades att ladda servrar: ${error}',
 			'hubDetail.title' => 'Titel',
 			'hubDetail.releaseYear' => 'Utgivningsår',
-			_ => null,
-		} ?? switch (path) {
 			'hubDetail.dateAdded' => 'Datum tillagd',
 			'hubDetail.rating' => 'Betyg',
 			'hubDetail.noItemsFound' => 'Inga objekt hittades',
@@ -1883,6 +2417,7 @@ extension on TranslationsSv {
 			'liveTv.reloadGuide' => 'Ladda om programguide',
 			'liveTv.now' => 'Nu',
 			'liveTv.today' => 'Idag',
+			'liveTv.tomorrow' => 'I morgon',
 			'liveTv.midnight' => 'Midnatt',
 			'liveTv.overnight' => 'Natt',
 			'liveTv.morning' => 'Morgon',
@@ -1897,26 +2432,64 @@ extension on TranslationsSv {
 			'liveTv.watchFromStart' => ({required Object minutes}) => 'Titta från början (${minutes} min sedan)',
 			'liveTv.watchLive' => 'Titta live',
 			'liveTv.goToLive' => 'Gå till live',
-			'downloads.title' => 'Nedladdningar',
-			'downloads.manage' => 'Hantera',
-			'downloads.tvShows' => 'TV-serier',
-			'downloads.movies' => 'Filmer',
-			'downloads.noDownloads' => 'Inga nedladdningar ännu',
-			'downloads.noDownloadsDescription' => 'Nedladdat innehåll visas här för offline-visning',
-			'downloads.downloadNow' => 'Ladda ner',
-			'downloads.deleteDownload' => 'Ta bort nedladdning',
-			'downloads.retryDownload' => 'Försök igen',
-			'downloads.downloadQueued' => 'Nedladdning köad',
-			'downloads.episodesQueued' => ({required Object count}) => '${count} avsnitt köade för nedladdning',
-			'downloads.downloadDeleted' => 'Nedladdning borttagen',
-			'downloads.deleteConfirm' => ({required Object title}) => 'Är du säker på att du vill ta bort "${title}"? Den nedladdade filen kommer att tas bort från din enhet.',
-			'downloads.deletingWithProgress' => ({required Object title, required Object current, required Object total}) => 'Tar bort ${title}... (${current} av ${total})',
-			'downloads.noDownloadsTree' => 'Inga nedladdningar',
-			'downloads.pauseAll' => 'Pausa alla',
-			'downloads.resumeAll' => 'Återuppta alla',
-			'downloads.deleteAll' => 'Ta bort alla',
-			'downloads.selectVersion' => 'Välj version',
+			'liveTv.record' => 'Spela in',
+			'liveTv.recordEpisode' => 'Spela in avsnitt',
+			'liveTv.recordSeries' => 'Spela in serie',
+			'liveTv.recordOptions' => 'Inspelningsalternativ',
+			'liveTv.recordings' => 'Inspelningar',
+			'liveTv.scheduledRecordings' => 'Schemalagda',
+			'liveTv.recordingRules' => 'Inspelningsregler',
+			'liveTv.noScheduledRecordings' => 'Inga schemalagda inspelningar',
+			'liveTv.noRecordingRules' => 'Inga inspelningsregler än',
+			'liveTv.manageRecording' => 'Hantera inspelning',
+			'liveTv.cancelRecording' => 'Avbryt inspelning',
+			'liveTv.cancelRecordingTitle' => 'Avbryt denna inspelning?',
+			'liveTv.cancelRecordingMessage' => ({required Object title}) => '${title} kommer inte längre att spelas in.',
+			'liveTv.deleteRule' => 'Ta bort regel',
+			'liveTv.deleteRuleTitle' => 'Ta bort inspelningsregel?',
+			'liveTv.deleteRuleMessage' => ({required Object title}) => 'Kommande avsnitt av ${title} kommer inte att spelas in.',
+			'liveTv.recordingScheduled' => 'Inspelning schemalagd',
+			'liveTv.alreadyScheduled' => 'Detta program är redan schemalagt',
+			'liveTv.dvrAdminRequired' => 'DVR-inställningar kräver ett administratörskonto',
+			'liveTv.recordingFailed' => 'Det gick inte att schemalägga inspelning',
+			'liveTv.recordingTargetMissing' => 'Det gick inte att hitta inspelningsbibliotek',
+			'liveTv.recordNotAvailable' => 'Inspelning är inte tillgänglig för detta program',
+			'liveTv.recordingCancelled' => 'Inspelning avbruten',
+			'liveTv.recordingRuleDeleted' => 'Inspelningsregel borttagen',
+			'liveTv.processRecordingRules' => 'Utvärdera regler igen',
+			'liveTv.loadingRecordings' => 'Laddar inspelningar ...',
+			'liveTv.recordingInProgress' => 'Spelar in nu',
+			'liveTv.recordingsCount' => ({required Object count}) => '${count} schemalagda',
+			'liveTv.editRule' => 'Redigera regel',
+			'liveTv.editRuleAction' => 'Redigera',
+			'liveTv.recordingRuleUpdated' => 'Inspelningsregel uppdaterad',
+			'liveTv.guideReloadRequested' => 'Begärde guidens uppdatering',
+			'liveTv.rulesProcessRequested' => 'Begärde regelutvärdering',
+			'liveTv.recordShow' => 'Spela in program',
+			'collections.title' => 'Samlingar',
+			'collections.collection' => 'Samling',
+			'collections.empty' => 'Samlingen är tom',
+			'collections.unknownLibrarySection' => 'Kan inte ta bort: okänd bibliotekssektion',
+			'collections.deleteCollection' => 'Ta bort samling',
+			'collections.deleteConfirm' => ({required Object title}) => 'Är du säker på att du vill ta bort "${title}"? Detta går inte att ångra.',
+			'collections.deleted' => 'Samling borttagen',
+			'collections.deleteFailed' => 'Det gick inte att ta bort samlingen',
+			'collections.deleteFailedWithError' => ({required Object error}) => 'Det gick inte att ta bort samlingen: ${error}',
+			'collections.failedToLoadItems' => ({required Object error}) => 'Det gick inte att läsa in samlingsobjekt: ${error}',
+			'collections.selectCollection' => 'Välj samling',
+			'collections.collectionName' => 'Samlingsnamn',
+			'collections.enterCollectionName' => 'Ange samlingsnamn',
+			'collections.addedToCollection' => 'Tillagd i samling',
+			'collections.errorAddingToCollection' => 'Fel vid tillägg i samling',
+			'collections.created' => 'Samling skapad',
+			'collections.removeFromCollection' => 'Ta bort från samling',
+			'collections.removeFromCollectionConfirm' => ({required Object title}) => 'Ta bort "${title}" från denna samling?',
+			'collections.removedFromCollection' => 'Borttagen från samling',
+			'collections.removeFromCollectionFailed' => 'Misslyckades med att ta bort från samling',
+			'collections.removeFromCollectionError' => ({required Object error}) => 'Fel vid borttagning från samling: ${error}',
+			'collections.searchCollections' => 'Sök samlingar...',
 			'playlists.title' => 'Spellistor',
+			'playlists.playlist' => 'Spellista',
 			'playlists.noPlaylists' => 'Inga spellistor hittades',
 			'playlists.create' => 'Skapa spellista',
 			'playlists.playlistName' => 'Spellistans namn',
@@ -1940,29 +2513,6 @@ extension on TranslationsSv {
 			'playlists.errorAdding' => 'Det gick inte att lägga till i spellista',
 			'playlists.errorReordering' => 'Det gick inte att omordna spellisteobjekt',
 			'playlists.errorRemoving' => 'Det gick inte att ta bort från spellista',
-			'playlists.playlist' => 'Spellista',
-			'collections.title' => 'Samlingar',
-			'collections.collection' => 'Samling',
-			'collections.empty' => 'Samlingen är tom',
-			'collections.unknownLibrarySection' => 'Kan inte ta bort: okänd bibliotekssektion',
-			'collections.deleteCollection' => 'Ta bort samling',
-			'collections.deleteConfirm' => ({required Object title}) => 'Är du säker på att du vill ta bort "${title}"? Detta går inte att ångra.',
-			'collections.deleted' => 'Samling borttagen',
-			'collections.deleteFailed' => 'Det gick inte att ta bort samlingen',
-			'collections.deleteFailedWithError' => ({required Object error}) => 'Det gick inte att ta bort samlingen: ${error}',
-			'collections.failedToLoadItems' => ({required Object error}) => 'Det gick inte att läsa in samlingsobjekt: ${error}',
-			'collections.selectCollection' => 'Välj samling',
-			'collections.collectionName' => 'Samlingsnamn',
-			'collections.enterCollectionName' => 'Ange samlingsnamn',
-			'collections.addedToCollection' => 'Tillagd i samling',
-			'collections.errorAddingToCollection' => 'Fel vid tillägg i samling',
-			'collections.created' => 'Samling skapad',
-			'collections.removeFromCollection' => 'Ta bort från samling',
-			'collections.removeFromCollectionConfirm' => ({required Object title}) => 'Ta bort "${title}" från denna samling?',
-			'collections.removedFromCollection' => 'Borttagen från samling',
-			'collections.removeFromCollectionFailed' => 'Misslyckades med att ta bort från samling',
-			'collections.removeFromCollectionError' => ({required Object error}) => 'Fel vid borttagning från samling: ${error}',
-			'collections.searchCollections' => 'Sök samlingar...',
 			'watchTogether.title' => 'Titta Tillsammans',
 			'watchTogether.description' => 'Titta på innehåll synkroniserat med vänner och familj',
 			'watchTogether.createSession' => 'Skapa Session',
@@ -1997,10 +2547,10 @@ extension on TranslationsSv {
 			'watchTogether.leave' => 'Lämna',
 			'watchTogether.syncing' => 'Synkroniserar...',
 			'watchTogether.joinWatchSession' => 'Gå med i Tittarsession',
-			'watchTogether.enterCodeHint' => 'Ange 8-teckens kod',
+			'watchTogether.enterCodeHint' => 'Ange 5-teckens kod',
 			'watchTogether.pasteFromClipboard' => 'Klistra in från urklipp',
 			'watchTogether.pleaseEnterCode' => 'Vänligen ange en sessionskod',
-			'watchTogether.codeMustBe8Chars' => 'Sessionskod måste vara 8 tecken',
+			'watchTogether.codeMustBe5Chars' => 'Sessionskod måste vara 5 tecken',
 			'watchTogether.joinInstructions' => 'Ange sessionskoden som delats av värden för att gå med i deras tittarsession.',
 			'watchTogether.failedToCreate' => 'Det gick inte att skapa session',
 			'watchTogether.failedToJoin' => 'Det gick inte att gå med i session',
@@ -2013,9 +2563,77 @@ extension on TranslationsSv {
 			'watchTogether.failedToOpenCurrentPlayback' => 'Kunde inte öppna aktuell uppspelning',
 			'watchTogether.participantJoined' => ({required Object name}) => '${name} gick med',
 			'watchTogether.participantLeft' => ({required Object name}) => '${name} lämnade',
+			'watchTogether.participantPaused' => ({required Object name}) => '${name} pausade',
+			'watchTogether.participantResumed' => ({required Object name}) => '${name} återupptog',
+			'watchTogether.participantSeeked' => ({required Object name}) => '${name} spolade',
+			'watchTogether.participantBuffering' => ({required Object name}) => '${name} buffrar',
+			'watchTogether.waitingForParticipants' => 'Väntar på att andra laddar...',
+			'watchTogether.recentRooms' => 'Senaste rum',
+			'watchTogether.renameRoom' => 'Byt namn på rum',
+			'watchTogether.removeRoom' => 'Ta bort',
+			'watchTogether.guestSwitchUnavailable' => 'Kunde inte byta — server inte tillgänglig för synkronisering',
+			'watchTogether.guestSwitchFailed' => 'Kunde inte byta — innehåll hittades inte på denna server',
+			'downloads.title' => 'Nedladdningar',
+			'downloads.manage' => 'Hantera',
+			'downloads.tvShows' => 'TV-serier',
+			'downloads.movies' => 'Filmer',
+			'downloads.noDownloads' => 'Inga nedladdningar ännu',
+			'downloads.noDownloadsDescription' => 'Nedladdat innehåll visas här för offline-visning',
+			'downloads.downloadNow' => 'Ladda ner',
+			'downloads.deleteDownload' => 'Ta bort nedladdning',
+			'downloads.retryDownload' => 'Försök igen',
+			'downloads.downloadQueued' => 'Nedladdning köad',
+			'downloads.serverErrorBitrate' => 'Serverfel — filen överskrider möjligen gränsen för fjärrströmning-bitrate',
+			'downloads.episodesQueued' => ({required Object count}) => '${count} avsnitt köade för nedladdning',
+			'downloads.downloadDeleted' => 'Nedladdning borttagen',
+			'downloads.deleteConfirm' => ({required Object title}) => 'Är du säker på att du vill ta bort "${title}"? Den nedladdade filen kommer att tas bort från din enhet.',
+			'downloads.deletingWithProgress' => ({required Object title, required Object current, required Object total}) => 'Tar bort ${title}... (${current} av ${total})',
+			'downloads.deleting' => 'Tar bort...',
+			'downloads.queuedTooltip' => 'I kö',
+			'downloads.queuedFilesTooltip' => ({required Object files}) => 'I kö: ${files}',
+			'downloads.downloadingTooltip' => 'Laddar ned...',
+			'downloads.downloadingFilesTooltip' => ({required Object files}) => 'Laddar ned ${files}',
+			'downloads.noDownloadsTree' => 'Inga nedladdningar',
+			'downloads.pauseAll' => 'Pausa alla',
+			'downloads.resumeAll' => 'Återuppta alla',
+			'downloads.deleteAll' => 'Ta bort alla',
+			'downloads.selectVersion' => 'Välj version',
+			'downloads.allEpisodes' => 'Alla avsnitt',
+			'downloads.unwatchedOnly' => 'Endast osedda',
+			'downloads.nextNUnwatched' => ({required Object count}) => 'Nästa ${count} osedda',
+			'downloads.customAmount' => 'Ange antal...',
+			'downloads.howManyEpisodes' => 'Hur många avsnitt?',
+			'downloads.itemsQueued' => ({required Object count}) => '${count} objekt köade för nedladdning',
+			'downloads.keepSynced' => 'Håll synkroniserad',
+			'downloads.downloadOnce' => 'Ladda ner en gång',
+			'downloads.keepNUnwatched' => ({required Object count}) => 'Behåll ${count} osedda',
+			'downloads.editSyncRule' => 'Redigera synkregel',
+			'downloads.removeSyncRule' => 'Ta bort synkregel',
+			'downloads.removeSyncRuleConfirm' => ({required Object title}) => 'Sluta synkronisera "${title}"? Nedladdade avsnitt behålls.',
+			'downloads.syncRuleCreated' => ({required Object count}) => 'Synkregel skapad — behåller ${count} osedda avsnitt',
+			'downloads.syncRuleUpdated' => 'Synkregel uppdaterad',
+			'downloads.syncRuleRemoved' => 'Synkregel borttagen',
+			'downloads.syncedNewEpisodes' => ({required Object count, required Object title}) => 'Synkroniserade ${count} nya avsnitt för ${title}',
+			'downloads.activeSyncRules' => 'Synkregler',
+			'downloads.noSyncRules' => 'Inga synkregler',
+			'downloads.manageSyncRule' => 'Hantera synkronisering',
+			'downloads.editEpisodeCount' => 'Antal avsnitt',
+			'downloads.editSyncFilter' => 'Synkroniseringsfilter',
+			'downloads.syncAllItems' => 'Synkroniserar alla objekt',
+			'downloads.syncUnwatchedItems' => 'Synkroniserar osedda objekt',
+			'downloads.syncRuleServerContext' => ({required Object server, required Object status}) => 'Server: ${server} • ${status}',
+			'downloads.syncRuleAvailable' => 'Tillgänglig',
+			'downloads.syncRuleOffline' => 'Offline',
+			'downloads.syncRuleSignInRequired' => 'Inloggning krävs',
+			'downloads.syncRuleNotAvailableForProfile' => 'Inte tillgänglig för aktuell profil',
+			'downloads.syncRuleUnknownServer' => 'Okänd server',
+			'downloads.syncRuleListCreated' => 'Synkroniseringsregel skapad',
 			'shaders.title' => 'Shaders',
 			'shaders.noShaderDescription' => 'Ingen videoförbättring',
 			'shaders.nvscalerDescription' => 'NVIDIA-bildskalning för skarpare video',
+			'shaders.artcnnVariantNeutral' => 'Neutral',
+			'shaders.artcnnVariantDenoise' => 'Brusreducering',
+			'shaders.artcnnVariantDenoiseSharpen' => 'Brusreducering + skärpa',
 			'shaders.qualityFast' => 'Snabb',
 			'shaders.qualityHQ' => 'Hög kvalitet',
 			'shaders.mode' => 'Läge',
@@ -2026,58 +2644,38 @@ extension on TranslationsSv {
 			'shaders.deleteShader' => 'Ta bort shader',
 			'shaders.deleteShaderConfirm' => ({required Object name}) => 'Ta bort "${name}"?',
 			'companionRemote.title' => 'Fjärrkontroll',
-			'companionRemote.connectToDevice' => 'Anslut till enhet',
-			'companionRemote.hostRemoteSession' => 'Starta fjärrsession',
-			'companionRemote.controlThisDevice' => 'Styr den här enheten med din telefon',
-			'companionRemote.remoteControl' => 'Fjärrkontroll',
-			'companionRemote.controlDesktop' => 'Styr en datorenhet',
 			'companionRemote.connectedTo' => ({required Object name}) => 'Ansluten till ${name}',
-			'companionRemote.session.creatingSession' => 'Skapar fjärrsession...',
-			'companionRemote.session.failedToCreate' => 'Kunde inte skapa fjärrsession:',
-			'companionRemote.session.noSession' => 'Ingen session tillgänglig',
-			'companionRemote.session.scanQrCode' => 'Skanna QR-kod',
-			'companionRemote.session.orEnterManually' => 'Eller ange manuellt',
+			'companionRemote.session.startingServer' => 'Startar fjärrserver...',
+			'companionRemote.session.failedToCreate' => 'Kunde inte starta fjärrserver:',
 			'companionRemote.session.hostAddress' => 'Värdadress',
-			'companionRemote.session.sessionId' => 'Sessions-ID',
-			'companionRemote.session.pin' => 'PIN',
 			'companionRemote.session.connected' => 'Ansluten',
-			'companionRemote.session.waitingForConnection' => 'Väntar på anslutning...',
+			'companionRemote.session.serverRunning' => 'Fjärrserver aktiv',
+			'companionRemote.session.serverStopped' => 'Fjärrserver stoppad',
+			'companionRemote.session.serverRunningDescription' => 'Mobila enheter i ditt nätverk kan upptäcka och ansluta till denna app',
+			'companionRemote.session.serverStoppedDescription' => 'Starta servern för att tillåta mobila enheter att ansluta',
 			'companionRemote.session.usePhoneToControl' => 'Använd din mobila enhet för att styra denna app',
-			'companionRemote.session.copiedToClipboard' => ({required Object label}) => '${label} kopierad till urklipp',
-			'companionRemote.session.copyToClipboard' => 'Kopiera till urklipp',
-			'companionRemote.session.newSession' => 'Ny session',
+			'companionRemote.session.startServer' => 'Starta server',
+			'companionRemote.session.stopServer' => 'Stoppa server',
 			'companionRemote.session.minimize' => 'Minimera',
-			'companionRemote.pairing.scan' => 'Skanna',
-			'companionRemote.pairing.manual' => 'Manuell',
-			'companionRemote.pairing.pairWithDesktop' => 'Parkoppla med dator',
-			'companionRemote.pairing.enterSessionDetails' => 'Ange sessionsuppgifterna som visas på din datorenhet',
+			'companionRemote.pairing.discoveryDescription' => 'Enheter i ditt nätverk som kör Plezy med samma Plex-konto visas automatiskt',
 			'companionRemote.pairing.hostAddressHint' => '192.168.1.100:48632',
-			'companionRemote.pairing.sessionIdHint' => 'Ange 8-teckens sessions-ID',
-			'companionRemote.pairing.pinHint' => 'Ange 6-siffrig PIN',
 			'companionRemote.pairing.connecting' => 'Ansluter...',
-			'companionRemote.pairing.tips' => 'Tips',
-			'companionRemote.pairing.tipDesktop' => 'Öppna Plezy på din dator och aktivera Companion Remote via inställningar eller meny',
-			'companionRemote.pairing.tipScan' => 'Använd fliken Skanna för att snabbt parkoppla genom att skanna QR-koden på din dator',
-			'companionRemote.pairing.tipWifi' => 'Se till att båda enheterna är på samma WiFi-nätverk',
-			'companionRemote.pairing.cameraPermissionRequired' => 'Kamerabehörighet krävs för att skanna QR-koder.\nVänligen ge kameraåtkomst i enhetsinställningarna.',
-			'companionRemote.pairing.cameraError' => ({required Object error}) => 'Kunde inte starta kameran: ${error}',
-			'companionRemote.pairing.scanInstruction' => 'Rikta kameran mot QR-koden som visas på din dator',
-			'companionRemote.pairing.invalidQrCode' => 'Ogiltigt QR-kodformat',
-			'companionRemote.pairing.validationHostRequired' => 'Ange en värdadress',
+			'companionRemote.pairing.searchingForDevices' => 'Söker efter enheter...',
+			'companionRemote.pairing.noDevicesFound' => 'Inga enheter hittades i ditt nätverk',
+			'companionRemote.pairing.noDevicesHint' => 'Se till att Plezy är öppet på din dator och att båda enheterna är på samma WiFi-nätverk',
+			'companionRemote.pairing.availableDevices' => 'Tillgängliga enheter',
+			'companionRemote.pairing.manualConnection' => 'Manuell anslutning',
+			'companionRemote.pairing.cryptoInitFailed' => 'Kunde inte initiera säker anslutning. Se till att du är inloggad på ett Plex-konto.',
+			'companionRemote.pairing.validationHostRequired' => 'Ange värdadress',
 			'companionRemote.pairing.validationHostFormat' => 'Format måste vara IP:port (t.ex. 192.168.1.100:48632)',
-			'companionRemote.pairing.validationSessionIdRequired' => 'Ange ett sessions-ID',
-			'companionRemote.pairing.validationSessionIdLength' => 'Sessions-ID måste vara 8 tecken',
-			'companionRemote.pairing.validationPinRequired' => 'Ange en PIN',
-			'companionRemote.pairing.validationPinLength' => 'PIN måste vara 6 siffror',
-			'companionRemote.pairing.connectionTimedOut' => 'Anslutningen tog för lång tid. Kontrollera sessions-ID och PIN.',
-			'companionRemote.pairing.sessionNotFound' => 'Kunde inte hitta sessionen. Kontrollera dina uppgifter.',
+			'companionRemote.pairing.connectionTimedOut' => 'Anslutningen tog för lång tid. Se till att båda enheterna är på samma nätverk.',
+			'companionRemote.pairing.sessionNotFound' => 'Kunde inte hitta enheten. Se till att Plezy körs på värden.',
+			'companionRemote.pairing.authFailed' => 'Autentisering misslyckades. Se till att båda enheterna använder samma Plex-konto.',
 			'companionRemote.pairing.failedToConnect' => ({required Object error}) => 'Kunde inte ansluta: ${error}',
 			'companionRemote.remote.disconnectConfirm' => 'Vill du koppla från fjärrsessionen?',
 			'companionRemote.remote.reconnecting' => 'Återansluter...',
 			'companionRemote.remote.attemptOf' => ({required Object current}) => 'Försök ${current} av 5',
 			'companionRemote.remote.retryNow' => 'Försök nu',
-			'companionRemote.remote.connectionError' => 'Anslutningsfel',
-			'companionRemote.remote.notConnected' => 'Inte ansluten',
 			'companionRemote.remote.tabRemote' => 'Fjärrkontroll',
 			'companionRemote.remote.tabPlay' => 'Spela',
 			'companionRemote.remote.tabMore' => 'Mer',
@@ -2110,7 +2708,7 @@ extension on TranslationsSv {
 			'videoSettings.audioOutput' => 'Ljudutgång',
 			'videoSettings.performanceOverlay' => 'Prestandaöverlägg',
 			'videoSettings.audioPassthrough' => 'Ljudgenomkoppling',
-			'videoSettings.audioNormalization' => 'Ljudnormalisering',
+			'videoSettings.audioNormalization' => 'Normalisera ljudstyrka',
 			'externalPlayer.title' => 'Extern spelare',
 			'externalPlayer.useExternalPlayer' => 'Använd extern spelare',
 			'externalPlayer.useExternalPlayerDescription' => 'Öppna videor i en extern app istället för den inbyggda spelaren',
@@ -2141,8 +2739,12 @@ extension on TranslationsSv {
 			'metadataEdit.summary' => 'Sammanfattning',
 			'metadataEdit.poster' => 'Poster',
 			'metadataEdit.background' => 'Bakgrund',
+			'metadataEdit.logo' => 'Logotyp',
+			'metadataEdit.squareArt' => 'Kvadratisk bild',
 			'metadataEdit.selectPoster' => 'Välj poster',
 			'metadataEdit.selectBackground' => 'Välj bakgrund',
+			'metadataEdit.selectLogo' => 'Välj logotyp',
+			'metadataEdit.selectSquareArt' => 'Välj kvadratisk bild',
 			'metadataEdit.fromUrl' => 'Från URL',
 			'metadataEdit.uploadFile' => 'Ladda upp fil',
 			'metadataEdit.enterImageUrl' => 'Ange bild-URL',
@@ -2176,6 +2778,8 @@ extension on TranslationsSv {
 			'metadataEdit.episodeOrdering' => 'Avsnittsordning',
 			'metadataEdit.tmdbAiring' => 'The Movie Database (Sändning)',
 			'metadataEdit.tvdbAiring' => 'TheTVDB (Sändning)',
+			_ => null,
+		} ?? switch (path) {
 			'metadataEdit.tvdbAbsolute' => 'TheTVDB (Absolut)',
 			'metadataEdit.metadataLanguage' => 'Metadataspråk',
 			'metadataEdit.useOriginalTitle' => 'Använd originaltitel',
@@ -2196,9 +2800,95 @@ extension on TranslationsSv {
 			'metadataEdit.label' => 'Etikett',
 			'metadataEdit.style' => 'Stil',
 			'metadataEdit.mood' => 'Stämning',
+			'matchScreen.match' => 'Matcha...',
+			'matchScreen.fixMatch' => 'Rätta matchning...',
+			'matchScreen.unmatch' => 'Ta bort matchning',
+			'matchScreen.unmatchConfirm' => 'Ta bort den aktuella matchningen för det här objektet? Plex behandlar det som omatchat tills du matchar det igen.',
+			'matchScreen.unmatchSuccess' => 'Matchning borttagen',
+			'matchScreen.unmatchFailed' => 'Det gick inte att ta bort matchningen',
+			'matchScreen.matchApplied' => 'Matchning tillämpad',
+			'matchScreen.matchFailed' => 'Det gick inte att tillämpa matchningen',
+			'matchScreen.titleHint' => 'Titel',
+			'matchScreen.yearHint' => 'År',
+			'matchScreen.search' => 'Sök',
+			'matchScreen.noMatchesFound' => 'Inga matchningar hittades',
 			'serverTasks.title' => 'Serveruppgifter',
 			'serverTasks.failedToLoad' => 'Kunde inte ladda uppgifter',
 			'serverTasks.noTasks' => 'Inga pågående uppgifter',
+			'trakt.title' => 'Trakt',
+			'trakt.connected' => 'Ansluten',
+			'trakt.connectedAs' => ({required Object username}) => 'Ansluten som @${username}',
+			'trakt.disconnectConfirm' => 'Koppla från Trakt-konto?',
+			'trakt.disconnectConfirmBody' => 'Plezy slutar skicka uppspelningshändelser till Trakt. Du kan ansluta igen när som helst.',
+			'trakt.scrobble' => 'Realtids-scrobbling',
+			'trakt.scrobbleDescription' => 'Skicka uppspelnings-, paus- och stopphändelser till Trakt under uppspelning.',
+			'trakt.watchedSync' => 'Synkronisera tittad-status',
+			'trakt.watchedSyncDescription' => 'När du markerar något som tittat i Plezy markeras det också på Trakt.',
+			'trackers.title' => 'Spårare',
+			'trackers.hubSubtitle' => 'Håll ditt tittarprogress synkroniserat med Trakt och andra tjänster.',
+			'trackers.notConnected' => 'Ej ansluten',
+			'trackers.connectedAs' => ({required Object username}) => 'Ansluten som @${username}',
+			'trackers.scrobble' => 'Spåra framsteg automatiskt',
+			'trackers.scrobbleDescription' => 'Uppdaterar din lista när du är klar med ett avsnitt eller en film.',
+			'trackers.disconnectConfirm' => ({required Object service}) => 'Koppla från ${service}?',
+			'trackers.disconnectConfirmBody' => ({required Object service}) => 'Plezy slutar uppdatera din ${service}-lista. Du kan ansluta igen när som helst.',
+			'trackers.connectFailed' => ({required Object service}) => 'Kunde inte ansluta till ${service}. Försök igen.',
+			'trackers.services.mal' => 'MyAnimeList',
+			'trackers.services.anilist' => 'AniList',
+			'trackers.services.simkl' => 'Simkl',
+			'trackers.deviceCode.title' => ({required Object service}) => 'Aktivera Plezy på ${service}',
+			'trackers.deviceCode.body' => ({required Object url}) => 'Besök ${url} och ange den här koden:',
+			'trackers.deviceCode.openToActivate' => ({required Object service}) => 'Öppna ${service} för att aktivera',
+			'trackers.deviceCode.waitingForAuthorization' => 'Väntar på auktorisering…',
+			'trackers.deviceCode.codeCopied' => 'Kod kopierad',
+			'trackers.oauthProxy.title' => ({required Object service}) => 'Logga in på ${service}',
+			'trackers.oauthProxy.body' => 'Skanna den här QR-koden med din telefon, eller öppna URL:en nedan på en enhet med webbläsare.',
+			'trackers.oauthProxy.openToSignIn' => ({required Object service}) => 'Öppna ${service} för att logga in',
+			'trackers.oauthProxy.urlCopied' => 'URL kopierad',
+			'trackers.libraryFilter.title' => 'Biblioteksfilter',
+			'trackers.libraryFilter.subtitleAllSyncing' => 'Synkroniserar alla bibliotek',
+			'trackers.libraryFilter.subtitleNoneSyncing' => 'Ingenting synkroniseras',
+			'trackers.libraryFilter.subtitleBlocked' => ({required Object count}) => '${count} blockerade',
+			'trackers.libraryFilter.subtitleAllowed' => ({required Object count}) => '${count} tillåtna',
+			'trackers.libraryFilter.mode' => 'Filterläge',
+			'trackers.libraryFilter.modeBlacklist' => 'Svartlista',
+			'trackers.libraryFilter.modeWhitelist' => 'Vitlista',
+			'trackers.libraryFilter.modeHintBlacklist' => 'Synkronisera alla bibliotek utom de som markerats nedan.',
+			'trackers.libraryFilter.modeHintWhitelist' => 'Synkronisera endast de bibliotek som markerats nedan.',
+			'trackers.libraryFilter.libraries' => 'Bibliotek',
+			'trackers.libraryFilter.noLibraries' => 'Inga bibliotek tillgängliga',
+			'addServer.addJellyfinTitle' => 'Lägg till Jellyfin-server',
+			'addServer.jellyfinUrlIntro' => 'Ange URL till din Jellyfin-server — t.ex. `https://jellyfin.example.com`. Du kan logga in efteråt.',
+			'addServer.serverUrl' => 'Server-URL',
+			'addServer.findServer' => 'Hitta server',
+			'addServer.username' => 'Användarnamn',
+			'addServer.password' => 'Lösenord',
+			'addServer.signIn' => 'Logga in',
+			'addServer.change' => 'Ändra',
+			'addServer.required' => 'Krävs',
+			'addServer.couldNotReachServer' => ({required Object error}) => 'Kunde inte nå servern: ${error}',
+			'addServer.signInFailed' => ({required Object error}) => 'Inloggning misslyckades: ${error}',
+			'addServer.quickConnectFailed' => ({required Object error}) => 'Quick Connect misslyckades: ${error}',
+			'addServer.addPlexTitle' => 'Logga in med Plex',
+			'addServer.plexAuthIntro' => 'Välj hur du vill logga in på Plex. Webbläsarflödet öppnar plex.tv där du bekräftar anslutningen; QR-alternativet är praktiskt för TV / fjärrenheter.',
+			'addServer.plexQRPrompt' => 'Skanna denna QR-kod för att logga in.',
+			'addServer.waitingForPlexConfirmation' => 'Väntar på att plex.tv ska bekräfta inloggningen…',
+			'addServer.pinExpired' => 'PIN-koden gick ut innan inloggning. Försök igen.',
+			'addServer.duplicatePlexAccount' => 'Den här enheten är redan inloggad på ett Plex-konto. Logga ut från inställningarna för att byta konto.',
+			'addServer.failedToRegisterAccount' => ({required Object error}) => 'Kunde inte registrera kontot: ${error}',
+			'addServer.enterJellyfinUrlError' => 'Ange URL till din Jellyfin-server',
+			'addServer.addConnectionTitle' => 'Lägg till anslutning',
+			'addServer.addConnectionTitleScoped' => ({required Object name}) => 'Lägg till i ${name}',
+			'addServer.addConnectionIntroGlobal' => 'Lägg till ytterligare en medieserver. Du kan blanda Plex-konton och Jellyfin-servrar — innehåll från alla anslutna backends visas tillsammans på startskärmen.',
+			'addServer.addConnectionIntroScoped' => 'Lägg till en ny server, eller låna en från en annan profil.',
+			'addServer.signInWithPlexCard' => 'Logga in med Plex',
+			'addServer.signInWithPlexCardSubtitle' => 'Auktorisera den här enheten mot ditt Plex-konto. Servrar delade med kontot följer med automatiskt.',
+			'addServer.signInWithPlexCardSubtitleScoped' => 'Auktorisera ett nytt Plex-konto. Dess Home-användare visas som profiler.',
+			'addServer.connectToJellyfinCard' => 'Anslut till Jellyfin',
+			'addServer.connectToJellyfinCardSubtitle' => 'Ange URL till din Jellyfin-server och logga in med användarnamn + lösenord (Quick Connect kommer snart).',
+			'addServer.connectToJellyfinCardSubtitleScoped' => ({required Object name}) => 'Logga in på en Jellyfin-server. Kopplas till ${name}.',
+			'addServer.borrowFromAnotherProfile' => 'Låna från en annan profil',
+			'addServer.borrowFromAnotherProfileSubtitle' => 'Återanvänd en anslutning som redan är kopplad till en annan profil. PIN-skyddade källprofiler ber om PIN.',
 			_ => null,
 		};
 	}

@@ -1,13 +1,24 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
 import '../focus/focusable_action_bar.dart';
 import '../focus/input_mode_tracker.dart';
+import '../focus/key_event_utils.dart';
+import '../media/media_item.dart';
+import '../media/media_playlist.dart';
 import '../mixins/grid_focus_node_mixin.dart';
-import '../providers/settings_provider.dart';
-import '../services/settings_service.dart' show ViewMode;
+import '../services/settings_service.dart';
+import '../widgets/settings_builder.dart';
 import '../utils/grid_size_calculator.dart';
 import '../widgets/focusable_media_card.dart';
 import '../widgets/media_grid_delegate.dart';
+import '../widgets/skeleton_media_card.dart';
+
+/// Extract the stable id from a [MediaItem]/[MediaPlaylist] for use as a
+/// Flutter widget Key.
+String _idForItem(Object item) {
+  if (item is MediaItem) return item.id;
+  if (item is MediaPlaylist) return item.id;
+  return identityHashCode(item).toString();
+}
 
 /// Mixin that provides common focus navigation functionality for detail screens.
 /// Handles app bar focus, back navigation, scroll-to-top, and grid item focus management.
@@ -47,13 +58,17 @@ mixin FocusableDetailScreenMixin<T extends StatefulWidget> on State<T>, GridFocu
     setState(() {
       isAppBarFocused = true;
     });
-    actionBarKey.currentState?.getFocusNode(0).requestFocus();
+    actionBarKey.currentState?.requestFocusOnFirst();
     // Scroll to top to show the app bar
     scrollController.animateTo(0, duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
   }
 
   /// Handle BACK key from content - navigate to app bar and set flag to prevent PopScope exit
   void handleBackFromContent() {
+    if (getAppBarActions().isEmpty) {
+      if (mounted) Navigator.pop(context);
+      return;
+    }
     backHandledByKeyEvent = true;
     navigateToAppBar();
   }
@@ -68,11 +83,30 @@ mixin FocusableDetailScreenMixin<T extends StatefulWidget> on State<T>, GridFocu
       isAppBarFocused = false;
     });
 
-    if (targetIndex == 0) {
-      firstItemFocusNode.requestFocus();
-    } else {
-      getGridItemFocusNode(targetIndex, prefix: 'detail_grid_item').requestFocus();
-    }
+    _focusNodeForIndex(targetIndex).requestFocus();
+  }
+
+  FocusNode _focusNodeForIndex(int index) => focusNodeForIndex(index, firstItemFocusNode, prefix: 'detail_grid_item');
+
+  /// Wrap [slivers] in the standard detail-screen scaffold — PopScope that
+  /// defers to [handleBackNavigation], plus a Scaffold with a CustomScrollView
+  /// bound to [scrollController]. Callers build the slivers themselves
+  /// (typically `[appBar, ...header, ...buildStateSlivers(), grid]`).
+  Widget buildDetailScaffold({required List<Widget> slivers}) {
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (BackKeyCoordinator.consumeIfHandled()) return;
+        if (didPop) return;
+        final shouldPop = handleBackNavigation();
+        if (shouldPop && mounted) {
+          Navigator.pop(context);
+        }
+      },
+      child: Scaffold(
+        body: CustomScrollView(controller: scrollController, slivers: slivers),
+      ),
+    );
   }
 
   /// Handle back navigation for PopScope. Returns true if should pop.
@@ -83,8 +117,7 @@ mixin FocusableDetailScreenMixin<T extends StatefulWidget> on State<T>, GridFocu
       return false;
     }
 
-    if (isAppBarFocused) {
-      // Already on app bar, allow exit
+    if (isAppBarFocused || getAppBarActions().isEmpty) {
       return true;
     } else {
       // Focus app bar first
@@ -125,13 +158,16 @@ mixin FocusableDetailScreenMixin<T extends StatefulWidget> on State<T>, GridFocu
   /// Used by collection and smart playlist detail screens.
   Widget buildFocusableGrid({
     required List<dynamic> items,
-    required void Function(String ratingKey) onRefresh,
+    required void Function(String itemId) onRefresh,
     String? collectionId,
     VoidCallback? onListRefresh,
   }) {
-    return Consumer<SettingsProvider>(
-      builder: (context, settingsProvider, child) {
-        final isListMode = settingsProvider.viewMode == ViewMode.list;
+    return SettingsBuilder(
+      prefs: const [SettingsService.viewMode, SettingsService.libraryDensity],
+      builder: (context) {
+        final svc = SettingsService.instanceOrNull!;
+        final isListMode = svc.read(SettingsService.viewMode) == ViewMode.list;
+        final libraryDensity = svc.read(SettingsService.libraryDensity);
 
         if (isListMode) {
           return SliverPadding(
@@ -140,12 +176,10 @@ mixin FocusableDetailScreenMixin<T extends StatefulWidget> on State<T>, GridFocu
               itemCount: items.length,
               itemBuilder: (context, index) {
                 final item = items[index];
-                final focusNode = index == 0
-                    ? firstItemFocusNode
-                    : getGridItemFocusNode(index, prefix: 'detail_grid_item');
+                final focusNode = _focusNodeForIndex(index);
 
                 return FocusableMediaCard(
-                  key: Key(item.ratingKey),
+                  key: Key(_idForItem(item)),
                   item: item,
                   focusNode: focusNode,
                   disableScale: true,
@@ -161,27 +195,22 @@ mixin FocusableDetailScreenMixin<T extends StatefulWidget> on State<T>, GridFocu
           );
         }
 
-        final maxExtent = GridSizeCalculator.getMaxCrossAxisExtent(context, settingsProvider.libraryDensity);
+        final maxExtent = GridSizeCalculator.getMaxCrossAxisExtent(context, libraryDensity);
         return SliverPadding(
           padding: const EdgeInsets.all(8),
           sliver: SliverLayoutBuilder(
             builder: (context, constraints) {
               final columnCount = GridSizeCalculator.getColumnCount(constraints.crossAxisExtent, maxExtent);
               return SliverGrid.builder(
-                gridDelegate: MediaGridDelegate.createDelegate(
-                  context: context,
-                  density: settingsProvider.libraryDensity,
-                ),
+                gridDelegate: MediaGridDelegate.createDelegate(context: context, density: libraryDensity),
                 itemCount: items.length,
                 itemBuilder: (context, index) {
                   final item = items[index];
                   final inFirstRow = GridSizeCalculator.isFirstRow(index, columnCount);
-                  final focusNode = index == 0
-                      ? firstItemFocusNode
-                      : getGridItemFocusNode(index, prefix: 'detail_grid_item');
+                  final focusNode = _focusNodeForIndex(index);
 
                   return FocusableMediaCard(
-                    key: Key(item.ratingKey),
+                    key: Key(_idForItem(item)),
                     item: item,
                     focusNode: focusNode,
                     onRefresh: onRefresh,
@@ -192,6 +221,78 @@ mixin FocusableDetailScreenMixin<T extends StatefulWidget> on State<T>, GridFocu
                     onFocusChange: (hasFocus) => trackGridItemFocus(index, hasFocus),
                   );
                 },
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+
+  /// Sparse-loading version of [buildFocusableGrid]. Renders [totalItems]
+  /// slots; for each, [itemAt] returns the loaded item or null if not yet
+  /// fetched. Null slots render a skeleton and invoke [onSkeletonVisible] so
+  /// the caller can kick off a page fetch containing that index.
+  Widget buildSparseFocusableGrid({
+    required int totalItems,
+    required MediaItem? Function(int index) itemAt,
+    required void Function(String itemId) onRefresh,
+    void Function(int index)? onSkeletonVisible,
+    String? collectionId,
+    VoidCallback? onListRefresh,
+  }) {
+    return SettingsBuilder(
+      prefs: const [SettingsService.viewMode, SettingsService.libraryDensity],
+      builder: (context) {
+        final svc = SettingsService.instanceOrNull!;
+        final isListMode = svc.read(SettingsService.viewMode) == ViewMode.list;
+        final libraryDensity = svc.read(SettingsService.libraryDensity);
+
+        Widget buildTile(int index, {required bool inFirstRow, required bool disableScale}) {
+          final item = itemAt(index);
+          if (item == null) {
+            onSkeletonVisible?.call(index);
+            return const SkeletonMediaCard();
+          }
+          final focusNode = index == 0 ? firstItemFocusNode : getGridItemFocusNode(index, prefix: 'detail_grid_item');
+          return FocusableMediaCard(
+            key: Key(item.id),
+            item: item,
+            focusNode: focusNode,
+            disableScale: disableScale,
+            onRefresh: onRefresh,
+            collectionId: collectionId,
+            onListRefresh: onListRefresh,
+            onNavigateUp: inFirstRow ? navigateToAppBar : null,
+            onBack: handleBackFromContent,
+            onFocusChange: (hasFocus) => trackGridItemFocus(index, hasFocus),
+          );
+        }
+
+        if (isListMode) {
+          return SliverPadding(
+            padding: const EdgeInsets.all(8),
+            sliver: SliverList.builder(
+              itemCount: totalItems,
+              itemBuilder: (context, index) => buildTile(index, inFirstRow: index == 0, disableScale: true),
+            ),
+          );
+        }
+
+        final maxExtent = GridSizeCalculator.getMaxCrossAxisExtent(context, libraryDensity);
+        return SliverPadding(
+          padding: const EdgeInsets.all(8),
+          sliver: SliverLayoutBuilder(
+            builder: (context, constraints) {
+              final columnCount = GridSizeCalculator.getColumnCount(constraints.crossAxisExtent, maxExtent);
+              return SliverGrid.builder(
+                gridDelegate: MediaGridDelegate.createDelegate(context: context, density: libraryDensity),
+                itemCount: totalItems,
+                itemBuilder: (context, index) => buildTile(
+                  index,
+                  inFirstRow: GridSizeCalculator.isFirstRow(index, columnCount),
+                  disableScale: false,
+                ),
               );
             },
           ),

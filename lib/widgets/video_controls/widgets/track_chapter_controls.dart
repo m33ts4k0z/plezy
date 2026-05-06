@@ -1,25 +1,22 @@
-import 'dart:io' show Platform;
-
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/symbols.dart';
 import 'package:flutter/services.dart';
 
 import '../../../focus/dpad_navigator.dart';
+import '../../../media/media_item.dart';
+import '../../../media/media_version.dart';
 import '../../../mpv/mpv.dart';
-import '../../../models/plex_media_info.dart';
-import '../../../models/plex_playback_session.dart';
-import '../../../models/plex_playback_quality.dart';
-import '../../../models/plex_media_version.dart';
+import '../../../media/media_source_info.dart';
 import '../../../services/sleep_timer_service.dart';
 import '../../../utils/platform_detector.dart';
 import '../../../i18n/strings.g.dart';
 import '../../../widgets/overlay_sheet.dart';
-import '../../../models/plex_metadata.dart';
 import '../models/track_controls_state.dart';
+import '../../../models/transcode_quality_preset.dart';
 import '../sheets/chapter_sheet.dart';
 import '../sheets/queue_sheet.dart';
 import '../sheets/track_sheet.dart';
-import '../sheets/version_sheet.dart';
+import '../sheets/version_quality_sheet.dart';
 import '../sheets/video_settings_sheet.dart';
 import '../../../services/shader_service.dart';
 import '../helpers/track_filter_helper.dart';
@@ -28,7 +25,7 @@ import '../video_control_button.dart';
 /// Row of track and chapter control buttons for the video player
 class TrackChapterControls extends StatelessWidget {
   final Player player;
-  final List<PlexChapter> chapters;
+  final List<MediaChapter> chapters;
   final bool chaptersLoaded;
   final TrackControlsState trackControlsState;
   final Function(Duration position)? onSeekCompleted;
@@ -66,10 +63,11 @@ class TrackChapterControls extends StatelessWidget {
     this.hideChaptersAndQueue = false,
   });
 
-  List<PlexMediaVersion> get availableVersions => trackControlsState.availableVersions;
+  List<MediaVersion> get availableVersions => trackControlsState.availableVersions;
   int get selectedMediaIndex => trackControlsState.selectedMediaIndex;
-  List<PlexPlaybackQualityOption> get availablePlaybackQualities => trackControlsState.availablePlaybackQualities;
-  PlexPlaybackQualityOption? get selectedPlaybackQuality => trackControlsState.selectedPlaybackQuality;
+  TranscodeQualityPreset get selectedQualityPreset => trackControlsState.selectedQualityPreset;
+  bool get serverSupportsTranscoding => trackControlsState.serverSupportsTranscoding;
+  ValueChanged<TranscodeQualityPreset>? get onSwitchQualityPreset => trackControlsState.onSwitchQualityPreset;
   int get boxFitMode => trackControlsState.boxFitMode;
   int get audioSyncOffset => trackControlsState.audioSyncOffset;
   int get subtitleSyncOffset => trackControlsState.subtitleSyncOffset;
@@ -84,8 +82,6 @@ class TrackChapterControls extends StatelessWidget {
   VoidCallback? get onToggleFullscreen => trackControlsState.onToggleFullscreen;
   VoidCallback? get onToggleAlwaysOnTop => trackControlsState.onToggleAlwaysOnTop;
   Function(int)? get onSwitchVersion => trackControlsState.onSwitchVersion;
-  Future<void> Function(PlexPlaybackQualityOption quality)? get onPlaybackQualityChanged =>
-      trackControlsState.onPlaybackQualityChanged;
   Function(AudioTrack)? get onAudioTrackChanged => trackControlsState.onAudioTrackChanged;
   Function(SubtitleTrack)? get onSubtitleTrackChanged => trackControlsState.onSubtitleTrackChanged;
   Function(SubtitleTrack)? get onSecondarySubtitleTrackChanged => trackControlsState.onSecondarySubtitleTrackChanged;
@@ -102,12 +98,10 @@ class TrackChapterControls extends StatelessWidget {
   bool get isLive => trackControlsState.isLive;
   bool get subtitlesVisible => trackControlsState.subtitlesVisible;
   bool get showQueueButton => trackControlsState.showQueueButton;
-  Function(PlexMetadata)? get onQueueItemSelected => trackControlsState.onQueueItemSelected;
+  Function(MediaItem)? get onQueueItemSelected => trackControlsState.onQueueItemSelected;
   String get ratingKey => trackControlsState.ratingKey;
   String? get mediaTitle => trackControlsState.mediaTitle;
   Future<void> Function()? get onSubtitleDownloaded => trackControlsState.onSubtitleDownloaded;
-  PlexMediaInfo? get plexMediaInfo => trackControlsState.plexMediaInfo;
-  PlexPlaybackSession? get playbackSession => trackControlsState.playbackSession;
 
   /// Handle key event for button navigation
   KeyEventResult _handleButtonKeyEvent(FocusNode _, KeyEvent event, int index, int totalButtons) {
@@ -189,7 +183,7 @@ class TrackChapterControls extends StatelessWidget {
       builder: (context, snapshot) {
         final tracks = snapshot.data;
         final isMobile = PlatformDetector.isMobile(context);
-        final isDesktop = Platform.isWindows || Platform.isLinux || Platform.isMacOS;
+        final isDesktop = PlatformDetector.isDesktopOS();
 
         // Build list of buttons dynamically to track indices
         final buttons = <Widget>[];
@@ -203,13 +197,7 @@ class TrackChapterControls extends StatelessWidget {
               final sleepTimer = SleepTimerService();
               final isShaderActive =
                   shaderService != null && shaderService!.isSupported && shaderService!.currentPreset.isEnabled;
-              final hasManualQuality = selectedPlaybackQuality != null && !selectedPlaybackQuality!.isOriginal;
-              final isActive =
-                  sleepTimer.isActive ||
-                  audioSyncOffset != 0 ||
-                  subtitleSyncOffset != 0 ||
-                  isShaderActive ||
-                  hasManualQuality;
+              final isActive = sleepTimer.isActive || audioSyncOffset != 0 || subtitleSyncOffset != 0 || isShaderActive;
               return _buildTrackButton(
                 buttonIndex: 0,
                 icon: Symbols.tune_rounded,
@@ -227,9 +215,6 @@ class TrackChapterControls extends StatelessWidget {
                           player: player,
                           audioSyncOffset: audioSyncOffset,
                           subtitleSyncOffset: subtitleSyncOffset,
-                          availablePlaybackQualities: availablePlaybackQualities,
-                          selectedPlaybackQuality: selectedPlaybackQuality,
-                          onPlaybackQualityChanged: onPlaybackQualityChanged,
                           canControl: canControl,
                           isLive: isLive,
                           shaderService: shaderService,
@@ -253,7 +238,7 @@ class TrackChapterControls extends StatelessWidget {
         buttonIndex++;
 
         // Combined audio & subtitles button
-        if (_hasMultipleAudioTracks(tracks) || _hasSubtitles(tracks)) {
+        {
           final currentIndex = buttonIndex;
           final hasSubs = _hasSubtitles(tracks);
           final selectedSub = player.state.track.subtitle;
@@ -284,8 +269,11 @@ class TrackChapterControls extends StatelessWidget {
                         onAudioTrackChanged: onAudioTrackChanged,
                         onSubtitleTrackChanged: onSubtitleTrackChanged,
                         onSecondarySubtitleTrackChanged: onSecondarySubtitleTrackChanged,
-                        plexMediaInfo: plexMediaInfo,
-                        playbackSession: playbackSession,
+                        isTranscoding: trackControlsState.isTranscoding,
+                        sourceAudioTracks: trackControlsState.sourceAudioTracks,
+                        selectedAudioStreamId: trackControlsState.selectedAudioStreamId,
+                        onSwitchAudioStreamId: trackControlsState.onSwitchAudioStreamId,
+                        subtitleSearchSupported: trackControlsState.subtitleSearchSupported,
                       ),
                     )
                     .whenComplete(() => onStartAutoHide?.call());
@@ -301,7 +289,7 @@ class TrackChapterControls extends StatelessWidget {
           buttons.add(
             _buildTrackButton(
               buttonIndex: currentIndex,
-              icon: Symbols.video_library_rounded,
+              icon: Symbols.bookmarks_rounded,
               tooltip: t.videoControls.chaptersButton,
               semanticLabel: t.videoControls.chaptersButton,
               tracks: tracks,
@@ -332,7 +320,7 @@ class TrackChapterControls extends StatelessWidget {
           buttons.add(
             _buildTrackButton(
               buttonIndex: currentIndex,
-              icon: Symbols.queue_music_rounded,
+              icon: Symbols.queue_rounded,
               tooltip: t.videoControls.queue,
               semanticLabel: t.videoControls.queue,
               tracks: tracks,
@@ -349,15 +337,27 @@ class TrackChapterControls extends StatelessWidget {
           buttonIndex++;
         }
 
-        // Versions button
-        if (availableVersions.length > 1 && onSwitchVersion != null) {
+        // Version & Quality button
+        final showVersionQuality =
+            (availableVersions.length > 1 || serverSupportsTranscoding) &&
+            (onSwitchVersion != null || onSwitchQualityPreset != null);
+        if (showVersionQuality) {
           final currentIndex = buttonIndex;
+          // Tooltip narrows to whichever column the sheet will actually
+          // render — Jellyfin items only show the version list, so calling
+          // the button "Version & Quality" implies a quality picker that
+          // isn't there.
+          final buttonLabel = serverSupportsTranscoding
+              ? (availableVersions.length > 1
+                    ? t.videoControls.versionQualityButton
+                    : t.videoControls.qualityColumnHeader)
+              : t.videoControls.versionColumnHeader;
           buttons.add(
             _buildTrackButton(
               buttonIndex: currentIndex,
-              icon: Symbols.video_file_rounded,
-              tooltip: t.videoControls.versionsButton,
-              semanticLabel: t.videoControls.versionsButton,
+              icon: Symbols.video_settings_rounded,
+              tooltip: buttonLabel,
+              semanticLabel: buttonLabel,
               tracks: tracks,
               isMobile: isMobile,
               isDesktop: isDesktop,
@@ -365,10 +365,14 @@ class TrackChapterControls extends StatelessWidget {
                 onCancelAutoHide?.call();
                 OverlaySheetController.of(context)
                     .show(
-                      builder: (_) => VersionSheet(
+                      builder: (_) => VersionQualitySheet(
                         availableVersions: availableVersions,
                         selectedMediaIndex: selectedMediaIndex,
-                        onVersionSelected: onSwitchVersion!,
+                        selectedQualityPreset: selectedQualityPreset,
+                        serverSupportsTranscoding: serverSupportsTranscoding,
+                        sourceDurationMs: trackControlsState.sourceDurationMs,
+                        onVersionSelected: (i) => onSwitchVersion?.call(i),
+                        onQualitySelected: (p) => onSwitchQualityPreset?.call(p),
                       ),
                     )
                     .whenComplete(() => onStartAutoHide?.call());
@@ -496,10 +500,13 @@ class TrackChapterControls extends StatelessWidget {
   /// Calculate total button count for navigation
   int _getButtonCount(Tracks? tracks, bool isMobile, bool isDesktop) {
     int count = 1; // Settings button always shown
-    if (_hasMultipleAudioTracks(tracks) || _hasSubtitles(tracks)) count++;
+    count++; // Audio & subtitles button always shown
     if (chapters.isNotEmpty && !hideChaptersAndQueue) count++;
     if (showQueueButton && onQueueItemSelected != null && !hideChaptersAndQueue) count++;
-    if (availableVersions.length > 1 && onSwitchVersion != null) count++;
+    if ((availableVersions.length > 1 || serverSupportsTranscoding) &&
+        (onSwitchVersion != null || onSwitchQualityPreset != null)) {
+      count++;
+    }
     if (onTogglePIPMode != null) count++;
     if (onCycleBoxFitMode != null) count++;
     if (isMobile && !PlatformDetector.isTV()) count++; // Rotation lock (not on TV)
@@ -508,18 +515,7 @@ class TrackChapterControls extends StatelessWidget {
     return count;
   }
 
-  bool _hasMultipleAudioTracks(Tracks? tracks) {
-    if (Platform.isWindows && playbackSession?.usesTranscodeEndpoint == true) {
-      return (plexMediaInfo?.audioTracks.length ?? 0) > 1;
-    }
-    if (tracks == null) return false;
-    return TrackFilterHelper.hasMultipleTracks<AudioTrack>(tracks.audio);
-  }
-
   bool _hasSubtitles(Tracks? tracks) {
-    if (Platform.isWindows && playbackSession?.usesTranscodeEndpoint == true) {
-      return (plexMediaInfo?.subtitleTracks.length ?? 0) > 0;
-    }
     if (tracks == null) return false;
     return TrackFilterHelper.hasTracks<SubtitleTrack>(tracks.subtitle);
   }

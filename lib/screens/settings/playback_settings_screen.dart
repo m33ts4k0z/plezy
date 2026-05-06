@@ -4,14 +4,17 @@ import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/symbols.dart';
 
 import '../../i18n/strings.g.dart';
+import '../../models/transcode_quality_preset.dart';
 import '../../mpv/player/platform/player_android.dart';
+import '../../utils/quality_preset_labels.dart';
 import '../../services/discord_rpc_service.dart';
 import '../../services/keyboard_shortcuts_service.dart';
-import '../../services/settings_service.dart' as settings;
+import '../../services/settings_service.dart';
 import '../../utils/platform_detector.dart';
 import '../../utils/snackbar_helper.dart';
-import '../../widgets/app_icon.dart';
-import '../../widgets/focused_scroll_scaffold.dart';
+import '../../widgets/setting_tile.dart';
+import '../../widgets/settings_builder.dart';
+import '../../widgets/settings_page.dart';
 import '../../widgets/settings_section.dart';
 import 'external_player_screen.dart';
 import 'mpv_config_screen.dart';
@@ -26,585 +29,331 @@ class PlaybackSettingsScreen extends StatefulWidget {
 }
 
 class _PlaybackSettingsScreenState extends State<PlaybackSettingsScreen> {
-  late settings.SettingsService _settingsService;
   KeyboardShortcutsService? _keyboardService;
-  bool _isLoading = true;
-
-  bool _enableHardwareDecoding = true;
-  int _bufferSize = 0;
-  int _seekTimeSmall = 10;
-  int _seekTimeLarge = 30;
-  int _rewindOnResume = 0;
-  int _sleepTimerDuration = 30;
-  bool _rememberTrackSelections = true;
-  bool _clickVideoTogglesPlayback = false;
-  bool _autoSkipIntro = false;
-  bool _autoSkipCredits = false;
-  int _autoSkipDelay = 5;
-  String _introPattern = settings.SettingsService.defaultIntroPattern;
-  String _creditsPattern = settings.SettingsService.defaultCreditsPattern;
-  int _maxVolume = 100;
-  bool _enableDiscordRPC = false;
-  bool _autoPip = true;
-  bool _matchContentFrameRate = false;
-  bool _matchRefreshRate = false;
-  bool _matchDynamicRange = false;
-  int _displaySwitchDelay = 0;
-  bool _tunneledPlayback = true;
-  bool _useExoPlayer = true;
-  bool _useExternalPlayer = false;
-  String _selectedExternalPlayerName = '';
 
   @override
   void initState() {
     super.initState();
-    _loadSettings();
-  }
-
-  Future<void> _loadSettings() async {
-    _settingsService = await settings.SettingsService.getInstance();
     if (KeyboardShortcutsService.isPlatformSupported()) {
-      _keyboardService = await KeyboardShortcutsService.getInstance();
+      KeyboardShortcutsService.getInstance().then((s) {
+        if (mounted) _keyboardService = s;
+      });
     }
-
-    if (!mounted) return;
-    setState(() {
-      _enableHardwareDecoding = _settingsService.getEnableHardwareDecoding();
-      _bufferSize = _settingsService.getBufferSize();
-      _seekTimeSmall = _settingsService.getSeekTimeSmall();
-      _seekTimeLarge = _settingsService.getSeekTimeLarge();
-      _rewindOnResume = _settingsService.getRewindOnResume();
-      _sleepTimerDuration = _settingsService.getSleepTimerDuration();
-      _rememberTrackSelections = _settingsService.getRememberTrackSelections();
-      _clickVideoTogglesPlayback = _settingsService.getClickVideoTogglesPlayback();
-      _autoSkipIntro = _settingsService.getAutoSkipIntro();
-      _autoSkipCredits = _settingsService.getAutoSkipCredits();
-      _autoSkipDelay = _settingsService.getAutoSkipDelay();
-      _introPattern = _settingsService.getIntroPattern();
-      _creditsPattern = _settingsService.getCreditsPattern();
-      _maxVolume = _settingsService.getMaxVolume();
-      _enableDiscordRPC = _settingsService.getEnableDiscordRPC();
-      _autoPip = _settingsService.getAutoPip();
-      _matchContentFrameRate = _settingsService.getMatchContentFrameRate();
-      _matchRefreshRate = _settingsService.getMatchRefreshRate();
-      _matchDynamicRange = _settingsService.getMatchDynamicRange();
-      _displaySwitchDelay = _settingsService.getDisplaySwitchDelay();
-      _tunneledPlayback = _settingsService.getTunneledPlayback();
-      _useExoPlayer = _settingsService.getUseExoPlayer();
-      _useExternalPlayer = _settingsService.getUseExternalPlayer();
-      _selectedExternalPlayerName = _settingsService.getSelectedExternalPlayer().name;
-      _isLoading = false;
-    });
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_isLoading) {
-      return FocusedScrollScaffold(
-        title: Text(t.settings.videoPlayback),
-        slivers: [const SliverFillRemaining(child: Center(child: CircularProgressIndicator()))],
-      );
-    }
-
     final isMobile = PlatformDetector.isMobile(context);
 
-    return FocusedScrollScaffold(
+    return SettingsPage(
       title: Text(t.settings.videoPlayback),
-      slivers: [
-        SliverList(
-          delegate: SliverChildListDelegate([
-            // --- Player ---
-            SettingsSectionHeader(t.settings.player),
-            if (Platform.isAndroid) _buildPlayerBackendSelector(),
-            _buildExternalPlayerTile(),
-            _buildHardwareDecoding(),
-            if ((Platform.isAndroid && !PlatformDetector.isTV()) || Platform.isIOS || Platform.isMacOS) _buildAutoPip(),
-            if (Platform.isAndroid) _buildMatchContentFrameRate(),
-            if (Platform.isWindows) _buildMatchRefreshRate(),
-            if (Platform.isWindows) _buildMatchDynamicRange(),
-            if (Platform.isWindows && (_matchRefreshRate || _matchDynamicRange)) _buildDisplaySwitchDelay(),
-            if (Platform.isAndroid && _useExoPlayer) _buildTunneledPlayback(),
-            _buildBufferSizeSelector(),
+      children: [
+        SettingsSectionHeader(t.settings.player),
+        if (Platform.isAndroid) _playerBackendSelector(),
+        _externalPlayerTile(),
+        _hardwareDecodingTile(),
+        if ((Platform.isAndroid && !PlatformDetector.isTV()) || Platform.isIOS || Platform.isMacOS) _autoPipTile(),
+        if (Platform.isAndroid) _matchContentFrameRateTile(),
+        if (Platform.isWindows) _matchRefreshRateTile(),
+        if (Platform.isWindows) _matchDynamicRangeTile(),
+        _displaySwitchDelayTile(),
+        _tunneledPlaybackTile(),
+        _bufferSizeTile(),
+        _defaultQualityTile(),
 
-            // --- Subtitles & Config ---
-            SettingsSectionHeader(t.settings.subtitlesAndConfig),
-            _buildSubtitleStylingTile(),
-            if (!Platform.isAndroid || !_useExoPlayer) _buildMpvConfigTile(),
-
-            // --- Seek & Timing ---
-            SettingsSectionHeader(t.settings.seekAndTiming),
-            _buildSmallSkipDuration(),
-            _buildLargeSkipDuration(),
-            _buildRewindOnResume(),
-            _buildDefaultSleepTimer(),
-            _buildMaxVolume(),
-
-            // --- Behavior ---
-            SettingsSectionHeader(t.settings.behavior),
-            if (DiscordRPCService.isAvailable) _buildDiscordRPC(),
-            _buildRememberTrackSelections(),
-            if (!isMobile) _buildClickVideoTogglesPlayback(),
-
-            // --- Auto-Skip ---
-            SettingsSectionHeader(t.settings.autoSkip),
-            _buildAutoSkipIntro(),
-            _buildAutoSkipCredits(),
-            _buildAutoSkipDelay(),
-            _buildIntroPattern(),
-            _buildCreditsPattern(),
-            const SizedBox(height: 24),
-          ]),
+        SettingsSectionHeader(t.settings.subtitlesAndConfig),
+        SettingNavigationTile(
+          icon: Symbols.subtitles_rounded,
+          title: t.settings.subtitleStyling,
+          subtitle: t.settings.subtitleStylingDescription,
+          destinationBuilder: (_) => const SubtitleStylingScreen(),
         ),
+        _mpvConfigTile(),
+
+        SettingsSectionHeader(t.settings.seekAndTiming),
+        SettingNumberTile(
+          pref: SettingsService.seekTimeSmall,
+          icon: Symbols.replay_10_rounded,
+          title: t.settings.smallSkipDuration,
+          subtitleBuilder: (v) => t.settings.secondsUnit(seconds: v.toString()),
+          labelText: t.settings.secondsLabel,
+          suffixText: t.settings.secondsShort,
+          min: 1,
+          max: 120,
+          onAfterWrite: (_) => _keyboardService?.refreshFromStorage(),
+        ),
+        SettingNumberTile(
+          pref: SettingsService.seekTimeLarge,
+          icon: Symbols.replay_30_rounded,
+          title: t.settings.largeSkipDuration,
+          subtitleBuilder: (v) => t.settings.secondsUnit(seconds: v.toString()),
+          labelText: t.settings.secondsLabel,
+          suffixText: t.settings.secondsShort,
+          min: 1,
+          max: 120,
+          onAfterWrite: (_) => _keyboardService?.refreshFromStorage(),
+        ),
+        SettingNumberTile(
+          pref: SettingsService.rewindOnResume,
+          icon: Symbols.replay_rounded,
+          title: t.settings.rewindOnResume,
+          subtitleBuilder: (v) => t.settings.secondsUnit(seconds: v.toString()),
+          labelText: t.settings.secondsLabel,
+          suffixText: t.settings.secondsShort,
+          min: 0,
+          max: 10,
+        ),
+        SettingNumberTile(
+          pref: SettingsService.sleepTimerDuration,
+          icon: Symbols.bedtime_rounded,
+          title: t.settings.defaultSleepTimer,
+          subtitleBuilder: (v) => t.settings.minutesUnit(minutes: v.toString()),
+          labelText: t.settings.minutesLabel,
+          suffixText: t.settings.minutesShort,
+          min: 5,
+          max: 240,
+        ),
+        SettingNumberTile(
+          pref: SettingsService.maxVolume,
+          icon: Symbols.volume_up_rounded,
+          title: t.settings.maxVolume,
+          subtitleBuilder: (v) => t.settings.maxVolumePercent(percent: v.toString()),
+          labelText: t.settings.maxVolumeDescription,
+          suffixText: '%',
+          min: 100,
+          max: 300,
+        ),
+
+        SettingsSectionHeader(t.settings.behavior),
+        if (DiscordRPCService.isAvailable)
+          SettingSwitchTile(
+            pref: SettingsService.enableDiscordRPC,
+            icon: Symbols.chat_rounded,
+            title: t.settings.discordRichPresence,
+            subtitle: t.settings.discordRichPresenceDescription,
+            onAfterWrite: (v) => DiscordRPCService.instance.setEnabled(v),
+          ),
+        if (PlatformDetector.shouldActAsRemoteHost(context))
+          SettingSwitchTile(
+            pref: SettingsService.enableCompanionRemoteServer,
+            icon: Symbols.phone_android_rounded,
+            title: t.settings.companionRemoteServer,
+            subtitle: t.settings.companionRemoteServerDescription,
+          ),
+        SettingSwitchTile(
+          pref: SettingsService.rememberTrackSelections,
+          icon: Symbols.bookmark_rounded,
+          title: t.settings.rememberTrackSelections,
+          subtitle: t.settings.rememberTrackSelectionsDescription,
+        ),
+        SettingSwitchTile(
+          pref: SettingsService.showChapterMarkersOnTimeline,
+          icon: Symbols.bookmarks_rounded,
+          title: t.settings.showChapterMarkersOnTimeline,
+          subtitle: t.settings.showChapterMarkersOnTimelineDescription,
+        ),
+        if (!isMobile)
+          SettingSwitchTile(
+            pref: SettingsService.clickVideoTogglesPlayback,
+            icon: Symbols.play_pause_rounded,
+            title: t.settings.clickVideoTogglesPlayback,
+            subtitle: t.settings.clickVideoTogglesPlaybackDescription,
+          ),
+
+        SettingsSectionHeader(t.settings.autoSkip),
+        SettingSwitchTile(
+          pref: SettingsService.autoSkipIntro,
+          icon: Symbols.fast_forward_rounded,
+          title: t.settings.autoSkipIntro,
+          subtitle: t.settings.autoSkipIntroDescription,
+        ),
+        SettingSwitchTile(
+          pref: SettingsService.autoSkipCredits,
+          icon: Symbols.skip_next_rounded,
+          title: t.settings.autoSkipCredits,
+          subtitle: t.settings.autoSkipCreditsDescription,
+        ),
+        SettingSwitchTile(
+          pref: SettingsService.forceSkipMarkerFallback,
+          icon: Symbols.tune_rounded,
+          title: t.settings.forceSkipMarkerFallback,
+          subtitle: t.settings.forceSkipMarkerFallbackDescription,
+        ),
+        SettingNumberTile(
+          pref: SettingsService.autoSkipDelay,
+          icon: Symbols.timer_rounded,
+          title: t.settings.autoSkipDelay,
+          subtitleBuilder: (v) => t.settings.autoSkipDelayDescription(seconds: v.toString()),
+          labelText: t.settings.secondsLabel,
+          suffixText: t.settings.secondsShort,
+          min: 1,
+          max: 30,
+        ),
+        SettingRegexTile(
+          pref: SettingsService.introPattern,
+          icon: Symbols.match_case_rounded,
+          title: t.settings.introPattern,
+          subtitle: t.settings.introPatternDescription,
+          defaultValue: SettingsService.defaultIntroPattern,
+        ),
+        SettingRegexTile(
+          pref: SettingsService.creditsPattern,
+          icon: Symbols.match_case_rounded,
+          title: t.settings.creditsPattern,
+          subtitle: t.settings.creditsPatternDescription,
+          defaultValue: SettingsService.defaultCreditsPattern,
+        ),
+        const SizedBox(height: 24),
       ],
     );
   }
 
-  // --- Player section ---
+  Widget _playerBackendSelector() => SettingSegmentedTile<bool, bool>(
+    pref: SettingsService.useExoPlayer,
+    icon: Symbols.play_circle_rounded,
+    title: t.settings.playerBackend,
+    segments: [
+      ButtonSegment(value: true, label: Text(t.settings.exoPlayer)),
+      ButtonSegment(value: false, label: Text(t.settings.mpv)),
+    ],
+    decode: (s) => s,
+    encode: (s) => s,
+  );
 
-  Widget _buildPlayerBackendSelector() {
-    return SegmentedSetting<bool>(
-      icon: Symbols.play_circle_rounded,
-      title: t.settings.playerBackend,
-      segments: [
-        ButtonSegment(value: true, label: Text(t.settings.exoPlayer)),
-        ButtonSegment(value: false, label: Text(t.settings.mpv)),
-      ],
-      selected: _useExoPlayer,
-      onChanged: (value) async {
-        setState(() => _useExoPlayer = value);
-        await _settingsService.setUseExoPlayer(value);
-      },
-    );
-  }
+  Widget _externalPlayerTile() => SettingsBuilder(
+    prefs: [SettingsService.useExternalPlayer, SettingsService.selectedExternalPlayer],
+    builder: (context) {
+      final svc = SettingsService.instanceOrNull!;
+      final useExt = svc.read(SettingsService.useExternalPlayer);
+      final player = svc.read(SettingsService.selectedExternalPlayer);
+      return SettingNavigationTile(
+        icon: Symbols.open_in_new_rounded,
+        title: t.externalPlayer.title,
+        subtitle: useExt ? player.name : t.externalPlayer.off,
+        destinationBuilder: (_) => const ExternalPlayerScreen(),
+      );
+    },
+  );
 
-  Widget _buildExternalPlayerTile() {
-    return ListTile(
-      leading: const AppIcon(Symbols.open_in_new_rounded, fill: 1),
-      title: Text(t.externalPlayer.title),
-      subtitle: Text(_useExternalPlayer ? _selectedExternalPlayerName : t.externalPlayer.off),
-      trailing: const AppIcon(Symbols.chevron_right_rounded, fill: 1),
-      onTap: () async {
-        await Navigator.push(context, MaterialPageRoute(builder: (context) => const ExternalPlayerScreen()));
-        final s = await settings.SettingsService.getInstance();
-        if (!mounted) return;
-        setState(() {
-          _useExternalPlayer = s.getUseExternalPlayer();
-          _selectedExternalPlayerName = s.getSelectedExternalPlayer().name;
-        });
-      },
-    );
-  }
+  Widget _hardwareDecodingTile() => SettingSwitchTile(
+    pref: SettingsService.enableHardwareDecoding,
+    icon: Symbols.hardware_rounded,
+    title: t.settings.hardwareDecoding,
+    subtitle: t.settings.hardwareDecodingDescription,
+  );
 
-  Widget _buildHardwareDecoding() {
-    return SwitchListTile(
-      secondary: const AppIcon(Symbols.hardware_rounded, fill: 1),
-      title: Text(t.settings.hardwareDecoding),
-      subtitle: Text(t.settings.hardwareDecodingDescription),
-      value: _enableHardwareDecoding,
-      onChanged: (value) async {
-        setState(() => _enableHardwareDecoding = value);
-        await _settingsService.setEnableHardwareDecoding(value);
-      },
-    );
-  }
+  Widget _autoPipTile() => SettingSwitchTile(
+    pref: SettingsService.autoPip,
+    icon: Symbols.picture_in_picture_alt_rounded,
+    title: t.settings.autoPip,
+    subtitle: t.settings.autoPipDescription,
+  );
 
-  Widget _buildAutoPip() {
-    return SwitchListTile(
-      secondary: const AppIcon(Symbols.picture_in_picture_alt_rounded, fill: 1),
-      title: Text(t.settings.autoPip),
-      subtitle: Text(t.settings.autoPipDescription),
-      value: _autoPip,
-      onChanged: (value) async {
-        setState(() => _autoPip = value);
-        await _settingsService.setAutoPip(value);
-      },
-    );
-  }
+  Widget _matchContentFrameRateTile() => SettingSwitchTile(
+    pref: SettingsService.matchContentFrameRate,
+    icon: Symbols.display_settings_rounded,
+    title: t.settings.matchContentFrameRate,
+    subtitle: t.settings.matchContentFrameRateDescription,
+  );
 
-  Widget _buildMatchContentFrameRate() {
-    return SwitchListTile(
-      secondary: const AppIcon(Symbols.display_settings_rounded, fill: 1),
-      title: Text(t.settings.matchContentFrameRate),
-      subtitle: Text(t.settings.matchContentFrameRateDescription),
-      value: _matchContentFrameRate,
-      onChanged: (value) async {
-        setState(() => _matchContentFrameRate = value);
-        await _settingsService.setMatchContentFrameRate(value);
-      },
-    );
-  }
+  Widget _matchRefreshRateTile() => SettingSwitchTile(
+    pref: SettingsService.matchRefreshRate,
+    icon: Symbols.display_settings_rounded,
+    title: t.settings.matchRefreshRate,
+    subtitle: t.settings.matchRefreshRateDescription,
+  );
 
-  Widget _buildMatchRefreshRate() {
-    return SwitchListTile(
-      secondary: const AppIcon(Symbols.display_settings_rounded, fill: 1),
-      title: Text(t.settings.matchRefreshRate),
-      subtitle: Text(t.settings.matchRefreshRateDescription),
-      value: _matchRefreshRate,
-      onChanged: (value) async {
-        setState(() => _matchRefreshRate = value);
-        await _settingsService.setMatchRefreshRate(value);
-      },
-    );
-  }
+  Widget _matchDynamicRangeTile() => SettingSwitchTile(
+    pref: SettingsService.matchDynamicRange,
+    icon: Symbols.hdr_on_rounded,
+    title: t.settings.matchDynamicRange,
+    subtitle: t.settings.matchDynamicRangeDescription,
+  );
 
-  Widget _buildMatchDynamicRange() {
-    return SwitchListTile(
-      secondary: const AppIcon(Symbols.hdr_on_rounded, fill: 1),
-      title: Text(t.settings.matchDynamicRange),
-      subtitle: Text(t.settings.matchDynamicRangeDescription),
-      value: _matchDynamicRange,
-      onChanged: (value) async {
-        setState(() => _matchDynamicRange = value);
-        await _settingsService.setMatchDynamicRange(value);
-      },
-    );
-  }
-
-  Widget _buildDisplaySwitchDelay() {
-    return ListTile(
-      leading: const AppIcon(Symbols.timer_rounded, fill: 1),
-      title: Text(t.settings.displaySwitchDelay),
-      subtitle: Text(t.settings.secondsUnit(seconds: _displaySwitchDelay.toString())),
-      trailing: const AppIcon(Symbols.chevron_right_rounded, fill: 1),
-      onTap: () => showNumericInputDialog(
-        context: context,
+  Widget _displaySwitchDelayTile() => SettingsBuilder(
+    prefs: const [
+      SettingsService.matchRefreshRate,
+      SettingsService.matchDynamicRange,
+      SettingsService.matchContentFrameRate,
+    ],
+    builder: (context) {
+      final svc = SettingsService.instanceOrNull!;
+      final shouldShow =
+          (Platform.isWindows &&
+              (svc.read(SettingsService.matchRefreshRate) || svc.read(SettingsService.matchDynamicRange))) ||
+          (Platform.isAndroid && svc.read(SettingsService.matchContentFrameRate));
+      if (!shouldShow) return const SizedBox.shrink();
+      return SettingNumberTile(
+        pref: SettingsService.displaySwitchDelay,
+        icon: Symbols.timer_rounded,
         title: t.settings.displaySwitchDelay,
+        subtitleBuilder: (v) => t.settings.secondsUnit(seconds: v.toString()),
         labelText: t.settings.secondsLabel,
         suffixText: t.settings.secondsShort,
         min: 0,
         max: 10,
-        currentValue: _displaySwitchDelay,
-        onSave: (value) async {
-          setState(() => _displaySwitchDelay = value);
-          await _settingsService.setDisplaySwitchDelay(value);
-        },
-      ),
-    );
-  }
+      );
+    },
+  );
 
-  Widget _buildTunneledPlayback() {
-    return SwitchListTile(
-      secondary: const AppIcon(Symbols.tv_options_input_settings_rounded, fill: 1),
-      title: Text(t.settings.tunneledPlayback),
-      subtitle: Text(t.settings.tunneledPlaybackDescription),
-      value: _tunneledPlayback,
-      onChanged: (value) async {
-        setState(() => _tunneledPlayback = value);
-        await _settingsService.setTunneledPlayback(value);
-      },
-    );
-  }
+  Widget _tunneledPlaybackTile() => SettingValueBuilder<bool>(
+    pref: SettingsService.useExoPlayer,
+    builder: (_, useExo, _) {
+      if (!Platform.isAndroid || !useExo) return const SizedBox.shrink();
+      return SettingSwitchTile(
+        pref: SettingsService.tunneledPlayback,
+        icon: Symbols.tv_options_input_settings_rounded,
+        title: t.settings.tunneledPlayback,
+        subtitle: t.settings.tunneledPlaybackDescription,
+      );
+    },
+  );
 
-  Widget _buildBufferSizeSelector() {
-    return ListTile(
-      leading: const AppIcon(Symbols.memory_rounded, fill: 1),
-      title: Text(t.settings.bufferSize),
-      subtitle: Text(
-        _bufferSize == 0 ? t.settings.bufferSizeAuto : t.settings.bufferSizeMB(size: _bufferSize.toString()),
-      ),
-      trailing: const AppIcon(Symbols.chevron_right_rounded, fill: 1),
-      onTap: () async {
-        final bufferOptions = [0, 64, 128, 256, 512, 1024];
-        final value = await showSelectionDialog<int>(
-          context: context,
-          title: t.settings.bufferSize,
-          options: bufferOptions
-              .map((size) => DialogOption(value: size, title: size == 0 ? t.settings.bufferSizeAuto : '${size}MB'))
-              .toList(),
-          currentValue: _bufferSize,
-        );
-        if (value != null) {
-          setState(() {
-            _bufferSize = value;
-            _settingsService.setBufferSize(value);
-          });
-          if (Platform.isAndroid && value > 0) {
-            final heapMB = await PlayerAndroid.getHeapSize();
-            if (heapMB > 0 && value > heapMB ~/ 4 && mounted) {
-              showAppSnackBar(
-                context,
-                t.settings.bufferSizeWarning(heap: heapMB.toString(), size: value.toString()),
-              );
-            }
+  Widget _bufferSizeTile() {
+    final bufferOptions = const [0, 64, 128, 256, 512, 1024];
+    return SettingSelectionTile<int, int>(
+      pref: SettingsService.bufferSize,
+      icon: Symbols.memory_rounded,
+      title: t.settings.bufferSize,
+      subtitleBuilder: (v) => v == 0 ? t.settings.bufferSizeAuto : t.settings.bufferSizeMB(size: v.toString()),
+      options: bufferOptions
+          .map((s) => DialogOption(value: s, title: s == 0 ? t.settings.bufferSizeAuto : '${s}MB'))
+          .toList(),
+      decode: (s) => s,
+      encode: (s) => s,
+      onAfterWrite: (value) async {
+        if (Platform.isAndroid && value > 0) {
+          final heapMB = await PlayerAndroid.getHeapSize();
+          if (heapMB > 0 && value > heapMB ~/ 4 && mounted) {
+            showAppSnackBar(context, t.settings.bufferSizeWarning(heap: heapMB.toString(), size: value.toString()));
           }
         }
       },
     );
   }
 
-  // --- Subtitles & Config section ---
+  Widget _defaultQualityTile() => SettingSelectionTile<TranscodeQualityPreset, TranscodeQualityPreset>(
+    pref: SettingsService.defaultQualityPreset,
+    icon: Symbols.high_quality_rounded,
+    title: t.settings.defaultQualityTitle,
+    subtitleBuilder: qualityPresetLabel,
+    options: TranscodeQualityPreset.displayOrder
+        .map((p) => DialogOption(value: p, title: qualityPresetLabel(p)))
+        .toList(),
+    decode: (p) => p,
+    encode: (p) => p,
+  );
 
-  Widget _buildSubtitleStylingTile() {
-    return ListTile(
-      leading: const AppIcon(Symbols.subtitles_rounded, fill: 1),
-      title: Text(t.settings.subtitleStyling),
-      subtitle: Text(t.settings.subtitleStylingDescription),
-      trailing: const AppIcon(Symbols.chevron_right_rounded, fill: 1),
-      onTap: () {
-        Navigator.push(context, MaterialPageRoute(builder: (context) => const SubtitleStylingScreen()));
-      },
-    );
-  }
-
-  Widget _buildMpvConfigTile() {
-    return ListTile(
-      leading: const AppIcon(Symbols.tune_rounded, fill: 1),
-      title: Text(t.mpvConfig.title),
-      subtitle: Text(t.mpvConfig.description),
-      trailing: const AppIcon(Symbols.chevron_right_rounded, fill: 1),
-      onTap: () {
-        Navigator.push(context, MaterialPageRoute(builder: (context) => const MpvConfigScreen()));
-      },
-    );
-  }
-
-  // --- Seek & Timing section ---
-
-  Widget _buildSmallSkipDuration() {
-    return ListTile(
-      leading: const AppIcon(Symbols.replay_10_rounded, fill: 1),
-      title: Text(t.settings.smallSkipDuration),
-      subtitle: Text(t.settings.secondsUnit(seconds: _seekTimeSmall.toString())),
-      trailing: const AppIcon(Symbols.chevron_right_rounded, fill: 1),
-      onTap: () => showNumericInputDialog(
-        context: context,
-        title: t.settings.smallSkipDuration,
-        labelText: t.settings.secondsLabel,
-        suffixText: t.settings.secondsShort,
-        min: 1,
-        max: 120,
-        currentValue: _seekTimeSmall,
-        onSave: (value) async {
-          setState(() {
-            _seekTimeSmall = value;
-            _settingsService.setSeekTimeSmall(value);
-          });
-          await _keyboardService?.refreshFromStorage();
-        },
-      ),
-    );
-  }
-
-  Widget _buildLargeSkipDuration() {
-    return ListTile(
-      leading: const AppIcon(Symbols.replay_30_rounded, fill: 1),
-      title: Text(t.settings.largeSkipDuration),
-      subtitle: Text(t.settings.secondsUnit(seconds: _seekTimeLarge.toString())),
-      trailing: const AppIcon(Symbols.chevron_right_rounded, fill: 1),
-      onTap: () => showNumericInputDialog(
-        context: context,
-        title: t.settings.largeSkipDuration,
-        labelText: t.settings.secondsLabel,
-        suffixText: t.settings.secondsShort,
-        min: 1,
-        max: 120,
-        currentValue: _seekTimeLarge,
-        onSave: (value) async {
-          setState(() {
-            _seekTimeLarge = value;
-            _settingsService.setSeekTimeLarge(value);
-          });
-          await _keyboardService?.refreshFromStorage();
-        },
-      ),
-    );
-  }
-
-  Widget _buildRewindOnResume() {
-    return ListTile(
-      leading: const AppIcon(Symbols.replay_rounded, fill: 1),
-      title: Text(t.settings.rewindOnResume),
-      subtitle: Text(t.settings.secondsUnit(seconds: _rewindOnResume.toString())),
-      trailing: const AppIcon(Symbols.chevron_right_rounded, fill: 1),
-      onTap: () => showNumericInputDialog(
-        context: context,
-        title: t.settings.rewindOnResume,
-        labelText: t.settings.secondsLabel,
-        suffixText: t.settings.secondsShort,
-        min: 0,
-        max: 10,
-        currentValue: _rewindOnResume,
-        onSave: (value) async {
-          setState(() {
-            _rewindOnResume = value;
-            _settingsService.setRewindOnResume(value);
-          });
-        },
-      ),
-    );
-  }
-
-  Widget _buildDefaultSleepTimer() {
-    return ListTile(
-      leading: const AppIcon(Symbols.bedtime_rounded, fill: 1),
-      title: Text(t.settings.defaultSleepTimer),
-      subtitle: Text(t.settings.minutesUnit(minutes: _sleepTimerDuration.toString())),
-      trailing: const AppIcon(Symbols.chevron_right_rounded, fill: 1),
-      onTap: () => showNumericInputDialog(
-        context: context,
-        title: t.settings.defaultSleepTimer,
-        labelText: t.settings.minutesLabel,
-        suffixText: t.settings.minutesShort,
-        min: 5,
-        max: 240,
-        currentValue: _sleepTimerDuration,
-        onSave: (value) async {
-          setState(() => _sleepTimerDuration = value);
-          await _settingsService.setSleepTimerDuration(value);
-        },
-      ),
-    );
-  }
-
-  Widget _buildMaxVolume() {
-    return ListTile(
-      leading: const AppIcon(Symbols.volume_up_rounded, fill: 1),
-      title: Text(t.settings.maxVolume),
-      subtitle: Text(t.settings.maxVolumePercent(percent: _maxVolume.toString())),
-      trailing: const AppIcon(Symbols.chevron_right_rounded, fill: 1),
-      onTap: () => showNumericInputDialog(
-        context: context,
-        title: t.settings.maxVolume,
-        labelText: t.settings.maxVolumeDescription,
-        suffixText: '%',
-        min: 100,
-        max: 300,
-        currentValue: _maxVolume,
-        onSave: (value) async {
-          setState(() => _maxVolume = value);
-          await _settingsService.setMaxVolume(value);
-        },
-      ),
-    );
-  }
-
-  // --- Behavior section ---
-
-  Widget _buildDiscordRPC() {
-    return SwitchListTile(
-      secondary: const AppIcon(Symbols.chat_rounded, fill: 1),
-      title: Text(t.settings.discordRichPresence),
-      subtitle: Text(t.settings.discordRichPresenceDescription),
-      value: _enableDiscordRPC,
-      onChanged: (value) async {
-        setState(() => _enableDiscordRPC = value);
-        await _settingsService.setEnableDiscordRPC(value);
-        await DiscordRPCService.instance.setEnabled(value);
-      },
-    );
-  }
-
-  Widget _buildRememberTrackSelections() {
-    return SwitchListTile(
-      secondary: const AppIcon(Symbols.bookmark_rounded, fill: 1),
-      title: Text(t.settings.rememberTrackSelections),
-      subtitle: Text(t.settings.rememberTrackSelectionsDescription),
-      value: _rememberTrackSelections,
-      onChanged: (value) async {
-        setState(() => _rememberTrackSelections = value);
-        await _settingsService.setRememberTrackSelections(value);
-      },
-    );
-  }
-
-  Widget _buildClickVideoTogglesPlayback() {
-    return SwitchListTile(
-      secondary: const AppIcon(Symbols.play_pause_rounded, fill: 1),
-      title: Text(t.settings.clickVideoTogglesPlayback),
-      subtitle: Text(t.settings.clickVideoTogglesPlaybackDescription),
-      value: _clickVideoTogglesPlayback,
-      onChanged: (value) async {
-        setState(() => _clickVideoTogglesPlayback = value);
-        await _settingsService.setClickVideoTogglesPlayback(value);
-      },
-    );
-  }
-
-  // --- Auto-Skip section ---
-
-  Widget _buildAutoSkipIntro() {
-    return SwitchListTile(
-      secondary: const AppIcon(Symbols.fast_forward_rounded, fill: 1),
-      title: Text(t.settings.autoSkipIntro),
-      subtitle: Text(t.settings.autoSkipIntroDescription),
-      value: _autoSkipIntro,
-      onChanged: (value) async {
-        setState(() => _autoSkipIntro = value);
-        await _settingsService.setAutoSkipIntro(value);
-      },
-    );
-  }
-
-  Widget _buildAutoSkipCredits() {
-    return SwitchListTile(
-      secondary: const AppIcon(Symbols.skip_next_rounded, fill: 1),
-      title: Text(t.settings.autoSkipCredits),
-      subtitle: Text(t.settings.autoSkipCreditsDescription),
-      value: _autoSkipCredits,
-      onChanged: (value) async {
-        setState(() => _autoSkipCredits = value);
-        await _settingsService.setAutoSkipCredits(value);
-      },
-    );
-  }
-
-  Widget _buildAutoSkipDelay() {
-    return ListTile(
-      leading: const AppIcon(Symbols.timer_rounded, fill: 1),
-      title: Text(t.settings.autoSkipDelay),
-      subtitle: Text(t.settings.autoSkipDelayDescription(seconds: _autoSkipDelay.toString())),
-      trailing: const AppIcon(Symbols.chevron_right_rounded, fill: 1),
-      onTap: () => showNumericInputDialog(
-        context: context,
-        title: t.settings.autoSkipDelay,
-        labelText: t.settings.secondsLabel,
-        suffixText: t.settings.secondsShort,
-        min: 1,
-        max: 30,
-        currentValue: _autoSkipDelay,
-        onSave: (value) async {
-          setState(() => _autoSkipDelay = value);
-          await _settingsService.setAutoSkipDelay(value);
-        },
-      ),
-    );
-  }
-
-  Widget _buildIntroPattern() {
-    return ListTile(
-      leading: const AppIcon(Symbols.match_case_rounded, fill: 1),
-      title: Text(t.settings.introPattern),
-      subtitle: Text(t.settings.introPatternDescription),
-      trailing: const AppIcon(Symbols.chevron_right_rounded, fill: 1),
-      onTap: () => showTextInputDialog(
-        context: context,
-        title: t.settings.introPattern,
-        currentValue: _introPattern,
-        defaultValue: settings.SettingsService.defaultIntroPattern,
-        onSave: (value) async {
-          setState(() => _introPattern = value);
-          await _settingsService.setIntroPattern(value);
-        },
-      ),
-    );
-  }
-
-  Widget _buildCreditsPattern() {
-    return ListTile(
-      leading: const AppIcon(Symbols.match_case_rounded, fill: 1),
-      title: Text(t.settings.creditsPattern),
-      subtitle: Text(t.settings.creditsPatternDescription),
-      trailing: const AppIcon(Symbols.chevron_right_rounded, fill: 1),
-      onTap: () => showTextInputDialog(
-        context: context,
-        title: t.settings.creditsPattern,
-        currentValue: _creditsPattern,
-        defaultValue: settings.SettingsService.defaultCreditsPattern,
-        onSave: (value) async {
-          setState(() => _creditsPattern = value);
-          await _settingsService.setCreditsPattern(value);
-        },
-      ),
-    );
-  }
+  Widget _mpvConfigTile() => SettingValueBuilder<bool>(
+    pref: SettingsService.useExoPlayer,
+    builder: (_, useExo, _) {
+      if (Platform.isAndroid && useExo) return const SizedBox.shrink();
+      return SettingNavigationTile(
+        icon: Symbols.tune_rounded,
+        title: t.mpvConfig.title,
+        subtitle: t.mpvConfig.description,
+        destinationBuilder: (_) => const MpvConfigScreen(),
+      );
+    },
+  );
 }

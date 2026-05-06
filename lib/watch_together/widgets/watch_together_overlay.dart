@@ -6,6 +6,7 @@ import 'package:material_symbols_icons/symbols.dart';
 import 'package:provider/provider.dart';
 
 import '../../i18n/strings.g.dart';
+import '../../utils/app_logger.dart';
 import '../../utils/dialogs.dart';
 import '../../utils/platform_detector.dart';
 import '../../utils/snackbar_helper.dart';
@@ -13,32 +14,22 @@ import '../../widgets/overlay_sheet.dart';
 import '../models/watch_session.dart';
 import '../providers/watch_together_provider.dart';
 
-/// Overlay shown on the video player when in a watch together session
-class WatchTogetherOverlay extends StatelessWidget {
-  /// Callback when the user wants to leave the session
+class WatchTogetherSessionIndicator extends StatelessWidget {
   final VoidCallback? onLeaveSession;
 
-  const WatchTogetherOverlay({super.key, this.onLeaveSession});
+  const WatchTogetherSessionIndicator({super.key, this.onLeaveSession});
 
   @override
   Widget build(BuildContext context) {
     return Consumer<WatchTogetherProvider>(
       builder: (context, provider, child) {
-        if (!provider.isInSession) {
-          return const SizedBox.shrink();
-        }
-
-        return Positioned(
-          top: 16,
-          right: 16,
-          child: _SessionIndicator(
-            participantCount: provider.participantCount,
-            isHost: provider.isHost,
-            isSyncing: provider.isSyncing,
-            controlMode: provider.controlMode,
-            sessionId: provider.sessionId,
-            onTap: () => _showSessionMenu(context, provider),
-          ),
+        return _SessionIndicator(
+          participantCount: provider.participantCount,
+          isHost: provider.isHost,
+          isSyncing: provider.isSyncing,
+          controlMode: provider.controlMode,
+          sessionId: provider.sessionId,
+          onTap: () => _showSessionMenu(context, provider),
         );
       },
     );
@@ -51,7 +42,6 @@ class WatchTogetherOverlay extends StatelessWidget {
   }
 }
 
-/// Small indicator showing session status
 class _SessionIndicator extends StatelessWidget {
   final int participantCount;
   final bool isHost;
@@ -71,8 +61,6 @@ class _SessionIndicator extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-
     return Material(
       color: Colors.black54,
       borderRadius: const BorderRadius.all(Radius.circular(20)),
@@ -94,7 +82,7 @@ class _SessionIndicator extends StatelessWidget {
                       : const CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
                 )
               else
-                Icon(Symbols.group, size: 18, color: isHost ? theme.colorScheme.primary : Colors.white),
+                Icon(Symbols.group, size: 18, color: isHost ? Colors.amber : Colors.white),
 
               const SizedBox(width: 6),
 
@@ -109,13 +97,13 @@ class _SessionIndicator extends StatelessWidget {
                 const SizedBox(width: 6),
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: theme.colorScheme.primary,
-                    borderRadius: const BorderRadius.all(Radius.circular(4)),
+                  decoration: const BoxDecoration(
+                    color: Colors.amber,
+                    borderRadius: BorderRadius.all(Radius.circular(4)),
                   ),
                   child: Text(
                     t.watchTogether.hostBadge,
-                    style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
+                    style: const TextStyle(color: Colors.black, fontSize: 10, fontWeight: FontWeight.bold),
                   ),
                 ),
               ],
@@ -127,7 +115,6 @@ class _SessionIndicator extends StatelessWidget {
   }
 }
 
-/// Bottom sheet showing session details and actions
 class _SessionMenuSheet extends StatelessWidget {
   final WatchTogetherProvider provider;
   final VoidCallback? onLeaveSession;
@@ -284,13 +271,12 @@ class _SessionMenuSheet extends StatelessWidget {
     );
 
     if (confirmed) {
-      provider.leaveSession();
+      unawaited(provider.leaveSession());
       onLeaveSession?.call();
     }
   }
 }
 
-/// Auto-dismissing toast for participant join/leave events
 class ParticipantNotificationOverlay extends StatefulWidget {
   const ParticipantNotificationOverlay({super.key});
 
@@ -310,7 +296,9 @@ class _ParticipantNotificationOverlayState extends State<ParticipantNotification
     try {
       final provider = context.read<WatchTogetherProvider>();
       _subscription = provider.participantEvents.listen(_onEvent);
-    } catch (_) {}
+    } catch (e) {
+      appLogger.d('WatchTogetherOverlay: provider unavailable', error: e);
+    }
   }
 
   void _onEvent(ParticipantEvent event) {
@@ -346,10 +334,16 @@ class _ParticipantNotificationOverlayState extends State<ParticipantNotification
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: _notifications.map((n) {
-            final text = n.event.type == ParticipantEventType.joined
-                ? t.watchTogether.participantJoined(name: n.event.displayName)
-                : t.watchTogether.participantLeft(name: n.event.displayName);
+            final text = switch (n.event.type) {
+              ParticipantEventType.joined => t.watchTogether.participantJoined(name: n.event.displayName),
+              ParticipantEventType.left => t.watchTogether.participantLeft(name: n.event.displayName),
+              ParticipantEventType.paused => t.watchTogether.participantPaused(name: n.event.displayName),
+              ParticipantEventType.resumed => t.watchTogether.participantResumed(name: n.event.displayName),
+              ParticipantEventType.seeked => t.watchTogether.participantSeeked(name: n.event.displayName),
+              ParticipantEventType.buffering => t.watchTogether.participantBuffering(name: n.event.displayName),
+            };
             return Container(
+              key: ValueKey(n.id),
               margin: const EdgeInsets.only(bottom: 4),
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               decoration: const BoxDecoration(
@@ -371,47 +365,68 @@ class _NotificationEntry {
   const _NotificationEntry({required this.id, required this.event});
 }
 
-/// Compact sync indicator for showing during drift correction
 class SyncingIndicator extends StatelessWidget {
   const SyncingIndicator({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return Consumer<WatchTogetherProvider>(
-      builder: (context, provider, child) {
-        if (!provider.isSyncing) {
-          return const SizedBox.shrink();
-        }
-
-        return Positioned(
-          bottom: 80,
-          left: 0,
-          right: 0,
-          child: Center(
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              decoration: const BoxDecoration(
-                color: Colors.black54,
-                borderRadius: BorderRadius.all(Radius.circular(20)),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  SizedBox(
-                    width: 14,
-                    height: 14,
-                    child: PlatformDetector.isTV()
-                        ? const Icon(Symbols.sync_rounded, size: 14, color: Colors.white)
-                        : const CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
-                  ),
-                  const SizedBox(width: 8),
-                  Text(t.watchTogether.syncing, style: const TextStyle(color: Colors.white, fontSize: 12)),
-                ],
-              ),
-            ),
-          ),
-        );
+    return Selector<WatchTogetherProvider, bool>(
+      selector: (_, provider) => provider.isSyncing,
+      builder: (context, isSyncing, child) {
+        if (!isSyncing) return const SizedBox.shrink();
+        return _StatusPill(tvIcon: Symbols.sync_rounded, label: t.watchTogether.syncing);
       },
+    );
+  }
+}
+
+class WaitingForParticipantsIndicator extends StatelessWidget {
+  const WaitingForParticipantsIndicator({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Selector<WatchTogetherProvider, bool>(
+      selector: (_, provider) => provider.isDeferredPlay,
+      builder: (context, isDeferredPlay, child) {
+        if (!isDeferredPlay) return const SizedBox.shrink();
+        return _StatusPill(tvIcon: Symbols.hourglass_empty_rounded, label: t.watchTogether.waitingForParticipants);
+      },
+    );
+  }
+}
+
+class _StatusPill extends StatelessWidget {
+  final IconData tvIcon;
+  final String label;
+
+  const _StatusPill({required this.tvIcon, required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    return Positioned(
+      bottom: 80,
+      left: 0,
+      right: 0,
+      child: Center(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          decoration: const BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.all(Radius.circular(20))),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              SizedBox(
+                width: 14,
+                height: 14,
+                child: PlatformDetector.isTV()
+                    ? Icon(tvIcon, size: 14, color: Colors.white)
+                    : const CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+              ),
+              const SizedBox(width: 8),
+              Text(label, style: const TextStyle(color: Colors.white, fontSize: 12)),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

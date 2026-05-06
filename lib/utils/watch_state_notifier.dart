@@ -1,19 +1,18 @@
-import '../models/plex_metadata.dart';
+import '../media/media_item.dart';
 import 'app_logger.dart';
 import 'base_notifier.dart';
 import 'global_key_utils.dart';
 import 'hierarchical_event_mixin.dart';
 
-/// Types of watch state changes
 enum WatchStateChangeType { watched, unwatched, progressUpdate }
 
 /// Event representing a watch state change with parent chain for hierarchical invalidation
 class WatchStateEvent with HierarchicalEventMixin {
-  /// The item that changed
+  /// The id of the item that changed (Plex ratingKey, Jellyfin GUID, …).
   @override
-  final String ratingKey;
+  final String itemId;
 
-  /// Composite key: serverId:ratingKey
+  /// Composite key: serverId:itemId
   @override
   final String globalKey;
 
@@ -21,12 +20,18 @@ class WatchStateEvent with HierarchicalEventMixin {
   @override
   final String serverId;
 
+  /// Optional backend-private cache namespace for user-scoped servers.
+  ///
+  /// UI invalidation still uses [serverId], but cache writers should prefer
+  /// this when present so Jellyfin user data stays isolated per user.
+  final String? cacheServerId;
+
   /// Type of change
   final WatchStateChangeType changeType;
 
   /// Parent chain for hierarchical invalidation
-  /// For an episode: [seasonRatingKey, showRatingKey]
-  /// For a season: [showRatingKey]
+  /// For an episode: [seasonId, showId]
+  /// For a season: [showId]
   /// For a movie: []
   @override
   final List<String> parentChain;
@@ -40,15 +45,26 @@ class WatchStateEvent with HierarchicalEventMixin {
   /// Whether item is now considered watched (>90% progress or marked)
   final bool? isNowWatched;
 
+  /// Library section this item belongs to — used for per-tracker library
+  /// filtering. Null when emitted without full metadata. Plex sends a
+  /// numeric id, Jellyfin sends a UUID; both round-trip as strings.
+  final String? librarySectionID;
+
   WatchStateEvent({
-    required this.ratingKey,
+    required this.itemId,
     required this.serverId,
     required this.changeType,
     required this.parentChain,
     required this.mediaType,
+    this.cacheServerId,
     this.viewOffset,
     this.isNowWatched,
-  }) : globalKey = buildGlobalKey(serverId, ratingKey);
+    this.librarySectionID,
+  }) : globalKey = buildGlobalKey(serverId, itemId);
+
+  /// `serverId:librarySectionID`, matching [MediaLibrary.globalKey]. Null when
+  /// the library section is unknown.
+  String? get librarySectionGlobalKey => librarySectionID != null ? buildGlobalKey(serverId, librarySectionID!) : null;
 
   @override
   String toString() => 'WatchStateEvent($changeType, $globalKey, parents: $parentChain)';
@@ -65,11 +81,9 @@ class WatchStateNotifier extends BaseNotifier<WatchStateEvent> {
 
   WatchStateNotifier._internal();
 
-  /// Filter for events affecting a specific server
   Stream<WatchStateEvent> forServer(String serverId) => stream.where((e) => e.serverId == serverId);
 
-  /// Filter for events affecting a specific item or its children
-  Stream<WatchStateEvent> forItem(String ratingKey) => stream.where((e) => e.affectsItem(ratingKey));
+  Stream<WatchStateEvent> forItem(String itemId) => stream.where((e) => e.affectsItem(itemId));
 
   /// Emit a watch state event with logging
   @override
@@ -78,47 +92,44 @@ class WatchStateNotifier extends BaseNotifier<WatchStateEvent> {
     super.notify(event);
   }
 
-  /// Helper to emit a watched/unwatched event from metadata
-  void notifyWatched({required PlexMetadata metadata, bool isNowWatched = true}) {
+  /// Helper to emit a watched/unwatched event from a [MediaItem].
+  void notifyWatched({required MediaItem item, bool isNowWatched = true, String? cacheServerId}) {
     notify(
       WatchStateEvent(
-        ratingKey: metadata.ratingKey,
-        serverId: metadata.serverId ?? '',
+        itemId: item.id,
+        serverId: item.serverId ?? '',
+        cacheServerId: cacheServerId,
         changeType: isNowWatched ? WatchStateChangeType.watched : WatchStateChangeType.unwatched,
-        parentChain: _buildParentChain(metadata),
-        mediaType: metadata.type ?? '',
+        parentChain: item.parentChain,
+        mediaType: item.kind.id,
         isNowWatched: isNowWatched,
+        librarySectionID: item.libraryId,
       ),
     );
   }
 
-  /// Helper to emit a progress update event
-  void notifyProgress({required PlexMetadata metadata, required int viewOffset, required int duration}) {
-    const threshold = 0.9;
-    final isNowWatched = duration > 0 && (viewOffset / duration) >= threshold;
+  /// Helper to emit a progress update event.
+  /// [watchedThreshold] defaults to 0.9 — pass the server's configured value
+  /// (`client.watchedThreshold`) when available.
+  void notifyProgress({
+    required MediaItem item,
+    required int viewOffset,
+    required int duration,
+    double watchedThreshold = 0.9,
+  }) {
+    final isNowWatched = duration > 0 && (viewOffset / duration) >= watchedThreshold;
 
     notify(
       WatchStateEvent(
-        ratingKey: metadata.ratingKey,
-        serverId: metadata.serverId ?? '',
+        itemId: item.id,
+        serverId: item.serverId ?? '',
         changeType: WatchStateChangeType.progressUpdate,
-        parentChain: _buildParentChain(metadata),
-        mediaType: metadata.type ?? '',
+        parentChain: item.parentChain,
+        mediaType: item.kind.id,
         viewOffset: viewOffset,
         isNowWatched: isNowWatched,
+        librarySectionID: item.libraryId,
       ),
     );
-  }
-
-  /// Build parent chain from metadata's parent keys
-  List<String> _buildParentChain(PlexMetadata metadata) {
-    final chain = <String>[];
-    if (metadata.parentRatingKey != null) {
-      chain.add(metadata.parentRatingKey!);
-    }
-    if (metadata.grandparentRatingKey != null) {
-      chain.add(metadata.grandparentRatingKey!);
-    }
-    return chain;
   }
 }

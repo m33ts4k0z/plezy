@@ -2,19 +2,21 @@ import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/symbols.dart';
 import 'package:provider/provider.dart';
 
+import '../../focus/focusable_action_bar.dart';
 import '../../focus/focusable_wrapper.dart';
 import '../../i18n/strings.g.dart';
 import '../../models/livetv_channel.dart';
+import '../../mixins/mounted_set_state_mixin.dart';
 import '../../models/livetv_program.dart';
 import '../../providers/multi_server_provider.dart';
 import '../../theme/mono_tokens.dart';
 import '../../utils/formatters.dart';
-import '../../utils/live_tv_player_navigation.dart';
-import '../../utils/plex_image_helper.dart';
 import '../../widgets/app_icon.dart';
 import '../../widgets/focused_scroll_scaffold.dart';
+import '../../widgets/loading_indicator_box.dart';
 import '../../widgets/overlay_sheet.dart';
-import 'program_details_sheet.dart';
+import 'live_tv_actions_mixin.dart';
+import 'livetv_recording_actions.dart';
 
 /// Shows all upcoming airings of a show, matching the Plex "upcoming episodes" view.
 class LiveTvShowScheduleScreen extends StatefulWidget {
@@ -33,9 +35,13 @@ class LiveTvShowScheduleScreen extends StatefulWidget {
   State<LiveTvShowScheduleScreen> createState() => _LiveTvShowScheduleScreenState();
 }
 
-class _LiveTvShowScheduleScreenState extends State<LiveTvShowScheduleScreen> {
+class _LiveTvShowScheduleScreenState extends State<LiveTvShowScheduleScreen>
+    with LiveTvActionsMixin<LiveTvShowScheduleScreen>, MountedSetStateMixin {
   List<LiveTvProgram> _programs = [];
   bool _isLoading = true;
+
+  @override
+  List<LiveTvChannel> get liveTvChannels => widget.channels;
 
   @override
   void initState() {
@@ -45,9 +51,9 @@ class _LiveTvShowScheduleScreenState extends State<LiveTvShowScheduleScreen> {
 
   Future<void> _loadSchedule() async {
     final multiServer = context.read<MultiServerProvider>();
-    final client = multiServer.getClientForServer(widget.serverId);
-    if (client == null) {
-      if (mounted) setState(() => _isLoading = false);
+    final genericClient = multiServer.getClientForServer(widget.serverId);
+    if (genericClient == null) {
+      setStateIfMounted(() => _isLoading = false);
       return;
     }
 
@@ -56,7 +62,9 @@ class _LiveTvShowScheduleScreenState extends State<LiveTvShowScheduleScreen> {
     final beginsAt = now.subtract(const Duration(hours: 1)).millisecondsSinceEpoch ~/ 1000;
     final endsAt = now.add(const Duration(hours: 48)).millisecondsSinceEpoch ~/ 1000;
 
-    final programs = await client.getEpgGrid(beginsAt: beginsAt, endsAt: endsAt);
+    final fromDt = DateTime.fromMillisecondsSinceEpoch(beginsAt * 1000, isUtc: true);
+    final toDt = DateTime.fromMillisecondsSinceEpoch(endsAt * 1000, isUtc: true);
+    final programs = await genericClient.liveTv.fetchSchedule(from: fromDt, to: toDt);
 
     // Filter for this show
     final filtered = programs.where((p) {
@@ -76,76 +84,70 @@ class _LiveTvShowScheduleScreenState extends State<LiveTvShowScheduleScreen> {
     }
   }
 
-  LiveTvChannel? _findChannel(String? channelIdentifier) {
-    if (channelIdentifier == null) return null;
-    return widget.channels.where((ch) {
-      return ch.identifier == channelIdentifier || ch.key == channelIdentifier;
-    }).firstOrNull;
+  /// Resolve the owning client from the [MultiServerProvider]. The show
+  /// schedule screen is opened with a single [serverId], so no per-program
+  /// lookup is needed.
+  bool get _canRecord {
+    final client = context.read<MultiServerProvider>().getClientForServer(widget.serverId);
+    return client != null && client.capabilities.liveTvDvr;
   }
 
-  Future<void> _tuneChannel(LiveTvChannel channel) async {
-    final multiServer = context.read<MultiServerProvider>();
-    final serverInfo =
-        multiServer.liveTvServers.where((s) => s.serverId == channel.serverId).firstOrNull ??
-        multiServer.liveTvServers.firstOrNull;
-    if (serverInfo == null) return;
-
-    final client = multiServer.getClientForServer(serverInfo.serverId);
+  Future<void> _onRecordShow() async {
+    final client = context.read<MultiServerProvider>().getClientForServer(widget.serverId);
     if (client == null) return;
-
-    await navigateToLiveTv(
-      context,
-      client: client,
-      dvrKey: serverInfo.dvrKey,
-      channel: channel,
-      channels: widget.channels,
-    );
-  }
-
-  void _showProgramDetails(LiveTvProgram program, LiveTvChannel? channel) {
-    final multiServer = context.read<MultiServerProvider>();
-    final client = multiServer.getClientForServer(widget.serverId);
-    String? posterUrl;
-    if (program.thumb != null && client != null) {
-      posterUrl = PlexImageHelper.getOptimizedImageUrl(
-        client: client,
-        thumbPath: program.thumb,
-        maxWidth: 80,
-        maxHeight: 120,
-        devicePixelRatio: PlexImageHelper.effectiveDevicePixelRatio(context),
-        imageType: ImageType.poster,
-      );
+    // Use the first program with a guid as the seed for `getSubscriptionTemplate`.
+    // The template returned by Plex includes both episode-level and series-level
+    // entries, so the user can still pick "Record Series" inside the options sheet.
+    LiveTvProgram? seed;
+    for (final p in _programs) {
+      if (p.guid != null && p.guid!.isNotEmpty) {
+        seed = p;
+        break;
+      }
     }
-
-    showProgramDetailsSheet(
-      context,
-      program: program,
-      channel: channel,
-      posterUrl: posterUrl,
-      onTuneChannel: channel != null ? () => _tuneChannel(channel) : null,
-    );
+    if (seed == null) return;
+    await recordProgram(context, client, seed);
   }
 
   @override
   Widget build(BuildContext context) {
+    final showRecord = _canRecord && _programs.any((p) => p.guid != null && p.guid!.isNotEmpty);
     return OverlaySheetHost(
       child: FocusedScrollScaffold(
         title: Text(widget.showTitle),
+        actions: showRecord
+            ? [
+                FocusableActionBar(
+                  actions: [
+                    FocusableAction(
+                      icon: Symbols.fiber_manual_record_rounded,
+                      tooltip: t.liveTv.recordShow,
+                      onPressed: _onRecordShow,
+                    ),
+                  ],
+                ),
+              ]
+            : null,
         slivers: [
           if (_isLoading)
-            const SliverFillRemaining(child: Center(child: CircularProgressIndicator()))
+            LoadingIndicatorBox.sliver
           else if (_programs.isEmpty)
             SliverFillRemaining(child: Center(child: Text(t.liveTv.noPrograms)))
           else
             SliverList(
               delegate: SliverChildBuilderDelegate((context, index) {
                 final program = _programs[index];
-                final channel = _findChannel(program.channelIdentifier);
+                final channel = findChannel(program.channelIdentifier);
                 void onTap() {
                   if (program.isCurrentlyAiring && channel != null) {
-                    _tuneChannel(channel);
+                    tuneChannel(channel);
                   } else {
-                    _showProgramDetails(program, channel);
+                    showProgramDetails(
+                      program: program,
+                      channel: channel,
+                      posterThumb: program.thumb,
+                      posterServerId: widget.serverId,
+                    );
                   }
                 }
 
@@ -198,14 +200,7 @@ class _ScheduleListTile extends StatelessWidget {
 
   String _formatAbsoluteTime(DateTime start, DateTime now, {required bool is24Hour}) {
     final time = formatClockTime(start, is24Hour: is24Hour);
-    final today = DateTime(now.year, now.month, now.day);
-    final startDay = DateTime(start.year, start.month, start.day);
-    final diff = startDay.difference(today).inDays;
-
-    if (diff == 0) return 'Today at $time';
-    if (diff == 1) return 'Tomorrow at $time';
-    final weekday = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'][start.weekday - 1];
-    return '$weekday at $time';
+    return '${formatRelativeDayLabel(start, now: now)} at $time';
   }
 
   @override

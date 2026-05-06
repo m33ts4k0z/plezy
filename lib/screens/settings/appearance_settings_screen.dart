@@ -1,100 +1,156 @@
+import 'dart:async';
+import 'dart:io' show Platform;
+
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/symbols.dart';
 import 'package:provider/provider.dart';
 
 import '../../i18n/strings.g.dart';
-import '../../providers/settings_provider.dart';
 import '../../providers/theme_provider.dart';
-import '../../providers/user_profile_provider.dart';
-import '../../services/settings_service.dart' as settings;
+import '../../profiles/active_profile_provider.dart';
+import '../../services/settings_service.dart' hide ThemeMode;
+import '../../services/settings_service.dart' as settings show ThemeMode;
 import '../../focus/focusable_slider.dart';
 import '../../utils/platform_detector.dart';
 import '../../widgets/app_icon.dart';
-import '../../widgets/focused_scroll_scaffold.dart';
+import '../../widgets/setting_tile.dart';
+import '../../widgets/settings_page.dart';
+import '../../widgets/settings_builder.dart';
 import '../../widgets/settings_section.dart';
 import 'settings_utils.dart';
 
-class AppearanceSettingsScreen extends StatefulWidget {
+class AppearanceSettingsScreen extends StatelessWidget {
   const AppearanceSettingsScreen({super.key});
 
   @override
-  State<AppearanceSettingsScreen> createState() => _AppearanceSettingsScreenState();
-}
-
-class _AppearanceSettingsScreenState extends State<AppearanceSettingsScreen> {
-  late settings.SettingsService _settingsService;
-  bool _isLoading = true;
-  bool _requireProfileSelectionOnOpen = false;
-  bool _confirmExitOnBack = true;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadSettings();
-  }
-
-  Future<void> _loadSettings() async {
-    _settingsService = await settings.SettingsService.getInstance();
-    if (!mounted) return;
-    setState(() {
-      _requireProfileSelectionOnOpen = _settingsService.getRequireProfileSelectionOnOpen();
-      _confirmExitOnBack = _settingsService.getConfirmExitOnBack();
-      _isLoading = false;
-    });
-  }
-
-  @override
   Widget build(BuildContext context) {
-    if (_isLoading) {
-      return FocusedScrollScaffold(
-        title: Text(t.settings.appearance),
-        slivers: [const SliverFillRemaining(child: Center(child: CircularProgressIndicator()))],
-      );
-    }
-
-    return FocusedScrollScaffold(
+    return SettingsPage(
       title: Text(t.settings.appearance),
-      slivers: [
-        SliverList(
-          delegate: SliverChildListDelegate([
-            // --- Display ---
-            SettingsSectionHeader(t.settings.display),
-            _buildThemeSelector(),
-            _buildLanguageSelector(),
-            _buildDensitySelector(),
-            _buildViewModeSelector(),
-            _buildEpisodePosterModeSelector(),
-
-            // --- Home Screen ---
-            SettingsSectionHeader(t.settings.homeScreen),
-            _buildShowHeroSection(),
-            _buildUseGlobalHubs(),
-            _buildShowServerNameOnHubs(),
-
-            // --- Navigation ---
-            SettingsSectionHeader(t.settings.navigation),
-            if (PlatformDetector.shouldUseSideNavigation(context)) _buildAlwaysKeepSidebarOpen(),
-            if (!PlatformDetector.shouldUseSideNavigation(context)) _buildShowNavBarLabels(),
-            _buildShowUnwatchedCount(),
-
-            // --- Content ---
-            SettingsSectionHeader(t.settings.content),
-            _buildLiveTvDefaultFavorites(),
-            _buildHideSpoilers(),
-            _buildRequireProfileSelection(),
-            if (PlatformDetector.isTV()) _buildConfirmExitOnBack(),
-            const SizedBox(height: 24),
-          ]),
+      children: [
+        SettingsSectionHeader(t.settings.display),
+        _themeSelector(),
+        _languageSelector(context),
+        _densitySelector(),
+        _viewModeSelector(),
+        _episodePosterModeSelector(),
+        SettingSwitchTile(
+          pref: SettingsService.showEpisodeNumberOnCards,
+          icon: Symbols.tag_rounded,
+          title: t.settings.showEpisodeNumberOnCards,
+          subtitle: t.settings.showEpisodeNumberOnCardsDescription,
         ),
+        SettingSwitchTile(
+          pref: SettingsService.showSeasonPostersOnTabs,
+          icon: Symbols.image_rounded,
+          title: t.settings.showSeasonPostersOnTabs,
+          subtitle: t.settings.showSeasonPostersOnTabsDescription,
+        ),
+
+        SettingsSectionHeader(t.settings.homeScreen),
+        SettingSwitchTile(
+          pref: SettingsService.showHeroSection,
+          icon: Symbols.featured_play_list_rounded,
+          title: t.settings.showHeroSection,
+          subtitle: t.settings.showHeroSectionDescription,
+        ),
+        SettingSwitchTile(
+          pref: SettingsService.useGlobalHubs,
+          icon: Symbols.home_rounded,
+          title: t.settings.useGlobalHubs,
+          subtitle: t.settings.useGlobalHubsDescription,
+        ),
+        SettingSwitchTile(
+          pref: SettingsService.showServerNameOnHubs,
+          icon: Symbols.dns_rounded,
+          title: t.settings.showServerNameOnHubs,
+          subtitle: t.settings.showServerNameOnHubsDescription,
+        ),
+
+        SettingsSectionHeader(t.settings.navigation),
+        if (Platform.isAndroid)
+          SettingSwitchTile(
+            pref: SettingsService.forceTvMode,
+            icon: Symbols.tv_rounded,
+            title: t.settings.forceTvMode,
+            subtitle: t.settings.forceTvModeDescription,
+            onAfterWrite: (value) {
+              TvDetectionService.setForceTVSync(value);
+              _restartApp(context);
+            },
+          ),
+        if (PlatformDetector.shouldUseSideNavigation(context))
+          SettingSwitchTile(
+            pref: SettingsService.alwaysKeepSidebarOpen,
+            icon: Symbols.dock_to_left_rounded,
+            title: t.settings.alwaysKeepSidebarOpen,
+            subtitle: t.settings.alwaysKeepSidebarOpenDescription,
+          ),
+        if (PlatformDetector.shouldUseSideNavigation(context))
+          SettingSwitchTile(
+            pref: SettingsService.groupLibrariesByServer,
+            icon: Symbols.dns_rounded,
+            title: t.settings.groupLibrariesByServer,
+            subtitle: t.settings.groupLibrariesByServerDescription,
+          ),
+        if (!PlatformDetector.shouldUseSideNavigation(context))
+          SettingSwitchTile(
+            pref: SettingsService.showNavBarLabels,
+            icon: Symbols.label_rounded,
+            title: t.settings.showNavBarLabels,
+            subtitle: t.settings.showNavBarLabelsDescription,
+          ),
+        SettingSwitchTile(
+          pref: SettingsService.showUnwatchedCount,
+          icon: Symbols.counter_1_rounded,
+          title: t.settings.showUnwatchedCount,
+          subtitle: t.settings.showUnwatchedCountDescription,
+        ),
+
+        if (Platform.isWindows || Platform.isLinux) ...[
+          SettingsSectionHeader(t.settings.window),
+          SettingSwitchTile(
+            pref: SettingsService.startInFullscreen,
+            icon: Symbols.fullscreen_rounded,
+            title: t.settings.startInFullscreen,
+            subtitle: t.settings.startInFullscreenDescription,
+          ),
+        ],
+
+        SettingsSectionHeader(t.settings.content),
+        SettingSwitchTile(
+          pref: SettingsService.liveTvDefaultFavorites,
+          icon: Symbols.star_rounded,
+          title: t.settings.liveTvDefaultFavorites,
+          subtitle: t.settings.liveTvDefaultFavoritesDescription,
+        ),
+        SettingSwitchTile(
+          pref: SettingsService.hideSpoilers,
+          icon: Symbols.visibility_off_rounded,
+          title: t.settings.hideSpoilers,
+          subtitle: t.settings.hideSpoilersDescription,
+        ),
+        _requireProfileSelection(),
+        if (PlatformDetector.isTV())
+          SettingSwitchTile(
+            pref: SettingsService.confirmExitOnBack,
+            icon: Symbols.exit_to_app_rounded,
+            title: t.settings.confirmExitOnBack,
+            subtitle: t.settings.confirmExitOnBackDescription,
+          ),
+        SettingSwitchTile(
+          pref: SettingsService.autoHidePerformanceOverlay,
+          icon: Symbols.speed_rounded,
+          title: t.settings.autoHidePerformanceOverlay,
+          subtitle: t.settings.autoHidePerformanceOverlayDescription,
+        ),
+        const SizedBox(height: 24),
       ],
     );
   }
 
-  // --- Display section ---
-
-  Widget _buildThemeSelector() {
+  Widget _themeSelector() {
     return Consumer<ThemeProvider>(
-      builder: (context, themeProvider, child) {
+      builder: (context, themeProvider, _) {
         return SegmentedSetting<settings.ThemeMode>(
           icon: themeProvider.themeModeIcon,
           title: t.settings.theme,
@@ -105,13 +161,13 @@ class _AppearanceSettingsScreenState extends State<AppearanceSettingsScreen> {
             ButtonSegment(value: settings.ThemeMode.oled, label: Text(t.settings.oledTheme)),
           ],
           selected: themeProvider.themeMode,
-          onChanged: (value) => themeProvider.setThemeMode(value),
+          onChanged: themeProvider.setThemeMode,
         );
       },
     );
   }
 
-  Widget _buildLanguageSelector() {
+  Widget _languageSelector(BuildContext context) {
     return ListTile(
       leading: const AppIcon(Symbols.language_rounded, fill: 1),
       title: Text(t.settings.language),
@@ -127,247 +183,78 @@ class _AppearanceSettingsScreenState extends State<AppearanceSettingsScreen> {
           currentValue: LocaleSettings.currentLocale,
         );
         if (value != null) {
-          await _settingsService.setAppLocale(value);
-          LocaleSettings.setLocale(value);
-          _restartApp();
+          await SettingsService.instanceOrNull!.write(SettingsService.appLocale, value);
+          unawaited(LocaleSettings.setLocale(value));
+          if (context.mounted) _restartApp(context);
         }
       },
     );
   }
 
-  Widget _buildDensitySelector() {
-    return Consumer<SettingsProvider>(
-      builder: (context, settingsProvider, child) {
-        return Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  const AppIcon(Symbols.grid_view_rounded, fill: 1),
-                  const SizedBox(width: 16),
-                  Text(t.settings.compact, style: const TextStyle(fontSize: 12, color: Colors.grey)),
-                  Expanded(
-                    child: FocusableSlider(
-                      value: settingsProvider.libraryDensity.toDouble(),
-                      min: 1,
-                      max: 5,
-                      divisions: 4,
-                      onChanged: (value) => settingsProvider.setLibraryDensity(value.round()),
-                    ),
-                  ),
-                  Text(t.settings.comfortable, style: const TextStyle(fontSize: 12, color: Colors.grey)),
-                ],
+  Widget _densitySelector() {
+    return SettingValueBuilder<int>(
+      pref: SettingsService.libraryDensity,
+      builder: (_, density, _) => Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        child: Row(
+          children: [
+            const AppIcon(Symbols.grid_view_rounded, fill: 1),
+            const SizedBox(width: 16),
+            Text(t.settings.compact, style: const TextStyle(fontSize: 12, color: Colors.grey)),
+            Expanded(
+              child: FocusableSlider(
+                value: density.toDouble(),
+                min: 1,
+                max: 5,
+                divisions: 4,
+                onChanged: (v) => SettingsService.instanceOrNull!.write(SettingsService.libraryDensity, v.round()),
               ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _buildViewModeSelector() {
-    return Consumer<SettingsProvider>(
-      builder: (context, settingsProvider, child) {
-        return SegmentedSetting<settings.ViewMode>(
-          icon: Symbols.view_list_rounded,
-          title: t.settings.viewMode,
-          segments: [
-            ButtonSegment(value: settings.ViewMode.grid, label: Text(t.settings.gridView)),
-            ButtonSegment(value: settings.ViewMode.list, label: Text(t.settings.listView)),
+            ),
+            Text(t.settings.comfortable, style: const TextStyle(fontSize: 12, color: Colors.grey)),
           ],
-          selected: settingsProvider.viewMode,
-          onChanged: (value) => settingsProvider.setViewMode(value),
+        ),
+      ),
+    );
+  }
+
+  Widget _viewModeSelector() => SettingSegmentedTile<ViewMode, ViewMode>(
+    pref: SettingsService.viewMode,
+    icon: Symbols.view_list_rounded,
+    title: t.settings.viewMode,
+    segments: [
+      ButtonSegment(value: ViewMode.grid, label: Text(t.settings.gridView)),
+      ButtonSegment(value: ViewMode.list, label: Text(t.settings.listView)),
+    ],
+    decode: (v) => v,
+    encode: (v) => v,
+  );
+
+  Widget _episodePosterModeSelector() => SettingSegmentedTile<EpisodePosterMode, EpisodePosterMode>(
+    pref: SettingsService.episodePosterMode,
+    icon: Symbols.image_rounded,
+    title: t.settings.episodePosterMode,
+    segments: [
+      ButtonSegment(value: EpisodePosterMode.seriesPoster, label: Text(t.settings.seriesPoster)),
+      ButtonSegment(value: EpisodePosterMode.seasonPoster, label: Text(t.settings.seasonPoster)),
+      ButtonSegment(value: EpisodePosterMode.episodeThumbnail, label: Text(t.settings.episodeThumbnail)),
+    ],
+    decode: (v) => v,
+    encode: (v) => v,
+  );
+
+  Widget _requireProfileSelection() {
+    return Consumer<ActiveProfileProvider>(
+      builder: (context, activeProvider, _) {
+        if (!activeProvider.hasMultipleProfiles) return const SizedBox.shrink();
+        return SettingSwitchTile(
+          pref: SettingsService.requireProfileSelectionOnOpen,
+          icon: Symbols.person_rounded,
+          title: t.settings.requireProfileSelectionOnOpen,
+          subtitle: t.settings.requireProfileSelectionOnOpenDescription,
         );
       },
     );
   }
-
-  Widget _buildEpisodePosterModeSelector() {
-    return Consumer<SettingsProvider>(
-      builder: (context, settingsProvider, child) {
-        return SegmentedSetting<settings.EpisodePosterMode>(
-          icon: Symbols.image_rounded,
-          title: t.settings.episodePosterMode,
-          segments: [
-            ButtonSegment(value: settings.EpisodePosterMode.seriesPoster, label: Text(t.settings.seriesPoster)),
-            ButtonSegment(value: settings.EpisodePosterMode.seasonPoster, label: Text(t.settings.seasonPoster)),
-            ButtonSegment(value: settings.EpisodePosterMode.episodeThumbnail, label: Text(t.settings.episodeThumbnail)),
-          ],
-          selected: settingsProvider.episodePosterMode,
-          onChanged: (value) => settingsProvider.setEpisodePosterMode(value),
-        );
-      },
-    );
-  }
-
-  // --- Home Screen section ---
-
-  Widget _buildShowHeroSection() {
-    return Consumer<SettingsProvider>(
-      builder: (context, settingsProvider, child) {
-        return SwitchListTile(
-          secondary: const AppIcon(Symbols.featured_play_list_rounded, fill: 1),
-          title: Text(t.settings.showHeroSection),
-          subtitle: Text(t.settings.showHeroSectionDescription),
-          value: settingsProvider.showHeroSection,
-          onChanged: (value) async {
-            await settingsProvider.setShowHeroSection(value);
-          },
-        );
-      },
-    );
-  }
-
-  Widget _buildUseGlobalHubs() {
-    return Consumer<SettingsProvider>(
-      builder: (context, settingsProvider, child) {
-        return SwitchListTile(
-          secondary: const AppIcon(Symbols.home_rounded, fill: 1),
-          title: Text(t.settings.useGlobalHubs),
-          subtitle: Text(t.settings.useGlobalHubsDescription),
-          value: settingsProvider.useGlobalHubs,
-          onChanged: (value) async {
-            await settingsProvider.setUseGlobalHubs(value);
-          },
-        );
-      },
-    );
-  }
-
-  Widget _buildShowServerNameOnHubs() {
-    return Consumer<SettingsProvider>(
-      builder: (context, settingsProvider, child) {
-        return SwitchListTile(
-          secondary: const AppIcon(Symbols.dns_rounded, fill: 1),
-          title: Text(t.settings.showServerNameOnHubs),
-          subtitle: Text(t.settings.showServerNameOnHubsDescription),
-          value: settingsProvider.showServerNameOnHubs,
-          onChanged: (value) async {
-            await settingsProvider.setShowServerNameOnHubs(value);
-          },
-        );
-      },
-    );
-  }
-
-  // --- Navigation section ---
-
-  Widget _buildAlwaysKeepSidebarOpen() {
-    return Consumer<SettingsProvider>(
-      builder: (context, settingsProvider, child) {
-        return SwitchListTile(
-          secondary: const AppIcon(Symbols.dock_to_left_rounded, fill: 1),
-          title: Text(t.settings.alwaysKeepSidebarOpen),
-          subtitle: Text(t.settings.alwaysKeepSidebarOpenDescription),
-          value: settingsProvider.alwaysKeepSidebarOpen,
-          onChanged: (value) async {
-            await settingsProvider.setAlwaysKeepSidebarOpen(value);
-          },
-        );
-      },
-    );
-  }
-
-  Widget _buildShowNavBarLabels() {
-    return Consumer<SettingsProvider>(
-      builder: (context, settingsProvider, child) {
-        return SwitchListTile(
-          secondary: const AppIcon(Symbols.label_rounded, fill: 1),
-          title: Text(t.settings.showNavBarLabels),
-          subtitle: Text(t.settings.showNavBarLabelsDescription),
-          value: settingsProvider.showNavBarLabels,
-          onChanged: (value) async {
-            await settingsProvider.setShowNavBarLabels(value);
-          },
-        );
-      },
-    );
-  }
-
-  Widget _buildShowUnwatchedCount() {
-    return Consumer<SettingsProvider>(
-      builder: (context, settingsProvider, child) {
-        return SwitchListTile(
-          secondary: const AppIcon(Symbols.counter_1_rounded, fill: 1),
-          title: Text(t.settings.showUnwatchedCount),
-          subtitle: Text(t.settings.showUnwatchedCountDescription),
-          value: settingsProvider.showUnwatchedCount,
-          onChanged: (value) async {
-            await settingsProvider.setShowUnwatchedCount(value);
-          },
-        );
-      },
-    );
-  }
-
-  // --- Content section ---
-
-  Widget _buildLiveTvDefaultFavorites() {
-    return Consumer<SettingsProvider>(
-      builder: (context, settingsProvider, child) {
-        return SwitchListTile(
-          secondary: const AppIcon(Symbols.star_rounded, fill: 1),
-          title: Text(t.settings.liveTvDefaultFavorites),
-          subtitle: Text(t.settings.liveTvDefaultFavoritesDescription),
-          value: settingsProvider.liveTvDefaultFavorites,
-          onChanged: (value) async {
-            await settingsProvider.setLiveTvDefaultFavorites(value);
-          },
-        );
-      },
-    );
-  }
-
-  Widget _buildHideSpoilers() {
-    return Consumer<SettingsProvider>(
-      builder: (context, settingsProvider, child) {
-        return SwitchListTile(
-          secondary: const AppIcon(Symbols.visibility_off_rounded, fill: 1),
-          title: Text(t.settings.hideSpoilers),
-          subtitle: Text(t.settings.hideSpoilersDescription),
-          value: settingsProvider.hideSpoilers,
-          onChanged: (value) async {
-            await settingsProvider.setHideSpoilers(value);
-          },
-        );
-      },
-    );
-  }
-
-  Widget _buildRequireProfileSelection() {
-    return Consumer<UserProfileProvider>(
-      builder: (context, userProfileProvider, child) {
-        if (!userProfileProvider.hasMultipleUsers) return const SizedBox.shrink();
-        return SwitchListTile(
-          secondary: const AppIcon(Symbols.person_rounded, fill: 1),
-          title: Text(t.settings.requireProfileSelectionOnOpen),
-          subtitle: Text(t.settings.requireProfileSelectionOnOpenDescription),
-          value: _requireProfileSelectionOnOpen,
-          onChanged: (value) async {
-            setState(() => _requireProfileSelectionOnOpen = value);
-            await _settingsService.setRequireProfileSelectionOnOpen(value);
-          },
-        );
-      },
-    );
-  }
-
-  Widget _buildConfirmExitOnBack() {
-    return SwitchListTile(
-      secondary: const AppIcon(Symbols.exit_to_app_rounded, fill: 1),
-      title: Text(t.settings.confirmExitOnBack),
-      subtitle: Text(t.settings.confirmExitOnBackDescription),
-      value: _confirmExitOnBack,
-      onChanged: (value) async {
-        setState(() => _confirmExitOnBack = value);
-        await _settingsService.setConfirmExitOnBack(value);
-      },
-    );
-  }
-
-  // --- Helpers ---
 
   String _getLanguageDisplayName(AppLocale locale) {
     switch (locale) {
@@ -404,7 +291,7 @@ class _AppearanceSettingsScreenState extends State<AppearanceSettingsScreen> {
     }
   }
 
-  void _restartApp() {
+  void _restartApp(BuildContext context) {
     Navigator.pushNamedAndRemoveUntil(context, '/', (route) => false);
   }
 }

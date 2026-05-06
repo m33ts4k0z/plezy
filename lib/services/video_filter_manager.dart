@@ -2,8 +2,9 @@ import 'package:flutter/material.dart';
 import 'package:rate_limiter/rate_limiter.dart';
 
 import '../mpv/mpv.dart';
+import '../mpv/player/platform/player_android.dart';
 
-import '../models/plex_media_version.dart';
+import '../media/media_version.dart';
 import '../utils/app_logger.dart';
 import 'ambient_lighting_service.dart';
 
@@ -17,7 +18,7 @@ import 'ambient_lighting_service.dart';
 /// - Ambient-lighting-friendly reset to contain mode
 class VideoFilterManager {
   final Player player;
-  final List<PlexMediaVersion> availableVersions;
+  final List<MediaVersion> availableVersions;
   final int selectedMediaIndex;
 
   /// BoxFit mode state: 0=contain (letterbox), 1=cover (fill screen), 2=fill (stretch)
@@ -44,7 +45,13 @@ class VideoFilterManager {
   /// Callback invoked when boxFitMode changes, for external persistence
   final void Function(int mode)? onBoxFitModeChanged;
 
-  VideoFilterManager({required this.player, required this.availableVersions, required this.selectedMediaIndex, int initialBoxFitMode = 0, this.onBoxFitModeChanged}) : _boxFitMode = initialBoxFitMode {
+  VideoFilterManager({
+    required this.player,
+    required this.availableVersions,
+    required this.selectedMediaIndex,
+    int initialBoxFitMode = 0,
+    this.onBoxFitModeChanged,
+  }) : _boxFitMode = initialBoxFitMode {
     _debouncedUpdateVideoFilter = debounce(
       updateVideoFilter,
       const Duration(milliseconds: 50),
@@ -56,7 +63,6 @@ class VideoFilterManager {
   /// Current BoxFit mode (0=contain, 1=cover, 2=fill)
   int get boxFitMode => _boxFitMode;
 
-  /// Current player size
   Size? get playerSize => _playerSize;
 
   /// Cycle through BoxFit modes: contain → cover → fill → contain (for button)
@@ -107,12 +113,10 @@ class VideoFilterManager {
   /// Whether ambient lighting was active before entering PiP
   bool get hadAmbientLightingBeforePip => _prePipAmbientLighting == true;
 
-  /// Clear the pre-PiP ambient lighting flag after restore
   void clearPipAmbientLightingFlag() {
     _prePipAmbientLighting = null;
   }
 
-  /// Update player size when layout changes
   void updatePlayerSize(Size size) {
     // Check if size actually changed to avoid unnecessary updates
     if (_playerSize == null ||
@@ -127,6 +131,13 @@ class VideoFilterManager {
   /// When ambient lighting is active, video-aspect-override is managed by ambient lighting.
   void updateVideoFilter() async {
     try {
+      // ExoPlayer handles scaling via AspectRatioFrameLayout. The MPV properties
+      // below still run — on PlayerAndroid they forward to setMpvProperty, which
+      // queues them for any future fallback to MPV.
+      if (player is PlayerAndroid) {
+        await (player as PlayerAndroid).setBoxFitMode(_boxFitMode);
+      }
+
       if (ambientLightingService?.isEnabled != true) {
         await player.setProperty('video-aspect-override', 'no');
       }
@@ -155,7 +166,6 @@ class VideoFilterManager {
   /// subsequent calls within 50ms are debounced.
   void debouncedUpdateVideoFilter() => _debouncedUpdateVideoFilter();
 
-  /// Clean up resources
   void dispose() {
     _debouncedUpdateVideoFilter.cancel();
   }

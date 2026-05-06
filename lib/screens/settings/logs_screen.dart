@@ -1,10 +1,10 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
 import 'package:device_info_plus/device_info_plus.dart';
-import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
-import 'package:plezy/utils/http_client.dart';
+import 'package:plezy/utils/media_server_http_client.dart';
 import 'package:material_symbols_icons/symbols.dart';
 import 'package:flutter/services.dart';
 import 'package:logger/logger.dart';
@@ -13,8 +13,11 @@ import '../../focus/focusable_action_bar.dart';
 import '../../focus/focusable_button.dart';
 import '../../focus/key_event_utils.dart';
 import '../../i18n/strings.g.dart';
+import '../../mixins/mounted_set_state_mixin.dart';
+import '../../utils/dialogs.dart';
 import '../../main.dart' show gitCommit;
 import '../../utils/app_logger.dart';
+import '../../utils/formatters.dart';
 import '../../utils/platform_detector.dart';
 import '../../utils/snackbar_helper.dart';
 import '../../widgets/desktop_app_bar.dart';
@@ -26,7 +29,7 @@ class LogsScreen extends StatefulWidget {
   State<LogsScreen> createState() => _LogsScreenState();
 }
 
-class _LogsScreenState extends State<LogsScreen> {
+class _LogsScreenState extends State<LogsScreen> with MountedSetStateMixin {
   List<LogEntry> _logs = [];
   String _deviceInfo = '';
   final ScrollController _scrollController = ScrollController();
@@ -49,7 +52,11 @@ class _LogsScreenState extends State<LogsScreen> {
       final info = await deviceInfo.androidInfo;
       buffer.writeln('Android ${info.version.release} (API ${info.version.sdkInt})');
       buffer.writeln('${info.manufacturer} ${info.model}');
-      if (TvDetectionService.isTVSync()) buffer.writeln('TV mode: yes');
+      if (TvDetectionService.isTVSync()) {
+        final reasons = TvDetectionService.tvDetectionReasonsSync();
+        final suffix = reasons.isEmpty ? '' : ' (${reasons.join(', ')})';
+        buffer.writeln('TV mode: yes$suffix');
+      }
     } else if (Platform.isIOS) {
       final info = await deviceInfo.iosInfo;
       buffer.writeln('iOS ${info.systemVersion}');
@@ -63,7 +70,7 @@ class _LogsScreenState extends State<LogsScreen> {
       buffer.writeln('Linux ${info.versionId ?? info.id}');
     }
 
-    if (mounted) setState(() => _deviceInfo = buffer.toString().trimRight());
+    setStateIfMounted(() => _deviceInfo = buffer.toString().trimRight());
   }
 
   @override
@@ -79,10 +86,10 @@ class _LogsScreenState extends State<LogsScreen> {
   }
 
   String _formatTime(DateTime time) {
-    final hour = time.hour.toString().padLeft(2, '0');
-    final minute = time.minute.toString().padLeft(2, '0');
-    final second = time.second.toString().padLeft(2, '0');
-    final millisecond = time.millisecond.toString().padLeft(3, '0');
+    final hour = padNumber(time.hour, 2);
+    final minute = padNumber(time.minute, 2);
+    final second = padNumber(time.second, 2);
+    final millisecond = padNumber(time.millisecond, 3);
     return '$hour:$minute:$second.$millisecond';
   }
 
@@ -126,58 +133,51 @@ class _LogsScreenState extends State<LogsScreen> {
   Future<void> _uploadLogs() async {
     final logText = _formatAllLogs();
 
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => const Center(child: CircularProgressIndicator()),
-    );
+    showLoadingDialog(context);
 
     try {
-      final response = await createHttpClient().post(
+      final response = await httpClient.post(
         'https://ice.plezy.app/logs',
-        data: logText,
-        options: Options(contentType: 'text/plain'),
+        body: logText,
+        headers: {'Content-Type': 'text/plain'},
       );
 
       if (!mounted) return;
       Navigator.of(context).pop(); // dismiss loading
 
-      final id =
-          (jsonDecode(response.data is String ? response.data : jsonEncode(response.data))
-                  as Map<String, dynamic>)['id']
-              as String;
+      final data = response.data is String ? jsonDecode(response.data) : response.data;
+      final id = (data as Map<String, dynamic>)['id'] as String;
 
-      showDialog(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          title: Text(t.messages.logsUploaded),
-          content: Row(
-            children: [
-              Text('${t.messages.logId}: '),
-              SelectableText(
-                id,
-                style: const TextStyle(fontWeight: FontWeight.bold, fontFamily: 'monospace', fontSize: 18),
-              ),
-              const SizedBox(width: 8),
-              IconButton(
-                icon: const Icon(Icons.copy, size: 20),
-                onPressed: () {
-                  Clipboard.setData(ClipboardData(text: id));
-                  showSuccessSnackBar(context, t.messages.logsCopied);
-                },
+      unawaited(
+        showDialog(
+          context: context,
+          builder: (ctx) => AlertDialog(
+            title: Text(t.messages.logsUploaded),
+            content: Row(
+              children: [
+                Text('${t.messages.logId}: '),
+                SelectableText(
+                  id,
+                  style: const TextStyle(fontWeight: FontWeight.bold, fontFamily: 'monospace', fontSize: 18),
+                ),
+                const SizedBox(width: 8),
+                IconButton(
+                  icon: const Icon(Icons.copy, size: 20),
+                  onPressed: () {
+                    Clipboard.setData(ClipboardData(text: id));
+                    showSuccessSnackBar(context, t.messages.logsCopied);
+                  },
+                ),
+              ],
+            ),
+            actions: [
+              FocusableButton(
+                autofocus: true,
+                onPressed: () => Navigator.of(ctx).pop(),
+                child: TextButton(onPressed: () => Navigator.of(ctx).pop(), child: Text(t.common.close)),
               ),
             ],
           ),
-          actions: [
-            FocusableButton(
-              autofocus: true,
-              onPressed: () => Navigator.of(ctx).pop(),
-              child: TextButton(
-                onPressed: () => Navigator.of(ctx).pop(),
-                child: Text(t.common.close),
-              ),
-            ),
-          ],
         ),
       );
     } catch (_) {
@@ -216,39 +216,51 @@ class _LogsScreenState extends State<LogsScreen> {
   List<TextSpan> _buildLogSpans() {
     final spans = <TextSpan>[];
     if (_deviceInfo.isNotEmpty) {
-      spans.add(TextSpan(
-        text: '$_deviceInfo\n',
-        style: TextStyle(color: Colors.grey.withValues(alpha: 0.6)),
-      ));
-      spans.add(TextSpan(
-        text: '---\n',
-        style: TextStyle(color: Colors.grey.withValues(alpha: 0.3)),
-      ));
+      spans.add(
+        TextSpan(
+          text: '$_deviceInfo\n',
+          style: TextStyle(color: Colors.grey.withValues(alpha: 0.6)),
+        ),
+      );
+      spans.add(
+        TextSpan(
+          text: '---\n',
+          style: TextStyle(color: Colors.grey.withValues(alpha: 0.3)),
+        ),
+      );
     }
     for (var i = 0; i < _logs.length; i++) {
       if (i > 0) spans.add(const TextSpan(text: '\n'));
       final log = _logs[i];
       final color = _getLevelColor(log.level);
-      spans.add(TextSpan(
-        text: '[${_formatTime(log.timestamp)}] ',
-        style: TextStyle(color: color.withValues(alpha: 0.6)),
-      ));
-      spans.add(TextSpan(
-        text: '[${log.level.name.toUpperCase()}] ',
-        style: TextStyle(color: color, fontWeight: FontWeight.bold),
-      ));
+      spans.add(
+        TextSpan(
+          text: '[${_formatTime(log.timestamp)}] ',
+          style: TextStyle(color: color.withValues(alpha: 0.6)),
+        ),
+      );
+      spans.add(
+        TextSpan(
+          text: '[${log.level.name.toUpperCase()}] ',
+          style: TextStyle(color: color, fontWeight: FontWeight.bold),
+        ),
+      );
       spans.add(TextSpan(text: log.message));
       if (log.error != null) {
-        spans.add(TextSpan(
-          text: '\n  Error: ${log.error}',
-          style: TextStyle(color: color),
-        ));
+        spans.add(
+          TextSpan(
+            text: '\n  Error: ${log.error}',
+            style: TextStyle(color: color),
+          ),
+        );
       }
       if (log.stackTrace != null) {
-        spans.add(TextSpan(
-          text: '\n  ${log.stackTrace.toString().replaceAll('\n', '\n  ')}',
-          style: TextStyle(color: Colors.grey.withValues(alpha: 0.7)),
-        ));
+        spans.add(
+          TextSpan(
+            text: '\n  ${log.stackTrace.toString().replaceAll('\n', '\n  ')}',
+            style: TextStyle(color: Colors.grey.withValues(alpha: 0.7)),
+          ),
+        );
       }
     }
     return spans;
@@ -285,11 +297,7 @@ class _LogsScreenState extends State<LogsScreen> {
               actions: [
                 FocusableActionBar(
                   actions: [
-                    FocusableAction(
-                      icon: Symbols.refresh_rounded,
-                      tooltip: t.common.refresh,
-                      onPressed: _loadLogs,
-                    ),
+                    FocusableAction(icon: Symbols.refresh_rounded, tooltip: t.common.refresh, onPressed: _loadLogs),
                     FocusableAction(
                       icon: Symbols.upload_rounded,
                       tooltip: t.logs.uploadLogs,
@@ -317,11 +325,7 @@ class _LogsScreenState extends State<LogsScreen> {
                 sliver: SliverToBoxAdapter(
                   child: SelectableText.rich(
                     TextSpan(
-                      style: theme.textTheme.bodySmall?.copyWith(
-                        fontFamily: 'monospace',
-                        fontSize: 12,
-                        height: 1.5,
-                      ),
+                      style: theme.textTheme.bodySmall?.copyWith(fontFamily: 'monospace', fontSize: 12, height: 1.5),
                       children: _buildLogSpans(),
                     ),
                   ),

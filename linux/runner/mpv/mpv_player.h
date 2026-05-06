@@ -1,12 +1,12 @@
 #ifndef MPV_PLAYER_H_
 #define MPV_PLAYER_H_
 
+#include <epoxy/egl.h>
+#include <epoxy/gl.h>
+#include <gtk/gtk.h>
 #include <mpv/client.h>
 #include <mpv/render.h>
 #include <mpv/render_gl.h>
-#include <gtk/gtk.h>
-#include <epoxy/gl.h>
-#include <epoxy/egl.h>
 
 #include <atomic>
 #include <functional>
@@ -15,6 +15,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 // Forward declaration for Flutter types
@@ -68,11 +69,13 @@ class MpvPlayer {
   /// Returns true if mpv handle exists (even without render context).
   bool HasMpvHandle() const { return mpv_ != nullptr; }
 
-  /// Executes an mpv command.
+  /// Queues an mpv command without waiting for completion.
   void Command(const std::vector<std::string>& args);
 
-  /// Callback type for async command completion.
-  using CommandCallback = std::function<void(int error)>;
+  /// Callback types for async mpv requests.
+  using StatusCallback = std::function<void(int error)>;
+  using CommandCallback = StatusCallback;
+  using GetPropertyCallback = std::function<void(int error, const std::string& value)>;
 
   /// Executes an mpv command asynchronously to prevent UI blocking.
   void CommandAsync(const std::vector<std::string>& args, CommandCallback callback);
@@ -80,12 +83,14 @@ class MpvPlayer {
   /// Sets an mpv property by name.
   void SetProperty(const std::string& name, const std::string& value);
 
-  /// Gets an mpv property value by name.
-  std::string GetProperty(const std::string& name);
+  /// Sets an mpv property asynchronously.
+  void SetPropertyAsync(const std::string& name, const std::string& value, StatusCallback callback);
+
+  /// Gets an mpv property value asynchronously.
+  void GetPropertyAsync(const std::string& name, GetPropertyCallback callback);
 
   /// Observes an mpv property for changes.
-  void ObserveProperty(const std::string& name, const std::string& format,
-                       int id);
+  void ObserveProperty(const std::string& name, const std::string& format, int id);
 
   /// Renders a frame to the specified FBO.
   void Render(int width, int height, int fbo = 0);
@@ -127,6 +132,11 @@ class MpvPlayer {
   /// Sends an event notification.
   void SendEvent(const std::string& name, ::_FlValue* data = nullptr);
 
+  uint64_t RegisterStatusRequest(StatusCallback callback);
+  StatusCallback TakeStatusRequest(uint64_t request_id);
+  uint64_t RegisterGetPropertyRequest(GetPropertyCallback callback);
+  GetPropertyCallback TakeGetPropertyRequest(uint64_t request_id);
+
   /// Helper to convert mpv_node to FlValue.
   ::_FlValue* NodeToFlValue(mpv_node* node);
 
@@ -147,9 +157,10 @@ class MpvPlayer {
   std::map<std::string, uint64_t> observed_properties_;
   std::map<std::string, int> name_to_id_;
 
-  // Pending async commands: request_id -> callback
-  std::map<uint64_t, CommandCallback> pending_commands_;
-  std::mutex pending_commands_mutex_;
+  // Pending async requests: request_id -> callback
+  std::map<uint64_t, StatusCallback> pending_status_requests_;
+  std::map<uint64_t, GetPropertyCallback> pending_get_property_requests_;
+  std::mutex pending_requests_mutex_;
 
   // GSource for processing events on main thread
   guint event_source_id_ = 0;

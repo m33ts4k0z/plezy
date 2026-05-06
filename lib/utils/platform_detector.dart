@@ -3,47 +3,143 @@ import 'dart:math';
 
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
-/// Service for detecting if the app is running on Android TV
+const _androidFeatureTelevision = 'android.hardware.type.television';
+const _androidFeatureLeanback = 'android.software.leanback';
+const _androidFeatureFireTv = 'amazon.hardware.fire_tv';
+const _androidFeatureTouchscreen = 'android.hardware.touchscreen';
+
+class AndroidTvFeatureDetection {
+  final bool isTv;
+  final List<String> reasons;
+
+  const AndroidTvFeatureDetection({required this.isTv, required this.reasons});
+}
+
+AndroidTvFeatureDetection detectAndroidTvFromSystemFeatures(Iterable<String> features) {
+  final featureSet = features.toSet();
+  final reasons = <String>[];
+  if (featureSet.contains(_androidFeatureTelevision)) reasons.add('television_feature');
+  if (featureSet.contains(_androidFeatureLeanback)) reasons.add('leanback');
+  if (featureSet.contains(_androidFeatureFireTv)) reasons.add('fire_tv');
+  if (featureSet.isNotEmpty && !featureSet.contains(_androidFeatureTouchscreen)) reasons.add('no_touchscreen');
+
+  return AndroidTvFeatureDetection(isTv: reasons.isNotEmpty, reasons: reasons);
+}
+
+/// Service for detecting if the app is running on Android TV or Apple TV.
 class TvDetectionService {
   static TvDetectionService? _instance;
+  bool _detected = false;
+  bool _forceTv = false;
   bool _isTV = false;
+  bool _isAppleTV = false;
   bool _initialized = false;
+  List<String> _detectionReasons = const [];
 
   TvDetectionService._();
 
-  /// Get the singleton instance, initializing if needed
-  static Future<TvDetectionService> getInstance() async {
+  /// Get the singleton instance, initializing if needed.
+  /// Pass [forceTv] to combine a user override with the system-feature check.
+  static Future<TvDetectionService> getInstance({bool forceTv = false}) async {
     if (_instance == null) {
       _instance = TvDetectionService._();
-      await _instance!._detect();
+      await _instance!._detect(forceTv);
     }
     return _instance!;
   }
 
-  Future<void> _detect() async {
+  static const bool _tvosBuild = bool.fromEnvironment('TVOS_BUILD');
+  static const MethodChannel _deviceChannel = MethodChannel('com.plezy/device');
+
+  Future<void> _detect(bool forceTv) async {
     if (_initialized) return;
 
+    final deviceInfo = DeviceInfoPlugin();
     if (Platform.isAndroid) {
-      final deviceInfo = DeviceInfoPlugin();
-      final androidInfo = await deviceInfo.androidInfo;
-      // Check for android.software.leanback feature (standard Android TV detection)
-      _isTV = androidInfo.systemFeatures.contains('android.software.leanback');
+      final nativeDetection = await _getNativeAndroidTvDetection();
+      final detection =
+          nativeDetection ?? detectAndroidTvFromSystemFeatures((await deviceInfo.androidInfo).systemFeatures);
+      _detected = detection.isTv;
+      _detectionReasons = detection.reasons;
+    } else if (Platform.isIOS) {
+      if (_tvosBuild) {
+        _isAppleTV = true;
+        _detected = true;
+        _detectionReasons = const ['tvos_build'];
+      } else {
+        final iosInfo = await deviceInfo.iosInfo;
+        final sysName = iosInfo.systemName.toLowerCase();
+        _isAppleTV =
+            sysName == 'tvos' ||
+            sysName.contains('appletv') ||
+            iosInfo.model.toLowerCase().contains('appletv') ||
+            iosInfo.utsname.machine.toLowerCase().contains('appletv');
+        _detected = _isAppleTV;
+        _detectionReasons = _isAppleTV ? const ['apple_tv'] : const [];
+      }
     }
+    _forceTv = forceTv;
+    _isTV = _detected || _forceTv;
     _initialized = true;
   }
 
+  /// True when running on Apple TV (tvOS). False for all other platforms
+  /// including force-TV on non-tvOS devices.
+  bool get isAppleTV => _isAppleTV;
+
   bool get isTV => _isTV;
+
+  List<String> get tvDetectionReasons => _effectiveDetectionReasons;
+
+  List<String> get _effectiveDetectionReasons {
+    final reasons = <String>[..._detectionReasons];
+    if (_forceTv && !reasons.contains('force_tv')) reasons.add('force_tv');
+    return reasons;
+  }
+
+  Future<AndroidTvFeatureDetection?> _getNativeAndroidTvDetection() async {
+    try {
+      final result = await _deviceChannel.invokeMapMethod<dynamic, dynamic>('getTvDetection');
+      if (result == null) return null;
+      final reasonsValue = result['reasons'];
+      final reasons = reasonsValue is Iterable ? reasonsValue.whereType<String>().toList() : <String>[];
+      final isTv = result['isTv'] == true;
+      if (isTv && reasons.isEmpty) reasons.add('native');
+      return AndroidTvFeatureDetection(isTv: isTv, reasons: reasons);
+    } on MissingPluginException {
+      return null;
+    } on PlatformException {
+      return null;
+    }
+  }
+
+  /// Update the user force-TV override and recompute the effective flag.
+  void setForceTv(bool value) {
+    _forceTv = value;
+    _isTV = _detected || _forceTv;
+  }
 
   /// Synchronous access after initialization (returns false if not initialized)
   static bool isTVSync() => _instance?._isTV ?? false;
+
+  /// Synchronous Apple TV check (returns false if not initialized or not tvOS).
+  static bool isAppleTVSync() => _instance?._isAppleTV ?? false;
+
+  static List<String> tvDetectionReasonsSync() => _instance?._effectiveDetectionReasons ?? const [];
+
+  /// Convenience setter that forwards to the singleton if available.
+  static void setForceTVSync(bool value) => _instance?.setForceTv(value);
 }
 
-/// Utility class for platform detection
 class PlatformDetector {
-  /// Detects if running on Android TV (requires TvDetectionService to be initialized)
   static bool isTV() {
     return TvDetectionService.isTVSync();
+  }
+
+  static bool isAppleTV() {
+    return TvDetectionService.isAppleTVSync();
   }
 
   /// Detects if the app should use side navigation (Desktop or TV)
@@ -57,11 +153,18 @@ class PlatformDetector {
     return isDesktop(context) || isTV();
   }
 
-  /// Detects if running on a mobile platform (iOS or Android)
-  /// Uses Theme for consistent platform detection across the app
+  /// Detects if running on a mobile platform (iOS or Android).
+  /// Excludes TV platforms (Android TV / Apple TV) even though the underlying
+  /// OS is iOS or Android.
+  /// Uses Theme for consistent platform detection across the app.
   static bool isMobile(BuildContext context) {
+    if (isTV()) return false;
     final platform = Theme.of(context).platform;
     return platform == TargetPlatform.iOS || platform == TargetPlatform.android;
+  }
+
+  static bool isHandheld(BuildContext context) {
+    return isMobile(context) && !isTV();
   }
 
   /// Detects if running on a desktop platform (Windows, macOS, or Linux)
@@ -69,23 +172,27 @@ class PlatformDetector {
     return !isMobile(context);
   }
 
+  /// True on the desktop OS (Windows / macOS / Linux), without needing a
+  /// BuildContext. Use for OS-level capability checks (window state, native
+  /// keyboard, etc.); use [isDesktop] for layout decisions.
+  static bool isDesktopOS() {
+    return Platform.isWindows || Platform.isMacOS || Platform.isLinux;
+  }
+
   /// Detects if the device is likely a tablet based on screen size
   /// Uses diagonal screen size to determine if device is a tablet
   static bool isTablet(BuildContext context) {
-    final data = MediaQuery.of(context);
-    final size = data.size;
+    final size = MediaQuery.sizeOf(context);
     final diagonal = sqrt(size.width * size.width + size.height * size.height);
-    final devicePixelRatio = data.devicePixelRatio;
+    final devicePixelRatio = MediaQuery.devicePixelRatioOf(context);
 
     // Convert diagonal from logical pixels to inches (assuming 160 DPI as baseline)
     final diagonalInches = diagonal / (devicePixelRatio * 160 / 2.54);
 
-    // Consider devices with diagonal >= 7 inches as tablets
     return diagonalInches >= 7.0;
   }
 
-  /// Detects if the device is a phone (mobile but not tablet)
   static bool isPhone(BuildContext context) {
-    return isMobile(context) && !isTablet(context);
+    return isHandheld(context) && !isTablet(context);
   }
 }

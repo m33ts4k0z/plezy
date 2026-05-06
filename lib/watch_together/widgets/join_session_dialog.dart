@@ -3,10 +3,11 @@ import 'package:flutter/services.dart';
 import 'package:material_symbols_icons/symbols.dart';
 
 import '../../focus/focusable_button.dart';
+import '../../focus/focusable_text_field.dart';
 import '../../focus/focusable_wrapper.dart';
 import '../../i18n/strings.g.dart';
+import '../../mixins/controller_disposer_mixin.dart';
 
-/// Dialog for joining a watch together session
 class JoinSessionDialog extends StatefulWidget {
   const JoinSessionDialog({super.key});
 
@@ -14,15 +15,9 @@ class JoinSessionDialog extends StatefulWidget {
   State<JoinSessionDialog> createState() => _JoinSessionDialogState();
 }
 
-class _JoinSessionDialogState extends State<JoinSessionDialog> {
+class _JoinSessionDialogState extends State<JoinSessionDialog> with ControllerDisposerMixin {
   final _formKey = GlobalKey<FormState>();
-  final _sessionIdController = TextEditingController();
-
-  @override
-  void dispose() {
-    _sessionIdController.dispose();
-    super.dispose();
-  }
+  late final _sessionIdController = createTextEditingController();
 
   @override
   Widget build(BuildContext context) {
@@ -39,7 +34,6 @@ class _JoinSessionDialogState extends State<JoinSessionDialog> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                // Header
                 Row(
                   children: [
                     Icon(Symbols.group_add, color: theme.colorScheme.primary),
@@ -57,8 +51,7 @@ class _JoinSessionDialogState extends State<JoinSessionDialog> {
 
                 const SizedBox(height: 24),
 
-                // Session ID input
-                TextFormField(
+                FocusableTextFormField(
                   controller: _sessionIdController,
                   decoration: InputDecoration(
                     labelText: t.watchTogether.sessionCode,
@@ -72,7 +65,7 @@ class _JoinSessionDialogState extends State<JoinSessionDialog> {
                     border: const OutlineInputBorder(),
                   ),
                   textCapitalization: TextCapitalization.characters,
-                  maxLength: 8,
+                  maxLength: 5,
                   inputFormatters: [
                     FilteringTextInputFormatter.allow(RegExp(r'[A-Za-z0-9]')),
                     UpperCaseTextFormatter(),
@@ -81,8 +74,8 @@ class _JoinSessionDialogState extends State<JoinSessionDialog> {
                     if (value == null || value.isEmpty) {
                       return t.watchTogether.pleaseEnterCode;
                     }
-                    if (value.length != 8) {
-                      return t.watchTogether.codeMustBe8Chars;
+                    if (value.length != 5) {
+                      return t.watchTogether.codeMustBe5Chars;
                     }
                     return null;
                   },
@@ -92,7 +85,6 @@ class _JoinSessionDialogState extends State<JoinSessionDialog> {
 
                 const SizedBox(height: 16),
 
-                // Instructions
                 Text(
                   t.watchTogether.joinInstructions,
                   style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant),
@@ -100,7 +92,6 @@ class _JoinSessionDialogState extends State<JoinSessionDialog> {
 
                 const SizedBox(height: 24),
 
-                // Join button
                 FocusableButton(
                   onPressed: _join,
                   child: FilledButton.icon(
@@ -123,7 +114,7 @@ class _JoinSessionDialogState extends State<JoinSessionDialog> {
       // Clean the pasted text - extract alphanumeric characters and take first 8
       final cleaned = data!.text!.replaceAll(RegExp(r'[^A-Za-z0-9]'), '').toUpperCase();
       if (cleaned.isNotEmpty) {
-        _sessionIdController.text = cleaned.substring(0, cleaned.length.clamp(0, 8));
+        _sessionIdController.text = cleaned.substring(0, cleaned.length.clamp(0, 5));
         _sessionIdController.selection = TextSelection.collapsed(offset: _sessionIdController.text.length);
       }
     }
@@ -137,7 +128,6 @@ class _JoinSessionDialogState extends State<JoinSessionDialog> {
   }
 }
 
-/// Text formatter to convert input to uppercase
 class UpperCaseTextFormatter extends TextInputFormatter {
   @override
   TextEditingValue formatEditUpdate(TextEditingValue oldValue, TextEditingValue newValue) {
@@ -145,9 +135,6 @@ class UpperCaseTextFormatter extends TextInputFormatter {
   }
 }
 
-/// Show the join session dialog
-///
-/// Returns the session ID if user confirms, null if cancelled
 Future<String?> showJoinSessionDialog(BuildContext context) {
   return showDialog<String>(context: context, builder: (context) => const JoinSessionDialog());
 }

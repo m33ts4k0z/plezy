@@ -1,6 +1,4 @@
 import 'package:flutter/material.dart';
-import 'package:plezy/widgets/app_icon.dart';
-import 'package:material_symbols_icons/symbols.dart';
 import '../utils/desktop_window_padding.dart';
 import '../services/fullscreen_state_manager.dart';
 import 'app_bar_back_button.dart';
@@ -54,10 +52,10 @@ class DesktopAppBarSections {
       final canPop = parentRoute?.canPop ?? false;
 
       if (canPop) {
-        effectiveLeading = IconButton(
-          icon: const AppIcon(Symbols.arrow_back_rounded, fill: 1),
+        effectiveLeading = AppBarBackButton(
+          style: BackButtonStyle.plain,
           onPressed: () => Navigator.of(context).pop(),
-          tooltip: MaterialLocalizations.of(context).backButtonTooltip,
+          semanticLabel: MaterialLocalizations.of(context).backButtonTooltip,
         );
       }
     }
@@ -102,6 +100,7 @@ class DesktopSliverAppBar extends StatelessWidget {
   final double? scrolledUnderElevation;
   final bool floating;
   final bool pinned;
+  final bool snap;
   final double? expandedHeight;
   final Widget? flexibleSpace;
   final PreferredSizeWidget? bottom;
@@ -119,6 +118,7 @@ class DesktopSliverAppBar extends StatelessWidget {
     this.scrolledUnderElevation,
     this.floating = false,
     this.pinned = false,
+    this.snap = false,
     this.expandedHeight,
     this.flexibleSpace,
     this.bottom,
@@ -145,6 +145,7 @@ class DesktopSliverAppBar extends StatelessWidget {
       scrolledUnderElevation: scrolledUnderElevation,
       floating: floating,
       pinned: pinned,
+      snap: snap,
       expandedHeight: expandedHeight,
       flexibleSpace: DesktopAppBarSections.buildFlexibleSpaceSection(flexibleSpace),
       bottom: bottom,
@@ -175,7 +176,6 @@ class DesktopTopBar extends StatelessWidget {
       builder: (context, _) {
         final isFullscreen = FullscreenStateManager().isFullscreen;
 
-        // Determine the effective leading widget
         Widget? effectiveLeading = leading;
         if (effectiveLeading == null && automaticallyImplyLeading) {
           final parentRoute = ModalRoute.of(context);

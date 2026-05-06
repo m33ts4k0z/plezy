@@ -2,10 +2,9 @@ import 'dart:io';
 
 import 'package:auto_updater/auto_updater.dart';
 import 'package:package_info_plus/package_info_plus.dart';
-import 'package:dio/dio.dart';
 import 'package:logger/logger.dart';
-import 'package:plezy/utils/http_client.dart';
-import 'package:shared_preferences/shared_preferences.dart';
+import 'package:plezy/utils/media_server_http_client.dart';
+import 'base_shared_preferences_service.dart';
 
 /// Service to check for new versions on GitHub
 /// Only enabled when ENABLE_UPDATE_CHECK build flag is set
@@ -18,7 +17,6 @@ class UpdateService {
   static const String _githubRepo = 'edde746/plezy';
   static const String _feedUrl = 'https://cdn.jsdelivr.net/gh/edde746/plezy@appcast/appcast.xml';
 
-  // SharedPreferences keys
   static const String _keySkippedVersion = 'update_skipped_version';
   static const String _keyLastCheckTime = 'update_last_check_time';
 
@@ -101,27 +99,24 @@ class UpdateService {
     }
   }
 
-  /// Skip a specific version
   static Future<void> skipVersion(String version) async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = await BaseSharedPreferencesService.sharedCache();
     await prefs.setString(_keySkippedVersion, version);
   }
 
-  /// Get the skipped version
   static Future<String?> getSkippedVersion() async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = await BaseSharedPreferencesService.sharedCache();
     return prefs.getString(_keySkippedVersion);
   }
 
-  /// Clear skipped version
   static Future<void> clearSkippedVersion() async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = await BaseSharedPreferencesService.sharedCache();
     await prefs.remove(_keySkippedVersion);
   }
 
   /// Check if cooldown period has passed since last check
   static Future<bool> shouldCheckForUpdates() async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = await BaseSharedPreferencesService.sharedCache();
     final lastCheckString = prefs.getString(_keyLastCheckTime);
 
     if (lastCheckString == null) return true;
@@ -133,9 +128,8 @@ class UpdateService {
     return timeSinceLastCheck >= _checkCooldown;
   }
 
-  /// Update the last check timestamp
   static Future<void> _updateLastCheckTime() async {
-    final prefs = await SharedPreferences.getInstance();
+    final prefs = await BaseSharedPreferencesService.sharedCache();
     await prefs.setString(_keyLastCheckTime, DateTime.now().toIso8601String());
   }
 
@@ -155,10 +149,9 @@ class UpdateService {
       final packageInfo = await PackageInfo.fromPlatform();
       final currentVersion = packageInfo.version;
 
-      final dio = createHttpClient();
-      final response = await dio.get(
+      final response = await httpClient.get(
         'https://api.github.com/repos/$_githubRepo/releases/latest',
-        options: Options(headers: {'Accept': 'application/vnd.github+json'}),
+        headers: {'Accept': 'application/vnd.github+json'},
       );
 
       if (response.statusCode == 200) {
@@ -248,7 +241,7 @@ class UpdateService {
         if (newPart < currentPart) return false;
       }
 
-      return false; // Versions are equal
+      return false;
     } catch (e) {
       _logger.e('Error comparing versions: $e');
       return false;
