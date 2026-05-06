@@ -32,7 +32,7 @@ void _showSettingsInputDialog({
   required BuildContext context,
   required String title,
   required _SettingsDialogContentBuilder contentBuilder,
-  required Future<bool> Function(BuildContext dialogContext) onSave,
+  required Future<bool> Function() onSave,
   _SettingsDialogActionsBuilder? leadingActionsBuilder,
   VoidCallback? onDispose,
 }) {
@@ -40,21 +40,30 @@ void _showSettingsInputDialog({
 
   showDialog(
     context: context,
+    useRootNavigator: true,
     builder: (BuildContext dialogContext) {
       return StatefulBuilder(
         builder: (context, setDialogState) {
+          final navigator = Navigator.of(dialogContext, rootNavigator: true);
           return AlertDialog(
             title: Text(title),
             content: contentBuilder(dialogContext, context, setDialogState, saveFocusNode),
             actions: [
               ...?leadingActionsBuilder?.call(dialogContext, setDialogState),
-              DialogActionButton(onPressed: () => Navigator.pop(dialogContext), label: t.common.cancel),
+              DialogActionButton(
+                onPressed: () {
+                  if (navigator.mounted && navigator.canPop()) {
+                    navigator.pop();
+                  }
+                },
+                label: t.common.cancel,
+              ),
               DialogActionButton(
                 focusNode: saveFocusNode,
                 onPressed: () async {
-                  final shouldClose = await onSave(dialogContext);
-                  if (shouldClose && dialogContext.mounted) {
-                    Navigator.pop(dialogContext);
+                  final shouldClose = await onSave();
+                  if (shouldClose && navigator.mounted && navigator.canPop()) {
+                    navigator.pop();
                   }
                 },
                 label: t.common.save,
@@ -81,6 +90,7 @@ Future<T?> showSelectionDialog<T>({
   final focusFirstItem = InputModeTracker.isKeyboardMode(context);
   return showDialog<T>(
     context: context,
+    useRootNavigator: true,
     builder: (dialogContext) => AlertDialog(
       title: Text(title),
       contentPadding: const EdgeInsets.only(top: 12, bottom: 24),
@@ -99,7 +109,7 @@ Future<T?> showSelectionDialog<T>({
               subtitle: option.subtitle != null ? Text(option.subtitle!) : null,
               selected: selected,
               autofocus: focusFirstItem && selected,
-              onTap: () => Navigator.pop(dialogContext, option.value),
+              onTap: () => Navigator.of(dialogContext, rootNavigator: true).pop(option.value),
             );
           }).toList(),
         ),
@@ -189,7 +199,7 @@ void _showNumericInputDialogTV({
         ],
       );
     },
-    onSave: (_) async {
+    onSave: () async {
       await onSave(spinnerValue);
       return true;
     },
@@ -241,7 +251,7 @@ void _showNumericInputDialogStandard({
         },
       );
     },
-    onSave: (_) async {
+    onSave: () async {
       final parsed = int.tryParse(controller.text);
       if (parsed == null || parsed < min || parsed > max) return false;
       await onSave(parsed);
@@ -286,31 +296,44 @@ Future<void> _showColorInputDialogStandard({
   required String currentHex,
   required Future<void> Function(String hex) onSave,
 }) async {
-  final initial = hexToColor(currentHex);
-  final selected = await showColorPickerDialog(
-    context,
-    initial,
-    title: Text(title),
-    barrierColor: Colors.black54,
-    width: 40,
-    height: 40,
-    spacing: 0,
-    runSpacing: 0,
-    borderRadius: 4,
-    wheelDiameter: 165,
-    enableOpacity: false,
-    showColorCode: true,
-    colorCodeHasColor: true,
-    pickersEnabled: const <ColorPickerType, bool>{
-      ColorPickerType.both: false,
-      ColorPickerType.primary: true,
-      ColorPickerType.accent: false,
-      ColorPickerType.wheel: true,
-      ColorPickerType.custom: false,
+  Color selected = hexToColor(currentHex);
+  _showSettingsInputDialog(
+    context: context,
+    title: title,
+    contentBuilder: (_, context, setDialogState, saveFocusNode) {
+      return SingleChildScrollView(
+        child: ColorPicker(
+          color: selected,
+          onColorChanged: (color) {
+            setDialogState(() => selected = color);
+          },
+          enableOpacity: false,
+          showColorCode: true,
+          colorCodeHasColor: true,
+          width: 40,
+          height: 40,
+          spacing: 0,
+          runSpacing: 0,
+          borderRadius: 4,
+          wheelDiameter: 165,
+          pickersEnabled: const <ColorPickerType, bool>{
+            ColorPickerType.both: false,
+            ColorPickerType.primary: true,
+            ColorPickerType.accent: false,
+            ColorPickerType.wheel: true,
+            ColorPickerType.custom: false,
+          },
+        ),
+      );
     },
-    actionButtons: const ColorPickerActionButtons(okButton: true, closeButton: true, dialogActionButtons: false),
+    onSave: () async {
+      final nextHex = colorToHex(selected);
+      if (nextHex != currentHex) {
+        await onSave(nextHex);
+      }
+      return true;
+    },
   );
-  if (selected != initial) await onSave(colorToHex(selected));
 }
 
 void _showColorInputDialogTV({
@@ -330,7 +353,7 @@ void _showColorInputDialogTV({
         onConfirm: () => saveFocusNode.requestFocus(),
       );
     },
-    onSave: (_) async {
+    onSave: () async {
       await onSave(colorToHex(picked));
       return true;
     },
@@ -379,7 +402,7 @@ void showRegexInputDialog({
         label: t.settings.resetToDefault,
       ),
     ],
-    onSave: (_) async {
+    onSave: () async {
       if (errorText != null) return false;
       await onSave(controller.text);
       return true;
