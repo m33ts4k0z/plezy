@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
 import 'package:plezy/utils/formatters.dart';
 
-import '../../../models/plex_metadata.dart';
+import '../../../media/media_item.dart';
 import '../../../i18n/strings.g.dart';
+import '../../../watch_together/widgets/watch_together_overlay.dart';
+import '../../../watch_together/providers/watch_together_provider.dart';
 import '../../app_bar_back_button.dart';
 
 /// Header layout style for video controls
@@ -19,7 +22,7 @@ enum VideoHeaderStyle {
 /// Displays the video title with optional series/episode information.
 /// Supports both single-line (macOS) and multi-line (other platforms) layouts.
 class VideoControlsHeader extends StatelessWidget {
-  final PlexMetadata metadata;
+  final MediaItem metadata;
   final VideoHeaderStyle style;
 
   /// Optional trailing widget (e.g., track/chapter controls)
@@ -47,17 +50,23 @@ class VideoControlsHeader extends StatelessWidget {
         ),
         const SizedBox(width: 16),
         Expanded(child: style == VideoHeaderStyle.singleLine ? _buildSingleLineTitle() : _buildMultiLineTitle()),
+        Selector<WatchTogetherProvider, bool>(
+          selector: (_, p) => p.isInSession,
+          builder: (context, inSession, child) {
+            if (!inSession) return const SizedBox.shrink();
+            return const Padding(padding: EdgeInsets.only(right: 8), child: WatchTogetherSessionIndicator());
+          },
+        ),
         ?trailing,
       ],
     );
   }
 
   Widget _buildSingleLineTitle() {
-    // Build single-line title combining series and episode info
     final seriesName = metadata.grandparentTitle ?? metadata.title!;
     final hasEpisodeInfo = metadata.parentIndex != null && metadata.index != null;
 
-    List<String> parts = [seriesName];
+    final List<String> parts = [seriesName];
 
     if (hasEpisodeInfo) {
       parts.add('S${metadata.parentIndex}E${metadata.index}');
@@ -73,7 +82,7 @@ class VideoControlsHeader extends StatelessWidget {
   }
 
   Widget _buildMultiLineTitle() {
-    List<String> secondLineParts = [];
+    final List<String> secondLineParts = [];
 
     if (metadata.parentIndex != null && metadata.index != null) {
       secondLineParts.add('S${metadata.parentIndex}');
@@ -81,8 +90,8 @@ class VideoControlsHeader extends StatelessWidget {
       secondLineParts.add(metadata.title!);
     }
 
-    if (metadata.duration != null) {
-      secondLineParts.add(formatDurationTextual(metadata.duration!));
+    if (metadata.durationMs != null) {
+      secondLineParts.add(formatDurationTextual(metadata.durationMs!));
     }
 
     return Column(

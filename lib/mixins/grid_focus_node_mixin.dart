@@ -19,7 +19,12 @@ mixin GridFocusNodeMixin<T extends StatefulWidget> on State<T> {
     return gridItemFocusNodes.putIfAbsent(index, () => FocusNode(debugLabel: '${prefix}_$index'));
   }
 
-  /// Record that the item at [index] received focus.
+  /// Get the focus node for [index], routing index 0 through [firstNode] when
+  /// the grid pins a dedicated node for the first item (e.g. `firstItemFocusNode`).
+  FocusNode focusNodeForIndex(int index, FocusNode firstNode, {required String prefix}) {
+    return index == 0 ? firstNode : getGridItemFocusNode(index, prefix: prefix);
+  }
+
   void trackGridItemFocus(int index, bool hasFocus) {
     if (hasFocus) {
       lastFocusedGridIndex = index;
@@ -31,7 +36,6 @@ mixin GridFocusNodeMixin<T extends StatefulWidget> on State<T> {
   bool get shouldRestoreGridFocus =>
       lastFocusedGridIndex != null && lastFocusedGridContentVersion == gridContentVersion && lastFocusedGridIndex! >= 0;
 
-  /// Remove focus nodes for indices >= [itemCount].
   void cleanupGridFocusNodes(int itemCount) {
     final keysToRemove = gridItemFocusNodes.keys.where((i) => i >= itemCount).toList();
     for (final key in keysToRemove) {
@@ -62,7 +66,6 @@ mixin GridFocusNodeMixin<T extends StatefulWidget> on State<T> {
     }
   }
 
-  /// Dispose all grid-item focus nodes.
   void disposeGridFocusNodes() {
     for (final node in gridItemFocusNodes.values) {
       node.dispose();

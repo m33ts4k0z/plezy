@@ -14,6 +14,10 @@ import '../widgets/focusable_tab_chip.dart';
 ///
 /// Subclasses must provide [tabChipFocusNodes] — one [FocusNode] per tab.
 mixin TabNavigationMixin<T extends StatefulWidget> on State<T>, TickerProviderStateMixin<T> {
+  /// Mutable so [initTabNavigation] can be called more than once during a
+  /// single State lifetime — the libraries screen rebuilds the controller
+  /// when the visible tab set changes (Jellyfin shows Browse only;
+  /// switching back to a Plex library goes from 1 tab to 4).
   late TabController tabController;
 
   /// When true, suppress auto-focus in tabs (used when navigating via tab bar).
@@ -72,7 +76,6 @@ mixin TabNavigationMixin<T extends StatefulWidget> on State<T>, TickerProviderSt
 
   FocusNode getTabChipFocusNode(int index) => tabChipFocusNodes[index];
 
-  /// Focus the currently selected tab chip.
   void focusTabBar() {
     setState(() {
       suppressAutoFocus = true;
@@ -80,7 +83,6 @@ mixin TabNavigationMixin<T extends StatefulWidget> on State<T>, TickerProviderSt
     getTabChipFocusNode(tabController.index).requestFocus();
   }
 
-  /// Navigate back from the tab bar to the sidebar.
   void onTabBarBack() {
     MainScreenFocusScope.of(context)?.focusSidebar();
   }
@@ -102,20 +104,28 @@ mixin TabNavigationMixin<T extends StatefulWidget> on State<T>, TickerProviderSt
         if (isSelected) {
           onSelectWhenActive();
         } else {
-          setState(() { tabController.index = index; });
+          setState(() {
+            tabController.index = index;
+          });
         }
       },
       onNavigateLeft: index > 0
           ? () {
               final newIndex = index - 1;
-              setState(() { suppressAutoFocus = true; tabController.index = newIndex; });
+              setState(() {
+                suppressAutoFocus = true;
+                tabController.index = newIndex;
+              });
               getTabChipFocusNode(newIndex).requestFocus();
             }
           : onTabBarBack,
       onNavigateRight: index < tabCount - 1
           ? () {
               final newIndex = index + 1;
-              setState(() { suppressAutoFocus = true; tabController.index = newIndex; });
+              setState(() {
+                suppressAutoFocus = true;
+                tabController.index = newIndex;
+              });
               getTabChipFocusNode(newIndex).requestFocus();
             }
           : onNavigateRightFromLast,

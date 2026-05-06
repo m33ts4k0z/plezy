@@ -54,23 +54,7 @@ class _VolumeControlState extends State<VolumeControl> {
   /// Volume step size for keyboard adjustment.
   static const double _volumeStep = 5.0;
 
-  /// Maximum volume from settings (100-300).
-  int _maxVolume = 100;
-
-  @override
-  void initState() {
-    super.initState();
-    _loadMaxVolume();
-  }
-
-  Future<void> _loadMaxVolume() async {
-    final settings = await SettingsService.getInstance();
-    if (mounted) {
-      setState(() {
-        _maxVolume = settings.getMaxVolume();
-      });
-    }
-  }
+  SettingsService get _settings => SettingsService.instanceOrNull!;
 
   void _enterAdjustMode() {
     setState(() {
@@ -86,10 +70,10 @@ class _VolumeControlState extends State<VolumeControl> {
 
   Future<void> _adjustVolume(double delta) async {
     final currentVolume = widget.player.state.volume;
-    final newVolume = (currentVolume + delta).clamp(0.0, _maxVolume.toDouble());
-    widget.player.setVolume(newVolume);
-    final settings = await SettingsService.getInstance();
-    await settings.setVolume(newVolume);
+    final maxVolume = _settings.read(SettingsService.maxVolume).toDouble();
+    final newVolume = (currentVolume + delta).clamp(0.0, maxVolume);
+    await widget.player.setVolume(newVolume);
+    await _settings.write(SettingsService.volume, newVolume);
   }
 
   KeyEventResult _handleKeyEvent(FocusNode node, KeyEvent event) {
@@ -123,10 +107,8 @@ class _VolumeControlState extends State<VolumeControl> {
       // UP/DOWN exits adjust mode and lets navigation continue
       if (key == LogicalKeyboardKey.arrowUp || key == LogicalKeyboardKey.arrowDown) {
         _exitAdjustMode();
-        // Pass through to normal navigation handler
         return widget.onKeyEvent?.call(node, event) ?? KeyEventResult.ignored;
       }
-      // Consume other keys in adjust mode
       return KeyEventResult.handled;
     }
 
@@ -134,7 +116,6 @@ class _VolumeControlState extends State<VolumeControl> {
       return KeyEventResult.ignored;
     }
 
-    // Not in adjust mode: use the provided key event handler for navigation
     return widget.onKeyEvent?.call(node, event) ?? KeyEventResult.ignored;
   }
 
@@ -148,68 +129,72 @@ class _VolumeControlState extends State<VolumeControl> {
 
   @override
   Widget build(BuildContext context) {
-    return StreamBuilder<double>(
-      stream: widget.player.streams.volume,
-      initialData: widget.player.state.volume,
-      builder: (context, snapshot) {
-        final volume = snapshot.data ?? 100.0;
-        final isMuted = volume == 0;
-        final isKeyboardMode = InputModeTracker.isKeyboardMode(context);
+    return ValueListenableBuilder<int>(
+      valueListenable: _settings.listenable(SettingsService.maxVolume),
+      builder: (context, maxVolume, _) {
+        return StreamBuilder<double>(
+          stream: widget.player.streams.volume,
+          initialData: widget.player.state.volume,
+          builder: (context, snapshot) {
+            final volume = snapshot.data ?? 100.0;
+            final isMuted = volume == 0;
+            final isKeyboardMode = InputModeTracker.isKeyboardMode(context);
 
-        final muteButton = Semantics(
-          label: isMuted ? t.videoControls.unmuteButton : t.videoControls.muteButton,
-          button: true,
-          excludeSemantics: true,
-          child: IconButton(
-            icon: AppIcon(
-              isMuted ? Symbols.volume_off_rounded : Symbols.volume_up_rounded,
-              fill: 1,
-              color: Colors.white,
-            ),
-            onPressed: () async {
-              final newVolume = isMuted ? 100.0 : 0.0;
-              widget.player.setVolume(newVolume);
-              final settings = await SettingsService.getInstance();
-              await settings.setVolume(newVolume);
-            },
-          ),
-        );
+            final muteButton = Semantics(
+              label: isMuted ? t.videoControls.unmuteButton : t.videoControls.muteButton,
+              button: true,
+              excludeSemantics: true,
+              child: IconButton(
+                icon: AppIcon(
+                  isMuted ? Symbols.volume_off_rounded : Symbols.volume_up_rounded,
+                  fill: 1,
+                  color: Colors.white,
+                ),
+                onPressed: () async {
+                  final newVolume = isMuted ? 100.0 : 0.0;
+                  await widget.player.setVolume(newVolume);
+                  await _settings.write(SettingsService.volume, newVolume);
+                },
+              ),
+            );
 
-        return Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (widget.focusNode != null)
-              FocusableWrapper(
-                focusNode: widget.focusNode,
-                onSelect: _enterAdjustMode,
-                onKeyEvent: _handleKeyEvent,
-                onFocusChange: _handleFocusChange,
-                borderRadius: 20,
-                autoScroll: false,
-                useBackgroundFocus: true,
-                disableScale: true,
-                semanticLabel: () {
-                  if (_isAdjustMode) return t.videoControls.volumeSlider;
-                  return isMuted ? t.videoControls.unmuteButton : t.videoControls.muteButton;
-                }(),
-                child: muteButton,
-              )
-            else
-              muteButton,
-            const SizedBox(width: 8),
-            _buildVolumeSlider(volume, isKeyboardMode),
-          ],
+            return Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (widget.focusNode != null)
+                  FocusableWrapper(
+                    focusNode: widget.focusNode,
+                    onSelect: _enterAdjustMode,
+                    onKeyEvent: _handleKeyEvent,
+                    onFocusChange: _handleFocusChange,
+                    borderRadius: 20,
+                    autoScroll: false,
+                    useBackgroundFocus: true,
+                    disableScale: true,
+                    semanticLabel: () {
+                      if (_isAdjustMode) return t.videoControls.volumeSlider;
+                      return isMuted ? t.videoControls.unmuteButton : t.videoControls.muteButton;
+                    }(),
+                    child: muteButton,
+                  )
+                else
+                  muteButton,
+                const SizedBox(width: 8),
+                _buildVolumeSlider(volume, isKeyboardMode, maxVolume),
+              ],
+            );
+          },
         );
       },
     );
   }
 
-  Widget _buildVolumeSlider(double volume, bool isKeyboardMode) {
-    final maxVolumeDouble = _maxVolume.toDouble();
+  Widget _buildVolumeSlider(double volume, bool isKeyboardMode, int maxVolume) {
+    final maxVolumeDouble = maxVolume.toDouble();
 
     // Calculate 100% marker position as fraction of slider width
     // Only show marker if max volume > 100
-    final showMarker = _maxVolume > 100;
+    final showMarker = maxVolume > 100;
     final markerPosition = showMarker ? (100.0 / maxVolumeDouble) : 0.0;
 
     return Listener(
@@ -227,7 +212,6 @@ class _VolumeControlState extends State<VolumeControl> {
         child: Stack(
           alignment: Alignment.centerLeft,
           children: [
-            // 100% marker (only shown if max > 100)
             if (showMarker)
               Positioned(
                 left: 100 * markerPosition - 1, // Adjust for marker width
@@ -240,7 +224,6 @@ class _VolumeControlState extends State<VolumeControl> {
                   ),
                 ),
               ),
-            // Volume slider
             SliderTheme(
               data: SliderTheme.of(context).copyWith(
                 trackHeight: 8,
@@ -260,8 +243,7 @@ class _VolumeControlState extends State<VolumeControl> {
                     widget.player.setVolume(value);
                   },
                   onChangeEnd: (value) async {
-                    final settings = await SettingsService.getInstance();
-                    await settings.setVolume(value);
+                    await _settings.write(SettingsService.volume, value);
                   },
                   activeColor: Colors.white,
                   inactiveColor: Colors.white.withValues(alpha: 0.3),

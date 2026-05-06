@@ -7,26 +7,25 @@ import 'package:material_symbols_icons/symbols.dart';
 import 'package:provider/provider.dart';
 
 import '../../i18n/strings.g.dart';
+import '../../mixins/mounted_set_state_mixin.dart';
 import '../../focus/focusable_button.dart';
+import '../../focus/focusable_text_field.dart';
 import '../../focus/focusable_wrapper.dart';
+import '../../profiles/active_profile_provider.dart';
 import '../../services/settings_service.dart';
 import '../../utils/app_logger.dart';
 import '../../utils/dialogs.dart';
 import '../../utils/snackbar_helper.dart';
+import '../../widgets/dialog_action_button.dart';
 import '../../utils/video_player_navigation.dart';
 import '../../widgets/focused_scroll_scaffold.dart';
 import '../models/watch_session.dart';
 import '../providers/watch_together_provider.dart';
+import '../services/recent_rooms_service.dart';
 import '../services/watch_together_peer_service.dart';
 import '../widgets/join_session_dialog.dart';
+import '../../widgets/loading_indicator_box.dart';
 
-/// Main screen for Watch Together functionality
-///
-/// Allows users to:
-/// - Create a new watch session
-/// - Join an existing session
-/// - View active session info and participants
-/// - Leave/end session
 class WatchTogetherScreen extends StatelessWidget {
   const WatchTogetherScreen({super.key});
 
@@ -34,7 +33,6 @@ class WatchTogetherScreen extends StatelessWidget {
   Widget build(BuildContext context) {
     return Consumer<WatchTogetherProvider>(
       builder: (context, watchTogether, child) {
-        // Non-hosts must use "Leave Session" button - disable back navigation and hide button
         final canGoBack = watchTogether.isHost || !watchTogether.isInSession;
         return PopScope(
           canPop: canGoBack,
@@ -77,25 +75,35 @@ class _NotInSessionView extends StatefulWidget {
   State<_NotInSessionView> createState() => _NotInSessionViewState();
 }
 
-class _NotInSessionViewState extends State<_NotInSessionView> {
+class _NotInSessionViewState extends State<_NotInSessionView> with MountedSetStateMixin {
   bool _isCreating = false;
   bool _isJoining = false;
+  String? _enteringRoomCode;
   bool? _healthOk;
   String? _customRelayUrl;
+  List<RecentRoom> _recentRooms = [];
 
   @override
   void initState() {
     super.initState();
-    _customRelayUrl = SettingsService.instanceOrNull?.getCustomRelayUrl();
+    _customRelayUrl = SettingsService.instanceOrNull?.read(SettingsService.customRelayUrl);
+    _recentRooms = RecentRoomsService.getRecentRooms();
     _checkHealth();
   }
+
+  bool get _isBusy => _isCreating || _isJoining || _enteringRoomCode != null;
+
+  String? get _plexDisplayName => context.read<ActiveProfileProvider>().active?.displayName;
 
   Future<void> _checkHealth() async {
     try {
       final client = HttpClient();
       client.connectionTimeout = const Duration(seconds: 5);
       final request = await client.getUrl(Uri.parse(WatchTogetherPeerService.healthUrlFor(_customRelayUrl)));
-      final response = await request.close().namedTimeout(const Duration(seconds: 5), operation: 'WatchTogether health check');
+      final response = await request.close().namedTimeout(
+        const Duration(seconds: 5),
+        operation: 'WatchTogether health check',
+      );
       final body = await response.transform(const SystemEncoding().decoder).join();
       client.close();
       if (!mounted) return;
@@ -117,7 +125,7 @@ class _NotInSessionViewState extends State<_NotInSessionView> {
         child: Padding(
           padding: const EdgeInsets.all(24),
           child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
+            mainAxisSize: MainAxisSize.min,
             children: [
               Icon(Symbols.group_rounded, size: 80, color: theme.colorScheme.primary),
               const SizedBox(height: 24),
@@ -153,13 +161,11 @@ class _NotInSessionViewState extends State<_NotInSessionView> {
               SizedBox(
                 width: double.infinity,
                 child: FocusableButton(
-                  autofocus: true,
-                  onPressed: _isCreating || _isJoining ? null : _createSession,
+                  autofocus: _recentRooms.isEmpty,
+                  onPressed: _isBusy ? null : _createSession,
                   child: FilledButton.icon(
-                    onPressed: _isCreating || _isJoining ? null : _createSession,
-                    icon: _isCreating
-                        ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
-                        : const Icon(Symbols.add_rounded),
+                    onPressed: _isBusy ? null : _createSession,
+                    icon: _isCreating ? const LoadingIndicatorBox(size: 20) : const Icon(Symbols.add_rounded),
                     label: Text(_isCreating ? t.watchTogether.creating : t.watchTogether.createSession),
                   ),
                 ),
@@ -168,16 +174,32 @@ class _NotInSessionViewState extends State<_NotInSessionView> {
               SizedBox(
                 width: double.infinity,
                 child: FocusableButton(
-                  onPressed: _isCreating || _isJoining ? null : _joinSession,
+                  onPressed: _isBusy ? null : _joinSession,
                   child: OutlinedButton.icon(
-                    onPressed: _isCreating || _isJoining ? null : _joinSession,
-                    icon: _isJoining
-                        ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
-                        : const Icon(Symbols.group_add_rounded),
+                    onPressed: _isBusy ? null : _joinSession,
+                    icon: _isJoining ? const LoadingIndicatorBox(size: 20) : const Icon(Symbols.group_add_rounded),
                     label: Text(_isJoining ? t.watchTogether.joining : t.watchTogether.joinSession),
                   ),
                 ),
               ),
+              if (_recentRooms.isNotEmpty) ...[
+                const SizedBox(height: 32),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(t.watchTogether.recentRooms, style: theme.textTheme.titleSmall),
+                ),
+                const SizedBox(height: 8),
+                ..._recentRooms.map(
+                  (room) => _RecentRoomTile(
+                    room: room,
+                    isBusy: _isBusy,
+                    isEntering: _enteringRoomCode == room.code,
+                    onTap: () => _enterRoom(room),
+                    onRename: () => _renameRoom(room),
+                    onRemove: () => _removeRoom(room),
+                  ),
+                ),
+              ],
             ],
           ),
         ),
@@ -192,11 +214,16 @@ class _NotInSessionViewState extends State<_NotInSessionView> {
     setState(() => _isCreating = true);
 
     try {
-      await widget.watchTogether.createSession(controlMode: controlMode);
+      final sessionId = await widget.watchTogether.createSession(
+        controlMode: controlMode,
+        displayName: _plexDisplayName,
+      );
+      await RecentRoomsService.addOrUpdateRoom(sessionId, controlMode: controlMode);
+      setStateIfMounted(() => _recentRooms = RecentRoomsService.getRecentRooms());
     } catch (e) {
       appLogger.e('Failed to create session', error: e);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${t.watchTogether.failedToCreate}: $e')));
+        showErrorSnackBar(context, '${t.watchTogether.failedToCreate}: $e');
       }
     } finally {
       if (mounted) {
@@ -206,37 +233,21 @@ class _NotInSessionViewState extends State<_NotInSessionView> {
   }
 
   Future<ControlMode?> _showControlModeDialog() {
-    const buttonPadding = EdgeInsets.symmetric(horizontal: 18, vertical: 14);
-    const buttonShape = StadiumBorder();
     return showDialog<ControlMode>(
       context: context,
       builder: (context) => AlertDialog(
         title: Text(t.watchTogether.controlMode),
         content: Text(t.watchTogether.controlModeQuestion),
         actions: [
-          FocusableButton(
-            autofocus: true,
-            onPressed: () => Navigator.pop(context),
-            child: TextButton(
-              onPressed: () => Navigator.pop(context),
-              style: TextButton.styleFrom(padding: buttonPadding, shape: buttonShape),
-              child: Text(t.common.cancel),
-            ),
-          ),
-          FocusableButton(
+          DialogActionButton(onPressed: () => Navigator.pop(context), label: t.common.cancel),
+          DialogActionButton(
             onPressed: () => Navigator.pop(context, ControlMode.hostOnly),
-            child: TextButton(
-              onPressed: () => Navigator.pop(context, ControlMode.hostOnly),
-              style: TextButton.styleFrom(padding: buttonPadding, shape: buttonShape),
-              child: Text(t.watchTogether.hostOnly),
-            ),
+            label: t.watchTogether.hostOnly,
           ),
-          FocusableButton(
+          DialogActionButton(
             onPressed: () => Navigator.pop(context, ControlMode.anyone),
-            child: FilledButton(
-              onPressed: () => Navigator.pop(context, ControlMode.anyone),
-              child: Text(t.watchTogether.anyone),
-            ),
+            label: t.watchTogether.anyone,
+            isPrimary: true,
           ),
         ],
       ),
@@ -250,11 +261,13 @@ class _NotInSessionViewState extends State<_NotInSessionView> {
     setState(() => _isJoining = true);
 
     try {
-      await widget.watchTogether.joinSession(sessionId);
+      await widget.watchTogether.joinSession(sessionId, displayName: _plexDisplayName);
+      await RecentRoomsService.addOrUpdateRoom(sessionId);
+      setStateIfMounted(() => _recentRooms = RecentRoomsService.getRecentRooms());
     } catch (e) {
       appLogger.e('Failed to join session', error: e);
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${t.watchTogether.failedToJoin}: $e')));
+        showErrorSnackBar(context, '${t.watchTogether.failedToJoin}: $e');
       }
     } finally {
       if (mounted) {
@@ -262,9 +275,141 @@ class _NotInSessionViewState extends State<_NotInSessionView> {
       }
     }
   }
+
+  Future<void> _enterRoom(RecentRoom room) async {
+    setState(() => _enteringRoomCode = room.code);
+
+    try {
+      await widget.watchTogether.enterRoom(
+        room.code,
+        controlMode: room.controlMode ?? ControlMode.anyone,
+        displayName: _plexDisplayName,
+      );
+      await RecentRoomsService.addOrUpdateRoom(room.code);
+      setStateIfMounted(() => _recentRooms = RecentRoomsService.getRecentRooms());
+    } catch (e) {
+      appLogger.e('Failed to enter room', error: e);
+      if (mounted) {
+        showErrorSnackBar(context, '${t.watchTogether.failedToJoin}: $e');
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _enteringRoomCode = null);
+      }
+    }
+  }
+
+  Future<void> _renameRoom(RecentRoom room) async {
+    final controller = TextEditingController(text: room.name ?? '');
+    String? name;
+    try {
+      name = await showDialog<String>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: Text(t.watchTogether.renameRoom),
+          content: FocusableTextField(
+            controller: controller,
+            autofocus: true,
+            decoration: InputDecoration(hintText: room.code),
+            onSubmitted: (value) => Navigator.pop(context, value),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context), child: Text(t.common.cancel)),
+            FilledButton(onPressed: () => Navigator.pop(context, controller.text), child: Text(t.common.save)),
+          ],
+        ),
+      );
+    } finally {
+      controller.dispose();
+    }
+    if (name == null || !mounted) return;
+
+    await RecentRoomsService.renameRoom(room.code, name.isEmpty ? null : name);
+    setState(() => _recentRooms = RecentRoomsService.getRecentRooms());
+  }
+
+  Future<void> _removeRoom(RecentRoom room) async {
+    await RecentRoomsService.removeRoom(room.code);
+    setState(() => _recentRooms = RecentRoomsService.getRecentRooms());
+  }
 }
 
-/// Content shown when in an active session (without scroll wrapper)
+class _RecentRoomTile extends StatelessWidget {
+  final RecentRoom room;
+  final bool isBusy;
+  final bool isEntering;
+  final VoidCallback onTap;
+  final VoidCallback onRename;
+  final VoidCallback onRemove;
+
+  const _RecentRoomTile({
+    required this.room,
+    required this.isBusy,
+    required this.isEntering,
+    required this.onTap,
+    required this.onRename,
+    required this.onRemove,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final title = room.name ?? room.code;
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 4),
+      child: FocusableWrapper(
+        useBackgroundFocus: true,
+        borderRadius: 12,
+        onSelect: isBusy ? null : onTap,
+        onLongPress: () => _showActions(context),
+        child: ListTile(
+          shape: const RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(12))),
+          leading: isEntering ? const LoadingIndicatorBox(size: 24) : const Icon(Symbols.meeting_room_rounded),
+          title: Text(title, maxLines: 1, overflow: TextOverflow.ellipsis),
+          subtitle: room.name != null
+              ? Text(
+                  room.code,
+                  style: TextStyle(fontFamily: 'monospace', color: theme.colorScheme.onSurfaceVariant),
+                )
+              : null,
+          trailing: IconButton(icon: const Icon(Symbols.more_vert_rounded), onPressed: () => _showActions(context)),
+          onTap: isBusy ? null : onTap,
+        ),
+      ),
+    );
+  }
+
+  void _showActions(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Symbols.edit_rounded),
+              title: Text(t.watchTogether.renameRoom),
+              onTap: () {
+                Navigator.pop(context);
+                onRename();
+              },
+            ),
+            ListTile(
+              leading: Icon(Symbols.delete_rounded, color: Theme.of(context).colorScheme.error),
+              title: Text(t.watchTogether.removeRoom, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+              onTap: () {
+                Navigator.pop(context);
+                onRemove();
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 class _ActiveSessionContent extends StatelessWidget {
   final WatchTogetherProvider watchTogether;
 
@@ -278,7 +423,6 @@ class _ActiveSessionContent extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        // Session Info Card
         Card(
           child: Padding(
             padding: const EdgeInsets.all(16),
@@ -334,7 +478,6 @@ class _ActiveSessionContent extends StatelessWidget {
 
         const SizedBox(height: 16),
 
-        // Participants Card
         Card(
           child: Padding(
             padding: const EdgeInsets.all(16),
@@ -521,9 +664,7 @@ class _JoinCurrentPlaybackCardState extends State<_JoinCurrentPlaybackCard> {
                 onPressed: _isJoining ? null : _joinCurrentPlayback,
                 child: FilledButton.icon(
                   onPressed: _isJoining ? null : _joinCurrentPlayback,
-                  icon: _isJoining
-                      ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2))
-                      : const Icon(Symbols.play_arrow_rounded),
+                  icon: _isJoining ? const LoadingIndicatorBox() : const Icon(Symbols.play_arrow_rounded),
                   label: Text(_isJoining ? t.watchTogether.joining : t.watchTogether.joinCurrentPlayback),
                 ),
               ),
@@ -576,6 +717,6 @@ class _SessionCodeRow extends StatelessWidget {
 
   void _copySessionCode(BuildContext context) {
     Clipboard.setData(ClipboardData(text: sessionId));
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(t.watchTogether.sessionCodeCopied)));
+    showSnackBar(context, t.watchTogether.sessionCodeCopied);
   }
 }

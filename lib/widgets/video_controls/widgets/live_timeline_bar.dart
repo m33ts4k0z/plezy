@@ -1,9 +1,9 @@
 import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
 
 import '../../../models/livetv_capture_buffer.dart';
 import '../../../mpv/mpv.dart';
 import '../../../focus/focusable_wrapper.dart';
+import '../../../utils/formatters.dart';
 
 /// Timeline bar for live TV time-shift.
 ///
@@ -47,15 +47,13 @@ class _LiveTimelineBarState extends State<LiveTimelineBar> {
   int get _rangeStart => widget.captureBuffer.seekableStartEpoch;
   int get _rangeEnd => widget.captureBuffer.seekableEndEpoch;
 
-  int _currentEpoch(Duration playerPosition) =>
-      (widget.streamStartEpoch + playerPosition.inSeconds).round();
+  int _currentEpoch(Duration playerPosition) => (widget.streamStartEpoch + playerPosition.inSeconds).round();
 
-  int _displayPosition(Duration playerPosition) =>
-      _isDragging ? _dragPositionEpoch : _currentEpoch(playerPosition);
+  int _displayPosition(Duration playerPosition) => _isDragging ? _dragPositionEpoch : _currentEpoch(playerPosition);
 
-  String _formatEpochTime(int epochSeconds) {
+  String _formatEpochTime(BuildContext context, int epochSeconds) {
     final dt = DateTime.fromMillisecondsSinceEpoch(epochSeconds * 1000);
-    return DateFormat.jm().format(dt);
+    return formatClockTime(dt, is24Hour: MediaQuery.alwaysUse24HourFormatOf(context));
   }
 
   double _epochToFraction(int epoch) {
@@ -90,7 +88,7 @@ class _LiveTimelineBarState extends State<LiveTimelineBar> {
     return Row(
       children: [
         Text(
-          _formatEpochTime(displayPos),
+          _formatEpochTime(context, displayPos),
           style: const TextStyle(color: Colors.white70, fontSize: 13, fontFeatures: [FontFeature.tabularFigures()]),
         ),
         const SizedBox(width: 8),
@@ -109,7 +107,7 @@ class _LiveTimelineBarState extends State<LiveTimelineBar> {
           Align(
             alignment: Alignment.centerLeft,
             child: Text(
-              _formatEpochTime(displayPos),
+              _formatEpochTime(context, displayPos),
               style: const TextStyle(color: Colors.white70, fontSize: 12, fontFeatures: [FontFeature.tabularFigures()]),
             ),
           ),
@@ -134,18 +132,14 @@ class _LiveTimelineBarState extends State<LiveTimelineBar> {
           final width = constraints.maxWidth;
           return GestureDetector(
             onHorizontalDragStart: widget.enabled ? _onDragStart : null,
-            onHorizontalDragUpdate: widget.enabled
-                ? (details) => _onDragUpdate(details, width)
-                : null,
+            onHorizontalDragUpdate: widget.enabled ? (details) => _onDragUpdate(details, width) : null,
             onHorizontalDragEnd: widget.enabled ? _onDragEnd : null,
             onTapUp: widget.enabled ? (details) => _onTap(details, width) : null,
             child: SizedBox(
               height: 24,
               child: CustomPaint(
                 size: Size(width, 24),
-                painter: _LiveTimelinePainter(
-                  positionFraction: positionFraction,
-                ),
+                painter: _LiveTimelinePainter(positionFraction: positionFraction),
               ),
             ),
           );
@@ -196,7 +190,6 @@ class _LiveTimelinePainter extends CustomPainter {
     final trackRadius = Radius.circular(trackHeight / 2);
     final posX = positionFraction * w;
 
-    // Background track
     canvas.drawRRect(
       RRect.fromRectAndRadius(
         Rect.fromCenter(center: Offset(w / 2, trackY), width: w, height: trackHeight),
@@ -205,7 +198,6 @@ class _LiveTimelinePainter extends CustomPainter {
       Paint()..color = Colors.white.withValues(alpha: 0.15),
     );
 
-    // Played region
     if (posX > 0) {
       canvas.drawRRect(
         RRect.fromRectAndRadius(
@@ -229,6 +221,5 @@ class _LiveTimelinePainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(covariant _LiveTimelinePainter oldDelegate) =>
-      positionFraction != oldDelegate.positionFraction;
+  bool shouldRepaint(covariant _LiveTimelinePainter oldDelegate) => positionFraction != oldDelegate.positionFraction;
 }

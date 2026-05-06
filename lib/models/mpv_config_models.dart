@@ -1,4 +1,8 @@
-/// Represents a saved preset of MPV configurations
+import 'package:json_annotation/json_annotation.dart';
+
+part 'mpv_config_models.g.dart';
+
+@JsonSerializable()
 class MpvPreset {
   final String name;
   final String text;
@@ -6,17 +10,7 @@ class MpvPreset {
 
   const MpvPreset({required this.name, required this.text, required this.createdAt});
 
-  factory MpvPreset.fromJson(Map<String, dynamic> json) {
-    return MpvPreset(
-      name: json['name'] as String,
-      text: json['text'] as String,
-      createdAt: DateTime.parse(json['createdAt'] as String),
-    );
-  }
+  factory MpvPreset.fromJson(Map<String, dynamic> json) => _$MpvPresetFromJson(json);
 
-  Map<String, dynamic> toJson() => {
-    'name': name,
-    'text': text,
-    'createdAt': createdAt.toIso8601String(),
-  };
+  Map<String, dynamic> toJson() => _$MpvPresetToJson(this);
 }

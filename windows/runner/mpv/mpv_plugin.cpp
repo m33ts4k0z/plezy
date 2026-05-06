@@ -11,52 +11,45 @@ static flutter::EncodableMap DisplayModeToMap(const mpv::DisplayMode& mode) {
   return m;
 }
 
-void MpvPlayerPluginRegisterWithRegistrar(
-    FlutterDesktopPluginRegistrarRef registrar) {
+void MpvPlayerPluginRegisterWithRegistrar(FlutterDesktopPluginRegistrarRef registrar) {
   mpv::MpvPlayerPlugin::RegisterWithRegistrar(
-      flutter::PluginRegistrarManager::GetInstance()
-          ->GetRegistrar<flutter::PluginRegistrarWindows>(registrar));
+      flutter::PluginRegistrarManager::GetInstance()->GetRegistrar<flutter::PluginRegistrarWindows>(registrar));
 }
 
 namespace mpv {
 
-void MpvPlayerPlugin::RegisterWithRegistrar(
-    flutter::PluginRegistrarWindows* registrar) {
+namespace {
+constexpr UINT kPlatformTaskMessage = WM_APP + 0x4D50;
+}
+
+void MpvPlayerPlugin::RegisterWithRegistrar(flutter::PluginRegistrarWindows* registrar) {
   auto plugin = std::make_unique<MpvPlayerPlugin>(registrar);
   registrar->AddPlugin(std::move(plugin));
 }
 
 MpvPlayerPlugin::MpvPlayerPlugin(flutter::PluginRegistrarWindows* registrar)
-    : registrar_(registrar) {
+    : registrar_(registrar), platform_thread_id_(::GetCurrentThreadId()) {
   // Create method channel.
-  method_channel_ =
-      std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
-          registrar->messenger(), "com.plezy/mpv_player",
-          &flutter::StandardMethodCodec::GetInstance());
+  method_channel_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+      registrar->messenger(), "com.plezy/mpv_player", &flutter::StandardMethodCodec::GetInstance());
 
   method_channel_->SetMethodCallHandler(
-      [this](const auto& call, auto result) {
-        HandleMethodCall(call, std::move(result));
-      });
+      [this](const auto& call, auto result) { HandleMethodCall(call, std::move(result)); });
 
   // Create event channel.
-  event_channel_ =
-      std::make_unique<flutter::EventChannel<flutter::EncodableValue>>(
-          registrar->messenger(), "com.plezy/mpv_player/events",
-          &flutter::StandardMethodCodec::GetInstance());
+  event_channel_ = std::make_unique<flutter::EventChannel<flutter::EncodableValue>>(
+      registrar->messenger(), "com.plezy/mpv_player/events", &flutter::StandardMethodCodec::GetInstance());
 
-  auto handler = std::make_unique<
-      flutter::StreamHandlerFunctions<flutter::EncodableValue>>(
-      [this](const flutter::EncodableValue* arguments,
-             std::unique_ptr<flutter::EventSink<flutter::EncodableValue>>&&
-                 events) -> std::unique_ptr<flutter::StreamHandlerError<
-                              flutter::EncodableValue>> {
+  auto handler = std::make_unique<flutter::StreamHandlerFunctions<flutter::EncodableValue>>(
+      [this](
+          const flutter::EncodableValue* arguments,
+          std::unique_ptr<flutter::EventSink<flutter::EncodableValue>>&& events)
+          -> std::unique_ptr<flutter::StreamHandlerError<flutter::EncodableValue>> {
         event_sink_ = std::move(events);
         return nullptr;
       },
       [this](const flutter::EncodableValue* arguments)
-          -> std::unique_ptr<
-              flutter::StreamHandlerError<flutter::EncodableValue>> {
+          -> std::unique_ptr<flutter::StreamHandlerError<flutter::EncodableValue>> {
         event_sink_ = nullptr;
         return nullptr;
       });
@@ -65,6 +58,8 @@ MpvPlayerPlugin::MpvPlayerPlugin(flutter::PluginRegistrarWindows* registrar)
 }
 
 MpvPlayerPlugin::~MpvPlayerPlugin() {
+  DrainPlatformTasks();
+
   // Unregister window proc delegate.
   if (proc_id_) {
     registrar_->UnregisterTopLevelWindowProcDelegate(proc_id_.value());
@@ -72,12 +67,37 @@ MpvPlayerPlugin::~MpvPlayerPlugin() {
   }
 }
 
-HWND MpvPlayerPlugin::GetChildWindow() {
-  return registrar_->GetView()->GetNativeWindow();
+HWND MpvPlayerPlugin::GetChildWindow() { return registrar_->GetView()->GetNativeWindow(); }
+
+HWND MpvPlayerPlugin::GetWindow() { return ::GetAncestor(GetChildWindow(), GA_ROOT); }
+
+void MpvPlayerPlugin::PostToPlatformThread(std::function<void()> task) {
+  if (::GetCurrentThreadId() == platform_thread_id_) {
+    task();
+    return;
+  }
+
+  {
+    std::lock_guard<std::mutex> lock(platform_tasks_mutex_);
+    platform_tasks_.push(std::move(task));
+  }
+
+  if (flutter_window_) {
+    ::PostMessage(flutter_window_, kPlatformTaskMessage, 0, 0);
+  }
 }
 
-HWND MpvPlayerPlugin::GetWindow() {
-  return ::GetAncestor(GetChildWindow(), GA_ROOT);
+void MpvPlayerPlugin::DrainPlatformTasks() {
+  std::queue<std::function<void()>> tasks;
+  {
+    std::lock_guard<std::mutex> lock(platform_tasks_mutex_);
+    tasks.swap(platform_tasks_);
+  }
+
+  while (!tasks.empty()) {
+    tasks.front()();
+    tasks.pop();
+  }
 }
 
 void MpvPlayerPlugin::HandleMethodCall(
@@ -93,12 +113,17 @@ void MpvPlayerPlugin::HandleMethodCall(
     }
 
     HWND flutter_window = GetWindow();
+    flutter_window_ = flutter_window;
 
-    MpvCore::SetInstance(
-        std::make_unique<MpvCore>(flutter_window));
+    MpvCore::SetInstance(std::make_unique<MpvCore>(flutter_window));
 
-    proc_id_ = registrar_->RegisterTopLevelWindowProcDelegate(
-        [](HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    proc_id_ =
+        registrar_->RegisterTopLevelWindowProcDelegate([this](HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+          if (message == kPlatformTaskMessage) {
+            DrainPlatformTasks();
+            return std::optional<HRESULT>(0);
+          }
+
           auto* core = MpvCore::GetInstance();
           if (core) {
             return core->WindowProc(hwnd, message, wparam, lparam);
@@ -121,9 +146,7 @@ void MpvPlayerPlugin::HandleMethodCall(
 
     if (success) {
       // Set up event callback.
-      player_->SetEventCallback([this](const flutter::EncodableValue& event) {
-        SendEvent(event);
-      });
+      player_->SetEventCallback([this](const flutter::EncodableValue& event) { SendEvent(event); });
 
       // Register the mpv window with core for z-order management.
       RECT rect = {0, 0, 100, 100};
@@ -161,8 +184,7 @@ void MpvPlayerPlugin::HandleMethodCall(
 
     const auto& map = std::get<flutter::EncodableMap>(*args);
     auto it = map.find(flutter::EncodableValue("args"));
-    if (it == map.end() ||
-        !std::holds_alternative<flutter::EncodableList>(it->second)) {
+    if (it == map.end() || !std::holds_alternative<flutter::EncodableList>(it->second)) {
       result->Error("INVALID_ARGS", "Missing 'args' list");
       return;
     }
@@ -177,15 +199,18 @@ void MpvPlayerPlugin::HandleMethodCall(
 
     // Use async command to prevent UI blocking during network operations
     // Move result into shared_ptr for safe capture in callback
-    auto result_ptr = std::make_shared<std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>>>(std::move(result));
+    auto result_ptr =
+        std::make_shared<std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>>>(std::move(result));
     std::string cmd_name = command_args.empty() ? "unknown" : command_args[0];
-    player_->CommandAsync(command_args, [result_ptr, cmd_name](int error) {
-      if (error < 0) {
-        (*result_ptr)->Error("COMMAND_FAILED",
-          "MPV command failed: " + cmd_name + " (error " + std::to_string(error) + ")");
-      } else {
-        (*result_ptr)->Success();
-      }
+    player_->CommandAsync(command_args, [this, result_ptr, cmd_name](int error) {
+      PostToPlatformThread([result_ptr, cmd_name, error]() {
+        if (error < 0) {
+          (*result_ptr)
+              ->Error("COMMAND_FAILED", "MPV command failed: " + cmd_name + " (error " + std::to_string(error) + ")");
+        } else {
+          (*result_ptr)->Success();
+        }
+      });
     });
     return;  // Response will be sent asynchronously
   } else if (method == "setProperty") {
@@ -204,20 +229,21 @@ void MpvPlayerPlugin::HandleMethodCall(
     auto name_it = map.find(flutter::EncodableValue("name"));
     auto value_it = map.find(flutter::EncodableValue("value"));
 
-    if (name_it == map.end() ||
-        !std::holds_alternative<std::string>(name_it->second)) {
+    if (name_it == map.end() || !std::holds_alternative<std::string>(name_it->second)) {
       result->Error("INVALID_ARGS", "Missing 'name'");
       return;
     }
-    if (value_it == map.end() ||
-        !std::holds_alternative<std::string>(value_it->second)) {
+    if (value_it == map.end() || !std::holds_alternative<std::string>(value_it->second)) {
       result->Error("INVALID_ARGS", "Missing 'value'");
       return;
     }
 
-    player_->SetProperty(std::get<std::string>(name_it->second),
-                         std::get<std::string>(value_it->second));
-    result->Success();
+    auto result_ptr =
+        std::make_shared<std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>>>(std::move(result));
+    player_->SetPropertyAsync(
+        std::get<std::string>(name_it->second), std::get<std::string>(value_it->second),
+        [this, result_ptr](int error) { PostToPlatformThread([result_ptr]() { (*result_ptr)->Success(); }); });
+    return;
   } else if (method == "setLogLevel") {
     if (!player_ || !player_->IsInitialized()) {
       result->Error("NOT_INITIALIZED", "Player not initialized");
@@ -233,8 +259,7 @@ void MpvPlayerPlugin::HandleMethodCall(
     const auto& map = std::get<flutter::EncodableMap>(*args);
     auto level_it = map.find(flutter::EncodableValue("level"));
 
-    if (level_it == map.end() ||
-        !std::holds_alternative<std::string>(level_it->second)) {
+    if (level_it == map.end() || !std::holds_alternative<std::string>(level_it->second)) {
       result->Error("INVALID_ARGS", "Missing 'level'");
       return;
     }
@@ -256,19 +281,24 @@ void MpvPlayerPlugin::HandleMethodCall(
     const auto& map = std::get<flutter::EncodableMap>(*args);
     auto name_it = map.find(flutter::EncodableValue("name"));
 
-    if (name_it == map.end() ||
-        !std::holds_alternative<std::string>(name_it->second)) {
+    if (name_it == map.end() || !std::holds_alternative<std::string>(name_it->second)) {
       result->Error("INVALID_ARGS", "Missing 'name'");
       return;
     }
 
-    std::string value =
-        player_->GetProperty(std::get<std::string>(name_it->second));
-    if (value.empty()) {
-      result->Success();
-    } else {
-      result->Success(flutter::EncodableValue(value));
-    }
+    auto result_ptr =
+        std::make_shared<std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>>>(std::move(result));
+    player_->GetPropertyAsync(
+        std::get<std::string>(name_it->second), [this, result_ptr](int error, const std::string& value) {
+          PostToPlatformThread([result_ptr, error, value]() {
+            if (error < 0 || value.empty()) {
+              (*result_ptr)->Success();
+            } else {
+              (*result_ptr)->Success(flutter::EncodableValue(value));
+            }
+          });
+        });
+    return;
   } else if (method == "observeProperty") {
     if (!player_ || !player_->IsInitialized()) {
       result->Error("NOT_INITIALIZED", "Player not initialized");
@@ -286,25 +316,22 @@ void MpvPlayerPlugin::HandleMethodCall(
     auto format_it = map.find(flutter::EncodableValue("format"));
     auto id_it = map.find(flutter::EncodableValue("id"));
 
-    if (name_it == map.end() ||
-        !std::holds_alternative<std::string>(name_it->second)) {
+    if (name_it == map.end() || !std::holds_alternative<std::string>(name_it->second)) {
       result->Error("INVALID_ARGS", "Missing 'name'");
       return;
     }
-    if (format_it == map.end() ||
-        !std::holds_alternative<std::string>(format_it->second)) {
+    if (format_it == map.end() || !std::holds_alternative<std::string>(format_it->second)) {
       result->Error("INVALID_ARGS", "Missing 'format'");
       return;
     }
-    if (id_it == map.end() ||
-        !std::holds_alternative<int32_t>(id_it->second)) {
+    if (id_it == map.end() || !std::holds_alternative<int32_t>(id_it->second)) {
       result->Error("INVALID_ARGS", "Missing 'id'");
       return;
     }
 
-    player_->ObserveProperty(std::get<std::string>(name_it->second),
-                             std::get<std::string>(format_it->second),
-                             std::get<int32_t>(id_it->second));
+    player_->ObserveProperty(
+        std::get<std::string>(name_it->second), std::get<std::string>(format_it->second),
+        std::get<int32_t>(id_it->second));
     result->Success();
   } else if (method == "setVisible") {
     const auto* args = method_call.arguments();
@@ -316,8 +343,7 @@ void MpvPlayerPlugin::HandleMethodCall(
     const auto& map = std::get<flutter::EncodableMap>(*args);
     auto visible_it = map.find(flutter::EncodableValue("visible"));
 
-    if (visible_it == map.end() ||
-        !std::holds_alternative<bool>(visible_it->second)) {
+    if (visible_it == map.end() || !std::holds_alternative<bool>(visible_it->second)) {
       result->Error("INVALID_ARGS", "Missing 'visible'");
       return;
     }
@@ -378,7 +404,7 @@ void MpvPlayerPlugin::HandleMethodCall(
     bool initialized = player_ && player_->IsInitialized();
     result->Success(flutter::EncodableValue(initialized));
 
-  // --- Display mode matching ---
+    // --- Display mode matching ---
   } else if (method == "getDisplayModes") {
     HWND hwnd = GetWindow();
     auto modes = display_mode_manager_.EnumerateDisplayModes(hwnd);
@@ -400,13 +426,12 @@ void MpvPlayerPlugin::HandleMethodCall(
     const auto& map = std::get<flutter::EncodableMap>(*args);
     auto get_int = [&map](const char* key) -> int {
       auto it = map.find(flutter::EncodableValue(key));
-      if (it != map.end() && std::holds_alternative<int32_t>(it->second))
-        return std::get<int32_t>(it->second);
+      if (it != map.end() && std::holds_alternative<int32_t>(it->second)) return std::get<int32_t>(it->second);
       return 0;
     };
     HWND hwnd = GetWindow();
-    bool success = display_mode_manager_.SetDisplayMode(
-        hwnd, get_int("width"), get_int("height"), get_int("refreshRate"));
+    bool success =
+        display_mode_manager_.SetDisplayMode(hwnd, get_int("width"), get_int("height"), get_int("refreshRate"));
     result->Success(flutter::EncodableValue(success));
   } else if (method == "restoreDisplayMode") {
     HWND hwnd = GetWindow();
@@ -438,6 +463,10 @@ void MpvPlayerPlugin::HandleMethodCall(
     HWND hwnd = GetWindow();
     bool success = display_mode_manager_.RestoreOriginalHDRState(hwnd);
     result->Success(flutter::EncodableValue(success));
+  } else if (method == "isModeChanged") {
+    result->Success(flutter::EncodableValue(display_mode_manager_.IsModeChanged()));
+  } else if (method == "isHDRChanged") {
+    result->Success(flutter::EncodableValue(display_mode_manager_.IsHDRChanged()));
   } else {
     result->NotImplemented();
   }

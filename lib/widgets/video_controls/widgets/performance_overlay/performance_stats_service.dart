@@ -208,6 +208,11 @@ class PerformanceStatsService {
         // DV conversion
         dvConversionActive: statsMap['dvConversionActive'] == true,
         dvConversionMode: statsMap['dvConversionMode'] as String? ?? '',
+        dvConvertedRpus: (statsMap['dvConvertedRpus'] as num?)?.toInt(),
+        dvRpuConversionFailures: (statsMap['dvRpuConversionFailures'] as num?)?.toInt(),
+        dvRpuOutputTooSmall: (statsMap['dvRpuOutputTooSmall'] as num?)?.toInt(),
+        dvAvgRpuConversionUs: (statsMap['dvAvgRpuConversionUs'] as num?)?.toInt(),
+        dvAvgSampleProcessingUs: (statsMap['dvAvgSampleProcessingUs'] as num?)?.toInt(),
         // App metrics
         appMemoryBytes: appMemory,
         uiFps: _currentUiFps,
@@ -260,28 +265,16 @@ class PerformanceStatsService {
     if (hasVideo) {
       final isAndroid = Platform.isAndroid;
       videoResults = await Future.wait([
-        isAndroid
-            ? Future.value(null)
-            : player.getProperty('display-fps'), // 0
+        isAndroid ? Future.value(null) : player.getProperty('display-fps'), // 0
         player.getProperty('video-params/pixelformat'), // 1
-        isAndroid
-            ? Future.value(null)
-            : player.getProperty('video-params/hw-pixelformat'), // 2
+        isAndroid ? Future.value(null) : player.getProperty('video-params/hw-pixelformat'), // 2
         player.getProperty('video-params/colormatrix'), // 3
         player.getProperty('video-params/primaries'), // 4
         player.getProperty('video-params/gamma'), // 5
-        isAndroid
-            ? Future.value(null)
-            : player.getProperty('video-params/max-luma'), // 6
-        isAndroid
-            ? Future.value(null)
-            : player.getProperty('video-params/min-luma'), // 7
-        isAndroid
-            ? Future.value(null)
-            : player.getProperty('video-params/max-cll'), // 8
-        isAndroid
-            ? Future.value(null)
-            : player.getProperty('video-params/max-fall'), // 9
+        isAndroid ? Future.value(null) : player.getProperty('video-params/max-luma'), // 6
+        isAndroid ? Future.value(null) : player.getProperty('video-params/min-luma'), // 7
+        isAndroid ? Future.value(null) : player.getProperty('video-params/max-cll'), // 8
+        isAndroid ? Future.value(null) : player.getProperty('video-params/max-fall'), // 9
         player.getProperty('video-params/aspect-name'), // 10
         player.getProperty('video-params/rotate'), // 11
       ]);

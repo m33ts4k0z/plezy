@@ -3,8 +3,8 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import '../mpv/mpv.dart';
 import '../services/pip_service.dart';
+import '../utils/app_logger.dart';
 
-/// Manages video Picture-in-Picture mode
 class VideoPIPManager {
   final Player player;
 
@@ -21,7 +21,6 @@ class VideoPIPManager {
     _playerSize = size;
   }
 
-  /// Access PiP state from the service
   ValueNotifier<bool> get isPipActive => PipService().isPipActive;
 
   /// Get current video dimensions (display or storage or fallback to viewport)
@@ -36,7 +35,9 @@ class VideoPIPManager {
         width = int.tryParse(dwidth);
         height = int.tryParse(dheight);
       }
-    } catch (_) {}
+    } catch (e) {
+      appLogger.d('VideoPipManager: dwidth/dheight unavailable', error: e);
+    }
 
     if (width == null || height == null) {
       try {
@@ -46,7 +47,9 @@ class VideoPIPManager {
           width = int.tryParse(videoWidth);
           height = int.tryParse(videoHeight);
         }
-      } catch (_) {}
+      } catch (e) {
+        appLogger.d('VideoPipManager: width/height unavailable', error: e);
+      }
     }
 
     width ??= _playerSize?.width.toInt();
@@ -55,8 +58,6 @@ class VideoPIPManager {
     return (width, height);
   }
 
-  /// Toggle native PiP
-  /// Returns a tuple of (success, error message) for error handling
   Future<(bool success, String? error)> togglePIP() async {
     final supported = await PipService.isSupported();
     if (!supported) return (false, 'PiP not supported on this device');
@@ -79,7 +80,6 @@ class VideoPIPManager {
     return await PipService.enter(width: dims.$1, height: dims.$2);
   }
 
-  /// Update auto-PiP readiness on the native side
   Future<void> updateAutoPipState({required bool isPlaying}) async {
     if (!isPlaying) {
       await PipService.setAutoPipReady(ready: false);

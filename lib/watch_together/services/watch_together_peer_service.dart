@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:uuid/uuid.dart';
 import '../../utils/future_extensions.dart';
@@ -37,7 +38,7 @@ class WatchTogetherPeerService with KeepaliveMixin {
   }
 
   WatchTogetherPeerService({String? customBaseUrl})
-      : _baseUrl = (customBaseUrl != null && customBaseUrl.trim().isNotEmpty) ? customBaseUrl.trim() : defaultBaseUrl;
+    : _baseUrl = (customBaseUrl != null && customBaseUrl.trim().isNotEmpty) ? customBaseUrl.trim() : defaultBaseUrl;
 
   WebSocketChannel? _channel;
   StreamSubscription? _channelSubscription;
@@ -57,6 +58,9 @@ class WatchTogetherPeerService with KeepaliveMixin {
   int _reconnectAttempts = 0;
   static const int _maxReconnectAttempts = 3;
   Timer? _reconnectTimer;
+
+  /// Called after a successful reconnection so the provider can re-announce join.
+  void Function()? onReconnected;
 
   // Keepalive (via KeepaliveMixin)
   @override
@@ -98,9 +102,11 @@ class WatchTogetherPeerService with KeepaliveMixin {
   /// List of connected peer IDs
   List<String> get connectedPeers => _connectedPeers.toList();
 
-  /// Generate a short, readable session ID
-  String _generateSessionId() {
-    return const Uuid().v4().substring(0, 8).toUpperCase();
+  /// Generate a short, readable session ID (5 alphanumeric chars)
+  static String _generateSessionId() {
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+    final random = Random.secure();
+    return String.fromCharCodes(List.generate(5, (_) => chars.codeUnitAt(random.nextInt(chars.length))));
   }
 
   /// Connect to the relay WebSocket and set up the message listener.
@@ -125,7 +131,8 @@ class WatchTogetherPeerService with KeepaliveMixin {
       },
       onError: (error) {
         appLogger.e('WatchTogether: WebSocket error', error: error);
-        _safeAdd(_errorController,
+        _safeAdd(
+          _errorController,
           PeerError(type: PeerErrorType.serverError, message: 'WebSocket error: $error', originalError: error),
         );
         if (setupCompleter != null && !setupCompleter.isCompleted) {
@@ -189,10 +196,16 @@ class WatchTogetherPeerService with KeepaliveMixin {
 
         case 'message':
           final payload = msg['payload'];
+          final serverFrom = msg['from'] as String?;
           if (payload != null) {
             try {
               final payloadStr = payload is String ? payload : jsonEncode(payload);
-              final syncMsg = SyncMessage.fromJson(payloadStr);
+              var syncMsg = SyncMessage.fromJson(payloadStr);
+              // Use the server-authenticated sender ID instead of the
+              // self-reported peerId in the payload to prevent spoofing.
+              if (serverFrom != null && syncMsg.peerId != serverFrom) {
+                syncMsg = syncMsg.copyWith(peerId: serverFrom);
+              }
               _safeAdd(_messageReceivedController, syncMsg);
             } catch (e) {
               appLogger.e('WatchTogether: Failed to parse sync message payload', error: e);
@@ -203,7 +216,7 @@ class WatchTogetherPeerService with KeepaliveMixin {
           final code = msg['code'] as String? ?? 'unknown';
           final message = msg['message'] as String? ?? 'Unknown error';
           appLogger.e('WatchTogether: Server error: $code - $message');
-          final error = PeerError(type: PeerErrorType.serverError, message: '$code: $message');
+          final error = PeerError(type: PeerErrorType.serverError, message: '$code: $message', serverCode: code);
           _safeAdd(_errorController, error);
           if (setupCompleter != null && !setupCompleter.isCompleted) {
             setupCompleter.completeError(error);
@@ -229,7 +242,9 @@ class WatchTogetherPeerService with KeepaliveMixin {
     appLogger.w('WatchTogether: Pong timeout — closing WebSocket');
     try {
       _channel?.sink.close();
-    } catch (_) {}
+    } catch (e) {
+      appLogger.d('WatchTogether: pong-timeout close ignored', error: e);
+    }
   }
 
   /// Send a raw JSON map to the relay.
@@ -265,7 +280,8 @@ class WatchTogetherPeerService with KeepaliveMixin {
   void _attemptReconnect() {
     if (_reconnectAttempts >= _maxReconnectAttempts) {
       appLogger.e('WatchTogether: Max reconnect attempts reached');
-      _safeAdd(_errorController,
+      _safeAdd(
+        _errorController,
         const PeerError(
           type: PeerErrorType.connectionFailed,
           message: 'Lost connection to relay after multiple reconnect attempts',
@@ -289,15 +305,30 @@ class WatchTogetherPeerService with KeepaliveMixin {
         _listenToChannel(channel, setupCompleter: completer);
         startKeepalive();
 
-        // Re-send create or join
-        if (_isHost) {
-          _sendRaw({'type': 'create', 'sessionId': _sessionId, 'peerId': _myPeerId});
-        } else {
-          _sendRaw({'type': 'join', 'sessionId': _sessionId, 'peerId': _myPeerId});
+        // Always try join first — the room may still have peers (e.g. host
+        // reconnecting while guests remain). Fall back to create only if
+        // the room no longer exists and we were the host.
+        _sendRaw({'type': 'join', 'sessionId': _sessionId, 'peerId': _myPeerId});
+
+        try {
+          await completer.future.namedTimeout(const Duration(seconds: 10), operation: 'WatchTogether reconnect');
+        } on PeerError catch (e) {
+          if (_isHost && e.serverCode == 'room_not_found') {
+            appLogger.d('WatchTogether: Room gone, re-creating as host');
+            final createCompleter = Completer<void>();
+            _listenToChannel(channel, setupCompleter: createCompleter);
+            _sendRaw({'type': 'create', 'sessionId': _sessionId, 'peerId': _myPeerId});
+            await createCompleter.future.namedTimeout(
+              const Duration(seconds: 10),
+              operation: 'WatchTogether reconnect create',
+            );
+          } else {
+            rethrow;
+          }
         }
 
-        await completer.future.namedTimeout(const Duration(seconds: 10), operation: 'WatchTogether reconnect');
         appLogger.d('WatchTogether: Reconnected successfully');
+        onReconnected?.call();
       } catch (e) {
         appLogger.e('WatchTogether: Reconnect failed', error: e);
         _handleWebSocketClosed();
@@ -308,13 +339,14 @@ class WatchTogetherPeerService with KeepaliveMixin {
   /// Create a new session as host
   ///
   /// Returns the session ID that others can use to join.
-  Future<String> createSession() async {
+  /// If [sessionId] is provided, uses that instead of generating a new one.
+  Future<String> createSession({String? sessionId}) async {
     if (_channel != null) {
       await disconnect();
     }
 
     _isHost = true;
-    _sessionId = _generateSessionId();
+    _sessionId = sessionId?.toUpperCase() ?? _generateSessionId();
     _myPeerId = 'wt-$_sessionId';
     _reconnectAttempts = 0;
 
@@ -400,12 +432,14 @@ class WatchTogetherPeerService with KeepaliveMixin {
     _reconnectTimer = null;
     stopKeepalive();
 
-    _channelSubscription?.cancel();
+    unawaited(_channelSubscription?.cancel());
     _channelSubscription = null;
 
     try {
       await _channel?.sink.close();
-    } catch (_) {}
+    } catch (e) {
+      appLogger.d('WatchTogether: channel close ignored', error: e);
+    }
     _channel = null;
 
     _connectedPeers.clear();

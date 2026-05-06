@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/symbols.dart';
-import '../../models/plex_metadata.dart';
+import '../../media/media_item.dart';
+import '../../media/media_kind.dart';
 import '../../services/play_queue_launcher.dart';
 import '../../utils/app_logger.dart';
+import '../../utils/error_message_utils.dart';
 import '../../utils/media_navigation_helper.dart';
 import '../../utils/provider_extensions.dart';
 import '../../utils/snackbar_helper.dart';
@@ -29,16 +31,30 @@ class FolderTreeView extends StatefulWidget {
   });
 
   @override
-  State<FolderTreeView> createState() => _FolderTreeViewState();
+  State<FolderTreeView> createState() => FolderTreeViewState();
 }
 
-class _FolderTreeViewState extends State<FolderTreeView> {
-  List<PlexMetadata> _rootFolders = [];
-  final Map<String, List<PlexMetadata>> _childrenCache = {};
+/// Public state so parents can trigger a refresh via GlobalKey.
+class FolderTreeViewState extends State<FolderTreeView> {
+  /// Reload the root folders. Exposed for parent-driven pull-to-refresh.
+  Future<void> refresh() => _loadRootFolders();
+
+  /// Folders/items returned by the Plex `/library/sections/{id}/folder`
+  /// endpoint, mapped to neutral [MediaItem]s. The Plex `key` (folder URL)
+  /// survives in [MediaItem.raw] under the `'key'` slot — see
+  /// [_folderKey].
+  List<MediaItem> _rootFolders = [];
+  final Map<String, List<MediaItem>> _childrenCache = {};
   final Set<String> _expandedFolders = {};
   final Set<String> _loadingFolders = {};
   bool _isLoadingRoot = false;
   String? _errorMessage;
+
+  /// Resolve the Plex folder key from a [MediaItem]'s `raw` map. The key is
+  /// a relative URL (e.g. `/library/sections/1/folder?parent=...`) used as
+  /// the cache key and to recursively fetch children from
+  /// [PlexClient.getFolderChildren].
+  String? _folderKey(MediaItem item) => item.raw?['key'] as String?;
 
   @override
   void initState() {
@@ -53,23 +69,16 @@ class _FolderTreeViewState extends State<FolderTreeView> {
     });
 
     try {
-      final client = context.getClientForServer(widget.serverId!);
+      final client = context.getPlexClientForServer(widget.serverId!);
 
-      final folders = await client.getLibraryFolders(widget.libraryKey);
+      // PlexClient.fetchLibraryFolders returns neutral [MediaItem]s; folders
+      // come back already tagged with the client's serverId/serverName.
+      final folders = await client.fetchLibraryFolders(widget.libraryKey);
 
       if (!mounted) return;
 
-      final taggedFolders = folders
-          .map(
-            (folder) => folder.copyWith(
-              serverId: widget.serverId!,
-              serverName: null, // server name not required for folders listing
-            ),
-          )
-          .toList();
-
       setState(() {
-        _rootFolders = taggedFolders;
+        _rootFolders = folders;
         _isLoadingRoot = false;
       });
 
@@ -77,158 +86,180 @@ class _FolderTreeViewState extends State<FolderTreeView> {
     } catch (e) {
       if (!mounted) return;
 
-      appLogger.e('Failed to load root folders', error: e);
       setState(() {
-        _errorMessage = t.errors.failedToLoad(context: t.libraries.folders, error: e.toString());
+        _errorMessage = mapUnexpectedErrorToMessage(e, context: t.libraries.folders);
         _isLoadingRoot = false;
       });
     }
   }
 
-  Future<void> _loadFolderChildren(PlexMetadata folder) async {
+  Future<void> _loadFolderChildren(MediaItem folder) async {
+    final folderKey = _folderKey(folder);
+    if (folderKey == null) return;
+
     // Already loading this folder
-    if (_loadingFolders.contains(folder.key!)) return;
+    if (_loadingFolders.contains(folderKey)) return;
 
     // Already loaded and cached
-    if (_childrenCache.containsKey(folder.key!)) {
+    if (_childrenCache.containsKey(folderKey)) {
       setState(() {
-        _expandedFolders.add(folder.key!);
+        _expandedFolders.add(folderKey);
       });
       return;
     }
 
     setState(() {
-      _loadingFolders.add(folder.key!);
+      _loadingFolders.add(folderKey);
     });
 
     try {
-      final client = context.getClientForServer(widget.serverId!);
+      final client = context.getPlexClientForServer(widget.serverId!);
 
-      // Items are automatically tagged with server info by PlexClient
-      final children = await client.getFolderChildren(folder.key!);
+      // Items are automatically tagged with server info by PlexClient.
+      final children = await client.fetchFolderChildren(folderKey);
 
       if (!mounted) return;
 
       setState(() {
-        _childrenCache[folder.key!] = children;
-        _expandedFolders.add(folder.key!);
-        _loadingFolders.remove(folder.key!);
+        _childrenCache[folderKey] = children;
+        _expandedFolders.add(folderKey);
+        _loadingFolders.remove(folderKey);
       });
 
       appLogger.d('Loaded ${children.length} children for folder: ${folder.title}');
     } catch (e) {
       if (!mounted) return;
 
-      appLogger.e('Failed to load folder children', error: e);
+      final message = mapUnexpectedErrorToMessage(e, context: t.libraries.folders);
       setState(() {
-        _loadingFolders.remove(folder.key!);
+        _loadingFolders.remove(folderKey);
       });
 
       if (mounted) {
-        showErrorSnackBar(context, t.errors.failedToLoad(context: t.libraries.folders, error: e.toString()));
+        showErrorSnackBar(context, message);
       }
     }
   }
 
-  void _toggleFolder(PlexMetadata folder) {
-    if (_expandedFolders.contains(folder.key!)) {
+  void _toggleFolder(MediaItem folder) {
+    final folderKey = _folderKey(folder);
+    if (folderKey == null) return;
+    if (_expandedFolders.contains(folderKey)) {
       setState(() {
-        _expandedFolders.remove(folder.key!);
+        _expandedFolders.remove(folderKey);
       });
     } else {
       _loadFolderChildren(folder);
     }
   }
 
-  Future<void> _handleItemTap(PlexMetadata item) async {
+  Future<void> _handleItemTap(MediaItem item) async {
     await navigateToMediaItem(context, item, onRefresh: widget.onRefresh);
   }
 
-  Future<void> _handleFolderPlay(PlexMetadata folder) async {
-    final client = context.getClientForServer(widget.serverId!);
-    final launcher = PlayQueueLauncher(context: context, client: client, serverId: widget.serverId);
-    await launcher.launchFromFolder(folderKey: folder.key!, shuffle: false);
+  Future<void> _handleFolderPlay(MediaItem folder) async {
+    final folderKey = _folderKey(folder);
+    if (folderKey == null) return;
+    final client = context.getPlexClientForServer(widget.serverId!);
+    final launcher = PlexPlayQueueLauncher(context: context, client: client, serverId: widget.serverId);
+    await launcher.launchFromFolder(folderKey: folderKey, shuffle: false);
   }
 
-  Future<void> _handleFolderShuffle(PlexMetadata folder) async {
-    final client = context.getClientForServer(widget.serverId!);
-    final launcher = PlayQueueLauncher(context: context, client: client, serverId: widget.serverId);
-    await launcher.launchFromFolder(folderKey: folder.key!, shuffle: true);
+  Future<void> _handleFolderShuffle(MediaItem folder) async {
+    final folderKey = _folderKey(folder);
+    if (folderKey == null) return;
+    final client = context.getPlexClientForServer(widget.serverId!);
+    final launcher = PlexPlayQueueLauncher(context: context, client: client, serverId: widget.serverId);
+    await launcher.launchFromFolder(folderKey: folderKey, shuffle: true);
   }
 
-  bool _isFolder(PlexMetadata item) {
-    // Folders typically don't have a specific type or might have special indicators
-    // Check for common folder indicators
-    return item.key?.contains('/folder') == true || item.type == null || item.type!.isEmpty || item.mediaType == PlexMediaType.unknown;
+  bool _isFolder(MediaItem item) {
+    // Folders typically have no media kind (Plex returns `type: 'folder'`,
+    // mapped to [MediaKind.unknown]) or expose `/folder` in their key.
+    final folderKey = _folderKey(item);
+    return folderKey?.contains('/folder') == true || item.kind == MediaKind.unknown;
   }
 
-  List<Widget> _buildTreeItems(List<PlexMetadata> items, int depth, [String parentPath = '']) {
-    final List<Widget> widgets = [];
-
+  /// Flatten the visible tree into a list of (item, depth, path) tuples so
+  /// `ListView.builder` can lazy-build only the rows currently on screen.
+  void _flattenTreeItems(
+    List<MediaItem> items,
+    int depth,
+    String parentPath,
+    List<({MediaItem item, int depth, String path})> out,
+  ) {
     for (int i = 0; i < items.length; i++) {
       final item = items[i];
-      final isFolder = _isFolder(item);
-      final isExpanded = _expandedFolders.contains(item.key);
-      final isLoading = _loadingFolders.contains(item.key);
-
-      // Create a unique key path that includes parent hierarchy and index
       final itemPath = parentPath.isEmpty ? '$i' : '$parentPath-$i';
+      out.add((item: item, depth: depth, path: itemPath));
 
-      // First root item gets the external focus node and navigate-up callback
-      final isFirstRootItem = depth == 0 && i == 0;
-
-      // Add the item itself
-      widgets.add(
-        FolderTreeItem(
-          key: ValueKey(itemPath),
-          item: item,
-          depth: depth,
-          isFolder: isFolder,
-          isExpanded: isExpanded,
-          isLoading: isLoading,
-          onExpand: isFolder ? () => _toggleFolder(item) : null,
-          onTap: !isFolder ? () => _handleItemTap(item) : null,
-          onPlayAll: isFolder ? () => _handleFolderPlay(item) : null,
-          onShuffle: isFolder ? () => _handleFolderShuffle(item) : null,
-          focusNode: isFirstRootItem ? widget.firstItemFocusNode : null,
-          onNavigateUp: isFirstRootItem ? widget.onNavigateUp : null,
-        ),
-      );
-
-      // Add children if folder is expanded
-      if (isFolder && isExpanded && _childrenCache.containsKey(item.key)) {
-        final children = _childrenCache[item.key]!;
-        widgets.addAll(_buildTreeItems(children, depth + 1, itemPath));
+      final folderKey = _folderKey(item);
+      if (_isFolder(item) &&
+          folderKey != null &&
+          _expandedFolders.contains(folderKey) &&
+          _childrenCache.containsKey(folderKey)) {
+        _flattenTreeItems(_childrenCache[folderKey]!, depth + 1, itemPath, out);
       }
     }
-
-    return widgets;
   }
 
   @override
   Widget build(BuildContext context) {
     if (_isLoadingRoot) {
-      return const Center(child: CircularProgressIndicator());
+      return const SliverFillRemaining(hasScrollBody: false, child: Center(child: CircularProgressIndicator()));
     }
 
     if (_errorMessage != null) {
-      return ErrorStateWidget(
-        message: _errorMessage!,
-        icon: Symbols.error_outline_rounded,
-        onRetry: _loadRootFolders,
-        retryLabel: t.common.retry,
+      return SliverFillRemaining(
+        hasScrollBody: false,
+        child: ErrorStateWidget(
+          message: _errorMessage!,
+          icon: Symbols.error_outline_rounded,
+          onRetry: _loadRootFolders,
+          retryLabel: t.common.retry,
+        ),
       );
     }
 
     if (_rootFolders.isEmpty) {
-      return EmptyStateWidget(message: t.libraries.noFoldersFound, icon: Symbols.folder_open_rounded);
+      return SliverFillRemaining(
+        hasScrollBody: false,
+        child: EmptyStateWidget(message: t.libraries.noFoldersFound, icon: Symbols.folder_open_rounded),
+      );
     }
 
-    return RefreshIndicator(
-      onRefresh: _loadRootFolders,
-      child: ListView(
-        padding: const EdgeInsets.symmetric(horizontal: 8),
-        children: _buildTreeItems(_rootFolders, 0),
+    final flattened = <({MediaItem item, int depth, String path})>[];
+    _flattenTreeItems(_rootFolders, 0, '', flattened);
+
+    return SliverPadding(
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      sliver: SliverList.builder(
+        itemCount: flattened.length,
+        itemBuilder: (context, index) {
+          final entry = flattened[index];
+          final item = entry.item;
+          final isFolder = _isFolder(item);
+          final folderKey = _folderKey(item);
+          final isExpanded = folderKey != null && _expandedFolders.contains(folderKey);
+          final isLoading = folderKey != null && _loadingFolders.contains(folderKey);
+          final isFirstRootItem = index == 0;
+
+          return FolderTreeItem(
+            key: ValueKey(entry.path),
+            item: item,
+            depth: entry.depth,
+            isFolder: isFolder,
+            isExpanded: isExpanded,
+            isLoading: isLoading,
+            serverId: widget.serverId,
+            onExpand: isFolder ? () => _toggleFolder(item) : null,
+            onTap: !isFolder ? () => _handleItemTap(item) : null,
+            onPlayAll: isFolder ? () => _handleFolderPlay(item) : null,
+            onShuffle: isFolder ? () => _handleFolderShuffle(item) : null,
+            focusNode: isFirstRootItem ? widget.firstItemFocusNode : null,
+            onNavigateUp: isFirstRootItem ? widget.onNavigateUp : null,
+          );
+        },
       ),
     );
   }

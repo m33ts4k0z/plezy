@@ -1,6 +1,5 @@
 import 'dart:async' show StreamSubscription, Timer, unawaited;
 import 'dart:io' show Platform;
-import 'dart:typed_data';
 
 import 'package:flutter/gestures.dart' show PointerSignalEvent, PointerScrollEvent;
 import 'package:flutter/material.dart';
@@ -22,32 +21,41 @@ import '../../services/macos_window_service.dart';
 import '../../services/pip_service.dart';
 import 'package:window_manager/window_manager.dart';
 
+import '../../mixins/settings_effect_mixin.dart';
 import '../../mpv/mpv.dart';
 import '../overlay_sheet.dart';
 import '../../focus/dpad_navigator.dart';
-import '../../focus/focusable_wrapper.dart';
 
+import '../../database/app_database.dart';
+import '../../media/media_backend.dart';
+import '../../media/media_item.dart';
 import '../../models/livetv_capture_buffer.dart';
-import '../../services/plex_client.dart';
-import '../../services/plex_api_cache.dart';
-import '../../models/plex_media_info.dart';
-import '../../models/plex_media_version.dart';
-import '../../models/plex_metadata.dart';
+import '../../providers/multi_server_provider.dart';
+import '../../media/media_source_info.dart';
+import '../../models/transcode_quality_preset.dart';
+import '../../media/media_version.dart';
 import '../../screens/video_player_screen.dart';
 import '../../focus/key_event_utils.dart';
 import '../../services/keyboard_shortcuts_service.dart';
+import '../../services/scrub_preview_source.dart';
 import '../../services/settings_service.dart';
+import '../../utils/formatters.dart';
 import '../../utils/platform_detector.dart';
-import '../../utils/plex_cache_parser.dart';
 import '../../utils/player_utils.dart';
 import '../../theme/mono_tokens.dart';
 import '../../utils/provider_extensions.dart';
 import '../../utils/snackbar_helper.dart';
 import 'icons.dart';
+import 'playback_extras_loader.dart';
+import 'widgets/player_toast_indicator.dart';
 import '../../utils/app_logger.dart';
 import '../../i18n/strings.g.dart';
 import '../../focus/input_mode_tracker.dart';
 import 'models/track_controls_state.dart';
+import 'widgets/double_tap_feedback.dart';
+import 'widgets/linux_keep_alive.dart';
+import 'widgets/mobile_skip_zones.dart';
+import 'widgets/skip_marker_button.dart';
 import 'widgets/track_chapter_controls.dart';
 import 'widgets/performance_overlay/performance_overlay.dart';
 import 'mobile_video_controls.dart';
@@ -59,14 +67,28 @@ import '../../providers/playback_state_provider.dart';
 import '../../providers/shader_provider.dart';
 import '../../services/shader_service.dart';
 
+part 'parts/key_events.dart';
+part 'parts/markers.dart';
+part 'parts/navigation.dart';
+part 'parts/playback_extras.dart';
+part 'parts/playback_input.dart';
+part 'parts/track_controls.dart';
+part 'parts/visibility.dart';
+
 /// Custom video controls builder for Plex with chapter, audio, and subtitle support
 Widget plexVideoControlsBuilder(
   Player player,
-  PlexMetadata metadata, {
+  MediaItem metadata, {
   VoidCallback? onNext,
   VoidCallback? onPrevious,
-  List<PlexMediaVersion>? availableVersions,
+  List<MediaVersion>? availableVersions,
   int? selectedMediaIndex,
+  TranscodeQualityPreset selectedQualityPreset = TranscodeQualityPreset.original,
+  bool serverSupportsTranscoding = false,
+  bool isTranscoding = false,
+  bool isOfflinePlayback = false,
+  List<MediaAudioTrack> sourceAudioTracks = const [],
+  int? selectedAudioStreamId,
   VoidCallback? onTogglePIPMode,
   int boxFitMode = 0,
   VoidCallback? onCycleBoxFitMode,
@@ -77,13 +99,14 @@ Widget plexVideoControlsBuilder(
   Function(SubtitleTrack)? onSecondarySubtitleTrackChanged,
   Function(Duration position)? onSeekCompleted,
   VoidCallback? onBack,
+  void Function({required bool skipAutoPlayCountdown})? onReachedEnd,
   bool canControl = true,
   ValueNotifier<bool>? hasFirstFrame,
   FocusNode? playNextFocusNode,
   ValueNotifier<bool>? controlsVisible,
   ShaderService? shaderService,
   VoidCallback? onShaderChanged,
-  Uint8List? Function(Duration time)? thumbnailDataBuilder,
+  ScrubFrame? Function(Duration time)? thumbnailDataBuilder,
   bool isLive = false,
   String? liveChannelName,
   CaptureBuffer? captureBuffer,
@@ -94,14 +117,22 @@ Widget plexVideoControlsBuilder(
   VoidCallback? onJumpToLive,
   bool isAmbientLightingEnabled = false,
   VoidCallback? onToggleAmbientLighting,
+  required PlayerToastController toastController,
 }) {
   return PlexVideoControls(
     player: player,
     metadata: metadata,
+    toastController: toastController,
     onNext: onNext,
     onPrevious: onPrevious,
     availableVersions: availableVersions ?? [],
     selectedMediaIndex: selectedMediaIndex ?? 0,
+    selectedQualityPreset: selectedQualityPreset,
+    serverSupportsTranscoding: serverSupportsTranscoding,
+    isTranscoding: isTranscoding,
+    isOfflinePlayback: isOfflinePlayback,
+    sourceAudioTracks: sourceAudioTracks,
+    selectedAudioStreamId: selectedAudioStreamId,
     boxFitMode: boxFitMode,
     onTogglePIPMode: onTogglePIPMode,
     onCycleBoxFitMode: onCycleBoxFitMode,
@@ -112,6 +143,7 @@ Widget plexVideoControlsBuilder(
     onSecondarySubtitleTrackChanged: onSecondarySubtitleTrackChanged,
     onSeekCompleted: onSeekCompleted,
     onBack: onBack,
+    onReachedEnd: onReachedEnd,
     canControl: canControl,
     hasFirstFrame: hasFirstFrame,
     playNextFocusNode: playNextFocusNode,
@@ -132,13 +164,56 @@ Widget plexVideoControlsBuilder(
   );
 }
 
+@visibleForTesting
+({
+  List<MediaVersion> availableVersions,
+  bool serverSupportsTranscoding,
+  bool isTranscoding,
+  List<MediaAudioTrack> sourceAudioTracks,
+  int? selectedAudioStreamId,
+  bool canSwitch,
+})
+effectiveVersionQualityControls({
+  required bool isOfflinePlayback,
+  required List<MediaVersion> availableVersions,
+  required bool serverSupportsTranscoding,
+  required bool isTranscoding,
+  required List<MediaAudioTrack> sourceAudioTracks,
+  required int? selectedAudioStreamId,
+}) {
+  if (isOfflinePlayback) {
+    return (
+      availableVersions: const <MediaVersion>[],
+      serverSupportsTranscoding: false,
+      isTranscoding: false,
+      sourceAudioTracks: const <MediaAudioTrack>[],
+      selectedAudioStreamId: null,
+      canSwitch: false,
+    );
+  }
+  return (
+    availableVersions: availableVersions,
+    serverSupportsTranscoding: serverSupportsTranscoding,
+    isTranscoding: isTranscoding,
+    sourceAudioTracks: sourceAudioTracks,
+    selectedAudioStreamId: selectedAudioStreamId,
+    canSwitch: true,
+  );
+}
+
 class PlexVideoControls extends StatefulWidget {
   final Player player;
-  final PlexMetadata metadata;
+  final MediaItem metadata;
   final VoidCallback? onNext;
   final VoidCallback? onPrevious;
-  final List<PlexMediaVersion> availableVersions;
+  final List<MediaVersion> availableVersions;
   final int selectedMediaIndex;
+  final TranscodeQualityPreset selectedQualityPreset;
+  final bool serverSupportsTranscoding;
+  final bool isTranscoding;
+  final bool isOfflinePlayback;
+  final List<MediaAudioTrack> sourceAudioTracks;
+  final int? selectedAudioStreamId;
   final int boxFitMode;
   final VoidCallback? onTogglePIPMode;
   final VoidCallback? onCycleBoxFitMode;
@@ -153,6 +228,11 @@ class PlexVideoControls extends StatefulWidget {
 
   /// Called when back button is pressed (for Watch Together session leave confirmation)
   final VoidCallback? onBack;
+
+  /// Called when the video has effectively reached the end (e.g. credits extend
+  /// to EOF and can't be seeked past). Parent should route this into its normal
+  /// completion flow so the auto-play-next setting is honored.
+  final void Function({required bool skipAutoPlayCountdown})? onReachedEnd;
 
   /// Whether the user can control playback (false in host-only mode for non-host).
   final bool canControl;
@@ -173,7 +253,7 @@ class PlexVideoControls extends StatefulWidget {
   final VoidCallback? onShaderChanged;
 
   /// Optional callback that returns thumbnail image bytes for a given timestamp.
-  final Uint8List? Function(Duration time)? thumbnailDataBuilder;
+  final ScrubFrame? Function(Duration time)? thumbnailDataBuilder;
 
   /// Whether this is a live TV stream (disables seek, progress, etc.)
   final bool isLive;
@@ -205,14 +285,24 @@ class PlexVideoControls extends StatefulWidget {
   /// Called to toggle ambient lighting (passed to settings sheet)
   final VoidCallback? onToggleAmbientLighting;
 
+  /// Toast controller for VLC-style in-player notifications (rate changes, backend switch).
+  final PlayerToastController toastController;
+
   const PlexVideoControls({
     super.key,
     required this.player,
     required this.metadata,
+    required this.toastController,
     this.onNext,
     this.onPrevious,
     this.availableVersions = const [],
     this.selectedMediaIndex = 0,
+    this.selectedQualityPreset = TranscodeQualityPreset.original,
+    this.serverSupportsTranscoding = false,
+    this.isTranscoding = false,
+    this.isOfflinePlayback = false,
+    this.sourceAudioTracks = const [],
+    this.selectedAudioStreamId,
     this.boxFitMode = 0,
     this.onTogglePIPMode,
     this.onCycleBoxFitMode,
@@ -223,6 +313,7 @@ class PlexVideoControls extends StatefulWidget {
     this.onSecondarySubtitleTrackChanged,
     this.onSeekCompleted,
     this.onBack,
+    this.onReachedEnd,
     this.canControl = true,
     this.hasFirstFrame,
     this.playNextFocusNode,
@@ -246,35 +337,36 @@ class PlexVideoControls extends StatefulWidget {
   State<PlexVideoControls> createState() => _PlexVideoControlsState();
 }
 
-class _PlexVideoControlsState extends State<PlexVideoControls> with WindowListener, WidgetsBindingObserver {
+class _PlexVideoControlsState extends State<PlexVideoControls> with WindowListener, SettingsEffectMixin {
   bool _showControls = true;
   bool _forceShowControls = false;
   bool _isLoadingExtras = false;
-  List<PlexChapter> _chapters = [];
+  List<MediaChapter> _chapters = [];
   bool _chaptersLoaded = false;
   Timer? _hideTimer;
   bool _isFullscreen = false;
   bool _isAlwaysOnTop = false;
   late final FocusNode _focusNode;
   KeyboardShortcutsService? _keyboardService;
-  int _seekTimeSmall = 10; // Default, loaded from settings
-  int _rewindOnResume = 0; // Default, loaded from settings
-  int _audioSyncOffset = 0; // Default, loaded from settings
-  int _subtitleSyncOffset = 0; // Default, loaded from settings
-  bool _isRotationLocked = true; // Default locked (landscape only)
+  // Live settings — read through the service so a change anywhere in the app
+  // reflects here without a manual reload. UI rebuilds are wired via
+  // [bindRebuild] in [initState]; side effects (rotation, sync) via [bindEffect].
+  SettingsService get _settings => SettingsService.instanceOrNull!;
+  int get _seekTimeSmall => _settings.read(SettingsService.seekTimeSmall);
+  int get _rewindOnResume => _settings.read(SettingsService.rewindOnResume);
+  int get _audioSyncOffset => _settings.read(SettingsService.audioSyncOffset);
+  int get _subtitleSyncOffset => _settings.read(SettingsService.subtitleSyncOffset);
+  bool get _isRotationLocked => _settings.read(SettingsService.rotationLocked);
   bool _isScreenLocked = false; // Touch lock during playback
   bool _showLockIcon = false; // Whether to show the lock overlay icon
   Timer? _lockIconTimer;
-  bool _clickVideoTogglesPlayback = false; // Default, loaded from settings
+  bool get _clickVideoTogglesPlayback => _settings.read(SettingsService.clickVideoTogglesPlayback);
+  bool get _showChapterMarkersOnTimeline => _settings.read(SettingsService.showChapterMarkersOnTimeline);
   bool _isContentStripVisible = false; // Whether the swipe-up content strip is showing
+  int _trafficLightVisibilityGeneration = 0;
 
   // GlobalKey to access DesktopVideoControls state for focus management
   final GlobalKey<DesktopVideoControlsState> _desktopControlsKey = GlobalKey<DesktopVideoControlsState>();
-
-  /// Get the correct PlexClient for this metadata's server
-  PlexClient _getClientForMetadata() {
-    return context.getClientForServer(widget.metadata.serverId!);
-  }
 
   // Double-tap feedback state
   bool _showDoubleTapFeedback = false;
@@ -290,8 +382,8 @@ class _PlexVideoControlsState extends State<PlexVideoControls> with WindowListen
   // Seek throttle
   late final Throttle _seekThrottle;
   // Current marker state
-  PlexMarker? _currentMarker;
-  List<PlexMarker> _markers = [];
+  MediaMarker? _currentMarker;
+  List<MediaMarker> _markers = [];
   bool _markersLoaded = false;
   // Playback state subscription for auto-hide timer
   StreamSubscription<bool>? _playingSubscription;
@@ -300,18 +392,19 @@ class _PlexVideoControlsState extends State<PlexVideoControls> with WindowListen
   // Position subscription for marker tracking
   StreamSubscription<Duration>? _positionSubscription;
   // Auto-skip state
-  bool _autoSkipIntro = false;
-  bool _autoSkipCredits = false;
-  int _autoSkipDelay = 5;
+  bool get _autoSkipIntro => _settings.read(SettingsService.autoSkipIntro);
+  bool get _autoSkipCredits => _settings.read(SettingsService.autoSkipCredits);
+  int get _autoSkipDelay => _settings.read(SettingsService.autoSkipDelay);
   Timer? _autoSkipTimer;
   double _autoSkipProgress = 0.0;
   // Skip button dismiss state
   bool _skipButtonDismissed = false;
   Timer? _skipButtonDismissTimer;
   // Video player navigation (use arrow keys to navigate controls)
-  bool _videoPlayerNavigationEnabled = false;
+  bool get _videoPlayerNavigationEnabled => _settings.read(SettingsService.videoPlayerNavigationEnabled);
   // Performance overlay
-  bool _showPerformanceOverlay = false;
+  bool get _showPerformanceOverlay => _settings.read(SettingsService.showPerformanceOverlay);
+  bool get _autoHidePerformanceOverlay => _settings.read(SettingsService.autoHidePerformanceOverlay);
   // Long-press 2x speed state
   bool _isLongPressing = false;
   // Subtitle visibility toggle state
@@ -320,6 +413,11 @@ class _PlexVideoControlsState extends State<PlexVideoControls> with WindowListen
   late final FocusNode _skipMarkerFocusNode;
   double? _rateBeforeLongPress;
   bool _showSpeedIndicator = false;
+  StreamSubscription<double>? _rateSubscription;
+  double? _lastReportedRate;
+  // Suppression window used when long-press ends so the rate-restore emission
+  // doesn't flash a second pill as the rate snaps back.
+  DateTime? _suppressRateToastUntil;
 
   // PiP support
   bool _isPipSupported = false;
@@ -338,17 +436,37 @@ class _PlexVideoControlsState extends State<PlexVideoControls> with WindowListen
       leading: true,
       trailing: true,
     );
-    _loadSeekTimes();
+    // Side effects: rotation lock + focus on nav-enable. Both fire immediately
+    // so init wiring (orientation, focus) lives in one place.
+    bindEffect<bool>(SettingsService.rotationLocked, _applyRotationLock);
+    bindEffect<bool>(SettingsService.videoPlayerNavigationEnabled, (enabled) {
+      if (enabled && _showControls) _focusPlayPauseIfKeyboardMode();
+    }, fireImmediately: false);
+    // Rebuild on any setting that affects build output (seek labels, skip
+    // logic, perf overlay visibility, click-toggles, etc.).
+    bindRebuild([
+      SettingsService.seekTimeSmall,
+      SettingsService.rewindOnResume,
+      SettingsService.audioSyncOffset,
+      SettingsService.subtitleSyncOffset,
+      SettingsService.rotationLocked,
+      SettingsService.autoSkipIntro,
+      SettingsService.autoSkipCredits,
+      SettingsService.autoSkipDelay,
+      SettingsService.videoPlayerNavigationEnabled,
+      SettingsService.showPerformanceOverlay,
+      SettingsService.autoHidePerformanceOverlay,
+      SettingsService.clickVideoTogglesPlayback,
+      SettingsService.showChapterMarkersOnTimeline,
+    ]);
     _startHideTimer();
     _initKeyboardService();
     _listenToPosition();
     _listenToPlayingState();
     _listenToCompleted();
     _checkPipSupport();
-    // Add lifecycle observer to reload settings when app resumes
-    WidgetsBinding.instance.addObserver(this);
     // Add window listener for tracking fullscreen state (for button icon)
-    if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
+    if (PlatformDetector.isDesktopOS()) {
       windowManager.addListener(this);
       _initAlwaysOnTopState();
     }
@@ -367,334 +485,16 @@ class _PlexVideoControlsState extends State<PlexVideoControls> with WindowListen
     // Defer context-dependent initialization to after first build
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
+      // Subscribe to rate stream *after* first frame so the initial
+      // setRate(defaultSpeed) emission during player startup is missed.
+      _lastReportedRate = widget.player.state.rate;
+      _rateSubscription = widget.player.streams.rate.listen(_onRateChanged);
       _loadPlaybackExtras();
       _focusPlayPauseIfKeyboardMode();
     });
   }
 
-  /// Called when hasFirstFrame changes - start auto-hide timer when first frame is ready
-  void _onFirstFrameReady() {
-    if (widget.hasFirstFrame?.value == true) {
-      _startHideTimer();
-      // Retry with network-first if initial cache-first returned empty
-      if (_chapters.isEmpty && _markers.isEmpty) {
-        _loadPlaybackExtras(forceRefresh: true);
-      }
-    }
-  }
-
-  /// Called when controlsVisible is set externally (e.g. screen-level focus recovery
-  /// after controls auto-hide ejects focus on Android TV).
-  void _onControlsVisibleExternal() {
-    if (widget.controlsVisible?.value == true && !_showControls && mounted) {
-      _showControlsWithFocus();
-    }
-  }
-
-  /// Focus play/pause button if we're in keyboard navigation mode (desktop/TV only)
-  void _focusPlayPauseIfKeyboardMode() {
-    if (!mounted) return;
-    if (!_videoPlayerNavigationEnabled) return;
-    final isMobile = PlatformDetector.isMobile(context) && !PlatformDetector.isTV();
-    if (!isMobile && InputModeTracker.isKeyboardMode(context)) {
-      _desktopControlsKey.currentState?.requestPlayPauseFocus();
-    }
-  }
-
-  Future<void> _initKeyboardService() async {
-    _keyboardService = await KeyboardShortcutsService.getInstance();
-  }
-
-  void _listenToPosition() {
-    _positionSubscription = widget.player.streams.position.listen((position) {
-      if (_markers.isEmpty || !_markersLoaded) {
-        return;
-      }
-
-      PlexMarker? foundMarker;
-      for (final marker in _markers) {
-        if (marker.containsPosition(position)) {
-          foundMarker = marker;
-          break;
-        }
-      }
-
-      if (foundMarker != _currentMarker && mounted) {
-        _updateCurrentMarker(foundMarker);
-      }
-    });
-  }
-
-  /// Updates the current marker and manages auto-skip/focus behavior.
-  void _updateCurrentMarker(PlexMarker? foundMarker) {
-    setState(() {
-      _currentMarker = foundMarker;
-      _skipButtonDismissed = false;
-    });
-
-    if (foundMarker == null) {
-      _cancelAutoSkipTimer();
-      _cancelSkipButtonDismissTimer();
-      return;
-    }
-
-    _startAutoSkipTimer(foundMarker);
-
-    // Auto-skip OFF: dismiss button after 7s if no interaction
-    // Auto-skip ON: button stays until controls hide
-    if (!_shouldAutoSkipForMarker(foundMarker)) {
-      _startSkipButtonDismissTimer();
-    }
-
-    // Auto-focus skip button on TV when marker appears (only in keyboard/TV mode)
-    if (PlatformDetector.isTV() && InputModeTracker.isKeyboardMode(context)) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) {
-          _skipMarkerFocusNode.requestFocus();
-        }
-      });
-    }
-  }
-
-  /// Listen to playback state changes to manage auto-hide timer
-  void _listenToPlayingState() {
-    _playingSubscription = widget.player.streams.playing.listen((isPlaying) {
-      if (isPlaying && _showControls) {
-        _startHideTimer();
-      } else if (!isPlaying && _showControls) {
-        _startPausedHideTimer();
-      }
-    });
-  }
-
-  /// Listen to completed stream to show controls when video ends
-  void _listenToCompleted() {
-    _completedSubscription = widget.player.streams.completed.listen((completed) {
-      if (completed && mounted) {
-        // Cancel long-press 2x speed if active
-        if (_isLongPressing) {
-          _handleLongPressCancel();
-        }
-        // Show controls when video completes (for play next dialog etc.)
-        setState(() {
-          _showControls = true;
-        });
-        // Notify parent of visibility change (for popup positioning)
-        widget.controlsVisible?.value = true;
-        _hideTimer?.cancel();
-      }
-    });
-  }
-
-  Future<void> _skipMarker() async {
-    if (_currentMarker == null) return;
-
-    final marker = _currentMarker!;
-    final endTime = marker.endTime;
-    final duration = widget.player.state.duration;
-    final isAtEnd = duration > Duration.zero &&
-        (duration - endTime).inMilliseconds <= 1000;
-
-    if (marker.isCredits && isAtEnd) {
-      // Credits extend to end of video — don't seek (unreliable due to
-      // position stream throttling). Go to next episode or exit player.
-      if (widget.onNext != null) {
-        widget.onNext!.call();
-      } else {
-        widget.onBack?.call();
-      }
-    } else {
-      await _seekToPosition(endTime);
-    }
-
-    if (!mounted) return;
-    setState(() {
-      _currentMarker = null;
-    });
-    _cancelAutoSkipTimer();
-    _cancelSkipButtonDismissTimer();
-  }
-
-  void _startAutoSkipTimer(PlexMarker marker) {
-    _cancelAutoSkipTimer();
-
-    final shouldAutoSkip = (marker.isCredits && _autoSkipCredits) || (!marker.isCredits && _autoSkipIntro);
-
-    if (!shouldAutoSkip || _autoSkipDelay <= 0) return;
-
-    _autoSkipProgress = 0.0;
-    const tickDuration = Duration(milliseconds: 200);
-    final totalTicks = (_autoSkipDelay * 1000) / tickDuration.inMilliseconds;
-
-    if (totalTicks <= 0) return;
-
-    _autoSkipTimer = Timer.periodic(tickDuration, (timer) {
-      if (!mounted || _currentMarker != marker) {
-        timer.cancel();
-        return;
-      }
-
-      setState(() {
-        _autoSkipProgress = (timer.tick / totalTicks).clamp(0.0, 1.0);
-      });
-
-      if (timer.tick >= totalTicks) {
-        timer.cancel();
-        _performAutoSkip();
-      }
-    });
-  }
-
-  void _cancelAutoSkipTimer() {
-    _autoSkipTimer?.cancel();
-    _autoSkipTimer = null;
-    if (mounted) {
-      setState(() {
-        _autoSkipProgress = 0.0;
-      });
-    }
-  }
-
-  /// Starts/restarts the skip button dismiss timer. When it fires, hides the
-  /// button and cancels any active auto-skip countdown.
-  void _startSkipButtonDismissTimer() {
-    _skipButtonDismissTimer?.cancel();
-    _skipButtonDismissTimer = Timer(const Duration(seconds: 7), () {
-      if (!mounted || _currentMarker == null) return;
-      setState(() {
-        _skipButtonDismissed = true;
-      });
-      _cancelAutoSkipTimer();
-    });
-  }
-
-  void _cancelSkipButtonDismissTimer() {
-    _skipButtonDismissTimer?.cancel();
-    _skipButtonDismissTimer = null;
-  }
-
-  /// Perform the appropriate skip action based on marker type and next episode availability
-  void _performAutoSkip() {
-    if (_currentMarker == null) return;
-    unawaited(_skipMarker());
-  }
-
-  /// Check if auto-skip should be active for the current marker
-  bool _shouldAutoSkipForMarker(PlexMarker marker) {
-    return (marker.isCredits && _autoSkipCredits) || (!marker.isCredits && _autoSkipIntro);
-  }
-
-  bool _shouldShowAutoSkip() {
-    if (_currentMarker == null) return false;
-    return _shouldAutoSkipForMarker(_currentMarker!);
-  }
-
-  Future<void> _loadSeekTimes() async {
-    final settingsService = await SettingsService.getInstance();
-    if (mounted) {
-      setState(() {
-        _seekTimeSmall = settingsService.getSeekTimeSmall();
-        _rewindOnResume = settingsService.getRewindOnResume();
-        _audioSyncOffset = settingsService.getAudioSyncOffset();
-        _subtitleSyncOffset = settingsService.getSubtitleSyncOffset();
-        _isRotationLocked = settingsService.getRotationLocked();
-        _autoSkipIntro = settingsService.getAutoSkipIntro();
-        _autoSkipCredits = settingsService.getAutoSkipCredits();
-        _autoSkipDelay = settingsService.getAutoSkipDelay();
-        _videoPlayerNavigationEnabled = settingsService.getVideoPlayerNavigationEnabled();
-        _showPerformanceOverlay = settingsService.getShowPerformanceOverlay();
-        _clickVideoTogglesPlayback = settingsService.getClickVideoTogglesPlayback();
-      });
-
-      // Focus play/pause if navigation is now enabled and controls are visible
-      // (handles case where initState focus attempt failed due to async settings load)
-      if (_videoPlayerNavigationEnabled && _showControls) {
-        _focusPlayPauseIfKeyboardMode();
-      }
-
-      // Apply rotation lock setting
-      if (_isRotationLocked) {
-        SystemChrome.setPreferredOrientations([DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight]);
-      } else {
-        SystemChrome.setPreferredOrientations(DeviceOrientation.values);
-      }
-    }
-  }
-
-  void _toggleSubtitles() {
-    final currentTrack = widget.player.state.track.subtitle;
-    // No-op if no subtitle track is selected
-    if (currentTrack == null || currentTrack.id == 'no') return;
-
-    final newVisible = !_subtitlesVisible;
-    widget.player.setProperty('sub-visibility', newVisible ? 'yes' : 'no');
-    setState(() {
-      _subtitlesVisible = newVisible;
-    });
-  }
-
-  void _onSubtitleTrackChanged(SubtitleTrack track) {
-    // Reset visibility when user explicitly picks a new subtitle track
-    if (track.id != 'no' && !_subtitlesVisible) {
-      widget.player.setProperty('sub-visibility', 'yes');
-      setState(() {
-        _subtitlesVisible = true;
-      });
-    }
-    widget.onSubtitleTrackChanged?.call(track);
-  }
-
-  void _toggleShader() {
-    final shaderService = widget.shaderService;
-    if (shaderService == null || !shaderService.isSupported) return;
-
-    if (shaderService.currentPreset.isEnabled) {
-      // Currently active - disable temporarily
-      shaderService.applyPreset(ShaderPreset.none).then((_) {
-        // ignore: no-empty-block - setState triggers rebuild to reflect disabled shader
-        if (mounted) setState(() {});
-        widget.onShaderChanged?.call();
-      });
-    } else {
-      // Currently off - restore saved preset
-      final shaderProvider = context.read<ShaderProvider>();
-      final saved = shaderProvider.savedPreset;
-      final allPresets = shaderProvider.allPresets;
-      final targetPreset = saved.isEnabled
-          ? saved
-          : allPresets.firstWhere((p) => p.isEnabled, orElse: () => allPresets[1]);
-      shaderService.applyPreset(targetPreset).then((_) {
-        shaderProvider.setCurrentPreset(targetPreset);
-        // ignore: no-empty-block - setState triggers rebuild to reflect restored shader
-        if (mounted) setState(() {});
-        widget.onShaderChanged?.call();
-      });
-    }
-  }
-
-  void _nextAudioTrack() {
-    if (!widget.canControl) return;
-    widget.onCycleAudioTrack?.call();
-  }
-
-  void _nextSubtitleTrack() {
-    if (!widget.canControl) return;
-    widget.onCycleSubtitleTrack?.call();
-  }
-
-  void _nextChapter() {
-    // Go to next chapter - this would use your existing chapter navigation
-    if (widget.onNext != null) {
-      widget.onNext!();
-    }
-  }
-
-  void _previousChapter() {
-    // Go to previous chapter - this would use your existing chapter navigation
-    if (widget.onPrevious != null) {
-      widget.onPrevious!();
-    }
-  }
+  void _setControlsState(VoidCallback fn) => setState(fn);
 
   @override
   void dispose() {
@@ -711,16 +511,15 @@ class _PlexVideoControlsState extends State<PlexVideoControls> with WindowListen
     _playingSubscription?.cancel();
     _completedSubscription?.cancel();
     _positionSubscription?.cancel();
+    _rateSubscription?.cancel();
     _focusNode.dispose();
     _skipMarkerFocusNode.dispose();
     // Restore original rate if long-press was active when disposed
     if (_isLongPressing && _rateBeforeLongPress != null) {
       widget.player.setRate(_rateBeforeLongPress!);
     }
-    // Remove lifecycle observer
-    WidgetsBinding.instance.removeObserver(this);
     // Remove window listener and reset always-on-top if it was enabled
-    if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
+    if (PlatformDetector.isDesktopOS()) {
       windowManager.removeListener(this);
       if (_isAlwaysOnTop) {
         windowManager.setAlwaysOnTop(false);
@@ -728,16 +527,10 @@ class _PlexVideoControlsState extends State<PlexVideoControls> with WindowListen
     }
     if (Platform.isMacOS) {
       _pipService.isPipActive.removeListener(_onMacPipChanged);
+      _trafficLightVisibilityGeneration++;
+      unawaited(MacOSWindowService.setTrafficLightsVisible(true));
     }
     super.dispose();
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) {
-      // Reload seek times when app resumes (e.g., returning from settings)
-      _loadSeekTimes();
-    }
   }
 
   @override
@@ -782,1023 +575,8 @@ class _PlexVideoControlsState extends State<PlexVideoControls> with WindowListen
   // ignore: no-empty-block - required by WindowListener interface
   void onWindowResize() {}
 
-  /// Controls hide delay: 5s on mobile/TV/keyboard-nav, 3s on desktop with mouse.
-  Duration get _hideDelay {
-    final isMobile = (Platform.isIOS || Platform.isAndroid) && !PlatformDetector.isTV();
-    if (isMobile || PlatformDetector.isTV() || _videoPlayerNavigationEnabled) {
-      return const Duration(seconds: 5);
-    }
-    return const Duration(seconds: 3);
-  }
-
-  /// Shared hide logic: hides controls, notifies parent, updates traffic lights, restores focus.
-  void _hideControls() {
-    if (!mounted || !_showControls || _forceShowControls) return;
-    setState(() {
-      _showControls = false;
-      _isContentStripVisible = false;
-      // Dismiss skip button with controls — after this it only re-appears with controls
-      if (_currentMarker != null) {
-        _skipButtonDismissed = true;
-      }
-    });
-    _desktopControlsKey.currentState?.hideContentStrip();
-    _cancelSkipButtonDismissTimer();
-    widget.controlsVisible?.value = false;
-    if (Platform.isMacOS) {
-      _updateTrafficLightVisibility();
-    }
-    // Reclaim focus so the global key handler stays active for TV dpad,
-    // but skip if an overlay sheet owns focus — stealing it would break
-    // sheet navigation (e.g. the compact sync bar).
-    final sheetOpen = OverlaySheetController.maybeOf(context)?.isOpen ?? false;
-    if (!sheetOpen) {
-      // Always request primary focus on _focusNode — not just when hasFocus is
-      // false. hasFocus is true when a descendant (e.g. play/pause) has focus,
-      // but we need _focusNode itself to hold primary focus so its onKeyEvent
-      // fires for the next d-pad press (otherwise focus escapes to the screen-
-      // level self-heal handler which shows controls with play/pause focus).
-      _focusNode.requestFocus();
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted && !_focusNode.hasPrimaryFocus) {
-          _focusNode.requestFocus();
-        }
-      });
-    }
-  }
-
-  void _startHideTimer() {
-    _hideTimer?.cancel();
-
-    // Don't auto-hide while loading first frame (user needs to see spinner and back button)
-    final hasFrame = widget.hasFirstFrame?.value ?? true;
-    if (!hasFrame) return;
-
-    if (_forceShowControls) return;
-
-    // Only auto-hide if playing
-    if (widget.player.state.playing) {
-      _hideTimer = Timer(_hideDelay, () {
-        // Also check hasFirstFrame in callback (in case it changed)
-        final stillLoading = !(widget.hasFirstFrame?.value ?? true);
-        if (mounted && widget.player.state.playing && !stillLoading) {
-          _hideControls();
-        }
-      });
-    }
-  }
-
-  /// Auto-hide controls after pause (does not check playing state in callback).
-  void _startPausedHideTimer() {
-    _hideTimer?.cancel();
-    if (_forceShowControls) return;
-    _hideTimer = Timer(_hideDelay, () {
-      _hideControls();
-    });
-  }
-
-  /// Restart the hide timer on user interaction (if video is playing)
-  void _restartHideTimerIfPlaying() {
-    if (widget.player.state.playing) {
-      _startHideTimer();
-    }
-  }
-
-  /// Hide controls immediately when the mouse leaves the player area (desktop only).
-  void _hideControlsFromPointerExit() {
-    final isMobile = PlatformDetector.isMobile(context) && !PlatformDetector.isTV();
-    if (isMobile) return;
-
-    _hideTimer?.cancel();
-    _hideControls();
-  }
-
-  void _handlePointerSignal(PointerSignalEvent event) {
-    if (event is PointerScrollEvent && _keyboardService != null) {
-      final delta = event.scrollDelta.dy;
-      final volume = widget.player.state.volume;
-      final maxVol = _keyboardService!.maxVolume.toDouble();
-      final newVolume = (volume - delta / 20).clamp(0.0, maxVol);
-      widget.player.setVolume(newVolume);
-      SettingsService.getInstance().then((s) => s.setVolume(newVolume));
-      _showControlsFromPointerActivity();
-    }
-  }
-
-  /// Show controls in response to pointer activity (mouse/trackpad movement).
-  void _showControlsFromPointerActivity() {
-    if (!_showControls) {
-      setState(() {
-        _showControls = true;
-      });
-      // Notify parent of visibility change (for popup positioning)
-      widget.controlsVisible?.value = true;
-      // On macOS, keep window controls in sync with the overlay
-      if (Platform.isMacOS) {
-        _updateTrafficLightVisibility();
-      }
-    }
-
-    // Keep the overlay visible while the user is moving the pointer
-    _restartHideTimerIfPlaying();
-
-    // Cancel auto-skip when user moves pointer over the player
-    _cancelAutoSkipTimer();
-  }
-
-  void _toggleControls() {
-    if (_showControls) {
-      _hideControls();
-    } else {
-      setState(() {
-        _showControls = true;
-      });
-      widget.controlsVisible?.value = true;
-      _startHideTimer();
-      if (Platform.isMacOS) {
-        _updateTrafficLightVisibility();
-      }
-    }
-    // Cancel auto-skip on any tap
-    _cancelAutoSkipTimer();
-  }
-
-  void _toggleRotationLock() async {
-    setState(() {
-      _isRotationLocked = !_isRotationLocked;
-    });
-
-    // Save to settings
-    final settingsService = await SettingsService.getInstance();
-    await settingsService.setRotationLocked(_isRotationLocked);
-
-    if (_isRotationLocked) {
-      // Locked: Allow landscape orientations only
-      SystemChrome.setPreferredOrientations([DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight]);
-    } else {
-      // Unlocked: Allow all orientations including portrait
-      SystemChrome.setPreferredOrientations(DeviceOrientation.values);
-    }
-  }
-
-  void _toggleScreenLock() {
-    final locking = !_isScreenLocked;
-    setState(() {
-      _isScreenLocked = locking;
-      if (locking) {
-        _showLockIcon = true;
-      }
-    });
-    if (locking) {
-      _hideControls();
-      _startLockIconHideTimer();
-    }
-  }
-
-  void _startLockIconHideTimer() {
-    _lockIconTimer?.cancel();
-    _lockIconTimer = Timer(const Duration(seconds: 3), () {
-      if (mounted) setState(() => _showLockIcon = false);
-    });
-  }
-
-  void _unlockScreen() {
-    setState(() {
-      _isScreenLocked = false;
-      _showLockIcon = false;
-      _showControls = true;
-    });
-    _lockIconTimer?.cancel();
-    widget.controlsVisible?.value = true;
-    _startHideTimer();
-  }
-
-  void _updateTrafficLightVisibility() async {
-    // When maximized or fullscreen, always keep traffic lights visible so the
-    // user can reach them without the controls-hide-on-mouse-leave race.
-    // In normal windowed mode, toggle with controls as before.
-    final isMaximizedOrFullscreen = await windowManager.isMaximized() || await windowManager.isFullScreen();
-    final visible = isMaximizedOrFullscreen || _forceShowControls ? true : _showControls;
-    await MacOSWindowService.setTrafficLightsVisible(visible);
-  }
-
-  /// Check whether PiP is supported on this device
-  Future<void> _checkPipSupport() async {
-    if (!Platform.isAndroid && !Platform.isIOS && !Platform.isMacOS) {
-      return;
-    }
-
-    try {
-      final supported = await PipService.isSupported();
-      if (mounted) {
-        setState(() {
-          _isPipSupported = supported;
-        });
-      }
-    } catch (e) {
-      return;
-    }
-  }
-
-  /// macOS PiP changed — force controls visible while PiP is active
-  void _onMacPipChanged() {
-    if (!mounted) return;
-    final inPip = _pipService.isPipActive.value;
-    setState(() => _forceShowControls = inPip);
-    if (inPip) {
-      _hideTimer?.cancel();
-      widget.controlsVisible?.value = true;
-    } else {
-      _startHideTimer();
-    }
-  }
-
-  Future<void> _loadPlaybackExtras({bool forceRefresh = false}) async {
-    // Live TV metadata uses EPG rating keys, not library items
-    if (widget.isLive) return;
-    if (_isLoadingExtras) return;
-    _isLoadingExtras = true;
-
-    try {
-      appLogger.d('_loadPlaybackExtras: starting for ${widget.metadata.ratingKey} (forceRefresh=$forceRefresh)');
-      final client = _getClientForMetadata();
-      appLogger.d('_loadPlaybackExtras: got client with serverId=${client.serverId}');
-
-      final settings = await SettingsService.getInstance();
-      final introPattern = settings.getIntroPattern();
-      final creditsPattern = settings.getCreditsPattern();
-      final extras = await client.getPlaybackExtras(widget.metadata.ratingKey, introPattern: introPattern, creditsPattern: creditsPattern, forceRefresh: forceRefresh);
-      appLogger.d('_loadPlaybackExtras: got ${extras.chapters.length} chapters');
-
-      if (mounted) {
-        setState(() {
-          _chapters = extras.chapters;
-          _markers = extras.markers;
-          _chaptersLoaded = true;
-          _markersLoaded = true;
-        });
-      }
-    } catch (e, stack) {
-      // Fallback: try to load from cache directly (for offline playback)
-      appLogger.d('_loadPlaybackExtras: client unavailable, trying cache fallback');
-      final serverId = widget.metadata.serverId;
-      if (serverId != null) {
-        final cacheKey = '/library/metadata/${widget.metadata.ratingKey}';
-        final cached = await PlexApiCache.instance.get(serverId, cacheKey);
-        if (cached != null) {
-          final extras = await _parsePlaybackExtrasFromCache(cached);
-          appLogger.d('_loadPlaybackExtras: loaded ${extras.chapters.length} chapters from cache');
-          if (mounted) {
-            setState(() {
-              _chapters = extras.chapters;
-              _markers = extras.markers;
-              _chaptersLoaded = true;
-              _markersLoaded = true;
-            });
-          }
-          return;
-        }
-      }
-      appLogger.e('_loadPlaybackExtras failed', error: e, stackTrace: stack);
-    } finally {
-      _isLoadingExtras = false;
-    }
-  }
-
-  /// Parse PlaybackExtras from cached API response (for offline playback)
-  Future<PlaybackExtras> _parsePlaybackExtrasFromCache(Map<String, dynamic> cached) async {
-    final chapters = <PlexChapter>[];
-    final markers = <PlexMarker>[];
-
-    final metadataJson = PlexCacheParser.extractFirstMetadata(cached);
-    if (metadataJson != null) {
-      // Parse chapters
-      if (metadataJson['Chapter'] != null) {
-        for (var chapter in metadataJson['Chapter'] as List) {
-          chapters.add(
-            PlexChapter(
-              id: chapter['id'] as int,
-              index: chapter['index'] as int?,
-              startTimeOffset: chapter['startTimeOffset'] as int?,
-              endTimeOffset: chapter['endTimeOffset'] as int?,
-              title: chapter['tag'] as String?,
-              thumb: chapter['thumb'] as String?,
-            ),
-          );
-        }
-      }
-
-      // Parse markers
-      if (metadataJson['Marker'] != null) {
-        for (var marker in metadataJson['Marker'] as List) {
-          markers.add(
-            PlexMarker(
-              id: marker['id'] as int,
-              type: marker['type'] as String,
-              startTimeOffset: marker['startTimeOffset'] as int,
-              endTimeOffset: marker['endTimeOffset'] as int,
-            ),
-          );
-        }
-      }
-    }
-
-    final settings = await SettingsService.getInstance();
-    return PlaybackExtras.withChapterFallback(
-      chapters: chapters,
-      markers: markers,
-      introPatternStr: settings.getIntroPattern(),
-      creditsPatternStr: settings.getCreditsPattern(),
-    );
-  }
-
-  TrackControlsState _buildTrackControlsState({
-    required PlaybackStateProvider playbackState,
-    required VoidCallback? onToggleAlwaysOnTop,
-  }) {
-    return TrackControlsState(
-      availableVersions: widget.availableVersions,
-      selectedMediaIndex: widget.selectedMediaIndex,
-      boxFitMode: widget.boxFitMode,
-      audioSyncOffset: _audioSyncOffset,
-      subtitleSyncOffset: _subtitleSyncOffset,
-      isRotationLocked: _isRotationLocked,
-      isScreenLocked: _isScreenLocked,
-      isFullscreen: _isFullscreen,
-      isAlwaysOnTop: _isAlwaysOnTop,
-      onTogglePIPMode: (_isPipSupported && !PlatformDetector.isTV())
-          ? widget.onTogglePIPMode
-          : null,
-      onCycleBoxFitMode: widget.player.playerType != 'exoplayer' ? widget.onCycleBoxFitMode : null,
-      onToggleRotationLock: _toggleRotationLock,
-      onToggleScreenLock: _toggleScreenLock,
-      onToggleFullscreen: _toggleFullscreen,
-      onToggleAlwaysOnTop: onToggleAlwaysOnTop,
-      onSwitchVersion: _switchMediaVersion,
-      onAudioTrackChanged: widget.onAudioTrackChanged,
-      onSubtitleTrackChanged: _onSubtitleTrackChanged,
-      onSecondarySubtitleTrackChanged: widget.onSecondarySubtitleTrackChanged,
-      onLoadSeekTimes: () async {
-        if (mounted) {
-          await _loadSeekTimes();
-        }
-      },
-      onCancelAutoHide: () => _hideTimer?.cancel(),
-      onStartAutoHide: _startHideTimer,
-      onSyncOffsetChanged: (propertyName, offset) {
-        setState(() {
-          if (propertyName == 'sub-delay') {
-            _subtitleSyncOffset = offset;
-          } else {
-            _audioSyncOffset = offset;
-          }
-        });
-      },
-      serverId: widget.metadata.serverId ?? '',
-      shaderService: widget.shaderService,
-      onShaderChanged: widget.onShaderChanged,
-      isAmbientLightingEnabled: widget.isAmbientLightingEnabled,
-      onToggleAmbientLighting: widget.player.playerType != 'exoplayer' ? widget.onToggleAmbientLighting : null,
-      canControl: widget.canControl,
-      isLive: widget.isLive,
-      subtitlesVisible: _subtitlesVisible,
-      showQueueButton: playbackState.isQueueActive,
-      onQueueItemSelected: playbackState.isQueueActive ? _onQueueItemSelected : null,
-      ratingKey: widget.metadata.ratingKey,
-      mediaTitle: widget.metadata.title,
-      onSubtitleDownloaded: _onSubtitleDownloaded,
-    );
-  }
-
-  Widget _buildTrackChapterControlsWidget({bool hideChaptersAndQueue = false}) {
-    final playbackState = context.watch<PlaybackStateProvider>();
-    final trackControlsState = _buildTrackControlsState(
-      playbackState: playbackState,
-      onToggleAlwaysOnTop: _toggleAlwaysOnTop,
-    );
-
-    return TrackChapterControls(
-      player: widget.player,
-      chapters: _chapters,
-      chaptersLoaded: _chaptersLoaded,
-      trackControlsState: trackControlsState,
-      onSeekCompleted: widget.onSeekCompleted,
-      hideChaptersAndQueue: hideChaptersAndQueue,
-    );
-  }
-
-  void _seekToPreviousChapter() => unawaited(_seekToChapter(forward: false));
-
-  void _seekToNextChapter() => unawaited(_seekToChapter(forward: true));
-
-  Future<void> _seekByTime({required bool forward}) async {
-    final delta = Duration(seconds: forward ? _seekTimeSmall : -_seekTimeSmall);
-    await _seekByOffset(delta);
-  }
-
-  Future<void> _seekToChapter({required bool forward}) async {
-    if (_chapters.isEmpty) {
-      // No chapters - seek by configured amount
-      final delta = Duration(seconds: forward ? _seekTimeSmall : -_seekTimeSmall);
-      await _seekByOffset(delta);
-      return;
-    }
-
-    final currentPositionMs = widget.player.state.position.inMilliseconds;
-
-    if (forward) {
-      // Find next chapter
-      for (final chapter in _chapters) {
-        final chapterStart = chapter.startTimeOffset ?? 0;
-        if (chapterStart > currentPositionMs) {
-          await _seekToPosition(Duration(milliseconds: chapterStart));
-          return;
-        }
-      }
-    } else {
-      // Find previous/current chapter
-      for (int i = _chapters.length - 1; i >= 0; i--) {
-        final chapterStart = _chapters[i].startTimeOffset ?? 0;
-        if (currentPositionMs > chapterStart + 3000) {
-          // If more than 3 seconds into chapter, go to start of current chapter
-          await _seekToPosition(Duration(milliseconds: chapterStart));
-          return;
-        }
-      }
-      // If at start of first chapter, go to beginning
-      await _seekToPosition(Duration.zero);
-    }
-  }
-
-  Future<void> _seekToPosition(Duration position, {bool notifyCompletion = true}) async {
-    final clamped = clampSeekPosition(widget.player, position);
-    await widget.player.seek(clamped);
-    if (notifyCompletion && mounted) {
-      widget.onSeekCompleted?.call(clamped);
-    }
-  }
-
-  Future<void> _seekByOffset(Duration delta, {bool notifyCompletion = true}) async {
-    // Route through live seek callback for time-shifted live TV
-    if (widget.isLive && widget.onLiveSeek != null && widget.currentPositionEpoch != null) {
-      widget.onLiveSeek!(widget.currentPositionEpoch! + delta.inSeconds);
-      return;
-    }
-    final target = widget.player.state.position + delta;
-    final clamped = clampSeekPosition(widget.player, target);
-    await widget.player.seek(clamped);
-    if (notifyCompletion && mounted) {
-      widget.onSeekCompleted?.call(clamped);
-    }
-  }
-
-  Future<void> _playOrPause() async {
-    if (!widget.player.state.playing && _rewindOnResume > 0) {
-      final target = widget.player.state.position - Duration(seconds: _rewindOnResume);
-      final clamped = clampSeekPosition(widget.player, target);
-      await widget.player.seek(clamped);
-    }
-    await widget.player.playOrPause();
-  }
-
-  /// Throttled seek for timeline slider - executes immediately then throttles to 200ms
-  void _throttledSeek(Duration position) => _seekThrottle([position]);
-
-  /// Finalizes the seek when user stops scrubbing the timeline
-  void _finalizeSeek(Duration position) {
-    _seekThrottle.cancel();
-    unawaited(_seekToPosition(position));
-  }
-
-  /// Handle tap in skip zone for desktop mode
-  void _handleTapInSkipZoneDesktop() {
-    if (widget.canControl && _clickVideoTogglesPlayback) {
-      _playOrPause();
-    }
-
-    _toggleControls();
-  }
-
-  /// Handle tap in skip zone with custom double-tap detection
-  void _handleTapInSkipZone({required bool isForward}) {
-    final now = DateTime.now();
-
-    // Cancel any pending single-tap action
-    _singleTapTimer?.cancel();
-    _singleTapTimer = null;
-
-    // Debounce: ignore taps within 200ms of last skip action
-    // This prevents double-taps from counting as two separate skips
-    if (_lastSkipActionTime != null && now.difference(_lastSkipActionTime!).inMilliseconds < 200) {
-      return;
-    }
-
-    // Check if this qualifies as a double-tap (within 250ms of last tap, same side)
-    final isDoubleTap =
-        _lastSkipTapTime != null &&
-        now.difference(_lastSkipTapTime!).inMilliseconds < 250 &&
-        _lastSkipTapWasForward == isForward;
-
-    // Skip ONLY on detected double-tap (no single-tap-to-add behavior)
-    if (isDoubleTap) {
-      _lastSkipTapTime = null; // Reset to prevent triple-tap chaining
-
-      if (_showDoubleTapFeedback && _lastDoubleTapWasForward == isForward) {
-        // Stacking skip - add to accumulated
-        unawaited(_handleStackingSkip(isForward: isForward));
-      } else {
-        // First double-tap - initiate skip
-        unawaited(_handleDoubleTapSkip(isForward: isForward));
-      }
-    } else {
-      // First tap - record timestamp and start timer for single-tap action
-      _lastSkipTapTime = now;
-      _lastSkipTapWasForward = isForward;
-
-      // If no second tap within 250ms, treat as single tap to toggle controls
-      _singleTapTimer = Timer(const Duration(milliseconds: 250), () {
-        if (mounted) {
-          _toggleControls();
-        }
-      });
-    }
-  }
-
-  /// Handle stacking skip - add to accumulated skip when feedback is active
-  Future<void> _handleStackingSkip({required bool isForward}) async {
-    if (!widget.canControl) return;
-
-    // Add to accumulated skip
-    _accumulatedSkipSeconds += _seekTimeSmall;
-
-    // Calculate and perform seek
-    final delta = Duration(seconds: isForward ? _seekTimeSmall : -_seekTimeSmall);
-    await _seekByOffset(delta);
-
-    // Refresh feedback (extends timer, updates display)
-    _showSkipFeedback(isForward: isForward);
-
-    // Record skip time for debounce
-    _lastSkipActionTime = DateTime.now();
-  }
-
-  /// Handle double-tap skip forward or backward
-  Future<void> _handleDoubleTapSkip({required bool isForward}) async {
-    // Ignore if user cannot control playback
-    if (!widget.canControl) return;
-
-    // Reset accumulated skip for new gesture
-    _accumulatedSkipSeconds = _seekTimeSmall;
-
-    final delta = Duration(seconds: isForward ? _seekTimeSmall : -_seekTimeSmall);
-    await _seekByOffset(delta);
-
-    // Show visual feedback
-    _showSkipFeedback(isForward: isForward);
-
-    // Record skip time for debounce
-    _lastSkipActionTime = DateTime.now();
-  }
-
-  /// Show animated visual feedback for skip gesture
-  void _showSkipFeedback({required bool isForward}) {
-    _feedbackTimer?.cancel();
-
-    setState(() {
-      _lastDoubleTapWasForward = isForward;
-      _showDoubleTapFeedback = true;
-      _doubleTapFeedbackOpacity = 1.0;
-    });
-
-    // Capture duration before timer to avoid context access in callback
-    final slowDuration = tokens(context).slow;
-
-    // Fade out after delay (1200ms gives time to see value and continue tapping)
-    _feedbackTimer = Timer(const Duration(milliseconds: 1200), () {
-      if (mounted) {
-        setState(() {
-          _doubleTapFeedbackOpacity = 0.0;
-        });
-
-        Timer(slowDuration, () {
-          if (mounted) {
-            setState(() {
-              _showDoubleTapFeedback = false;
-              _accumulatedSkipSeconds = 0; // Reset when feedback hides
-            });
-          }
-        });
-      }
-    });
-  }
-
-  /// Handle tap on controls overlay - route to skip zones or toggle controls
-  void _handleControlsOverlayTap(TapUpDetails details, BoxConstraints constraints) {
-    final isMobile = PlatformDetector.isMobile(context);
-
-    if (!isMobile) {
-      final DateTime now = DateTime.now();
-
-      // Always perform the single-click behavior immediately
-      if (widget.canControl && _clickVideoTogglesPlayback) {
-        _playOrPause();
-      } else {
-        _toggleControls();
-      }
-
-      // Detect double-click
-      final bool isDoubleClick = _lastSkipTapTime != null && now.difference(_lastSkipTapTime!).inMilliseconds < 250;
-
-      if (isDoubleClick) {
-        _lastSkipTapTime = null;
-
-        // Perform desktop double-click action: toggle fullscreen
-        _toggleFullscreen();
-
-        return;
-      }
-
-      // Record this click as a candidate for double-click detection
-      _lastSkipTapTime = now;
-      return;
-    }
-
-    final width = constraints.maxWidth;
-    final height = constraints.maxHeight;
-    final tapX = details.localPosition.dx;
-    final tapY = details.localPosition.dy;
-
-    // Skip zone dimensions (must match the skip zone Positioned widgets)
-    final topExclude = height * 0.15;
-    final bottomExclude = height * 0.15;
-    final leftZoneWidth = width * 0.35;
-
-    // Check if tap is in vertical range for skip zones
-    final inVerticalRange = tapY > topExclude && tapY < (height - bottomExclude);
-
-    if (inVerticalRange) {
-      if (tapX < leftZoneWidth) {
-        // Left skip zone
-        _handleTapInSkipZone(isForward: false);
-        return;
-      } else if (tapX > (width - leftZoneWidth)) {
-        // Right skip zone
-        _handleTapInSkipZone(isForward: true);
-        return;
-      }
-    }
-
-    // Not in skip zone, toggle controls
-    _toggleControls();
-  }
-
-  /// Handle long-press start - activate 2x speed
-  void _handleLongPressStart() {
-    if (!widget.canControl || widget.isLive) return;
-
-    setState(() {
-      _isLongPressing = true;
-      _rateBeforeLongPress = widget.player.state.rate;
-      _showSpeedIndicator = true;
-    });
-    widget.player.setRate(2.0);
-  }
-
-  /// Handle long-press end - restore original speed
-  void _handleLongPressEnd() {
-    if (!_isLongPressing) return;
-    widget.player.setRate(_rateBeforeLongPress ?? 1.0);
-    setState(() {
-      _isLongPressing = false;
-      _rateBeforeLongPress = null;
-      _showSpeedIndicator = false;
-    });
-  }
-
-  /// Handle long-press cancel (same as end)
-  void _handleLongPressCancel() => _handleLongPressEnd();
-
-  /// Build the visual feedback widget for double-tap skip
-  Widget _buildDoubleTapFeedback() {
-    return Align(
-      alignment: _lastDoubleTapWasForward ? Alignment.centerRight : Alignment.centerLeft,
-      child: Container(
-        margin: const EdgeInsets.symmetric(horizontal: 60),
-        padding: const EdgeInsets.all(20),
-        decoration: BoxDecoration(color: Colors.black.withValues(alpha: 0.6), shape: BoxShape.circle),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            AppIcon(
-              _lastDoubleTapWasForward ? Symbols.forward_media_rounded : Symbols.replay_rounded,
-              fill: 1,
-              color: Colors.white,
-              size: 32,
-            ),
-            const SizedBox(height: 4),
-            Text(
-              '$_accumulatedSkipSeconds${t.settings.secondsShort}',
-              style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.bold),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  /// Build the visual indicator for long-press 2x speed
-  Widget _buildSpeedIndicator() {
-    return Align(
-      alignment: Alignment.topCenter,
-      child: Container(
-        margin: const EdgeInsets.only(top: 20),
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-        decoration: BoxDecoration(
-          color: Colors.black.withValues(alpha: 0.7),
-          borderRadius: const BorderRadius.all(Radius.circular(20)),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const AppIcon(Symbols.fast_forward_rounded, fill: 1, color: Colors.white, size: 16),
-            const SizedBox(width: 4),
-            const Text(
-              '2x',
-              style: TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.bold),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Future<void> _toggleFullscreen() async {
-    if (!PlatformDetector.isMobile(context)) {
-      await FullscreenStateManager().toggleFullscreen();
-    }
-  }
-
-  /// Exit fullscreen if the window is actually fullscreen (async check).
-  /// Used by ESC handler on Windows/Linux to avoid relying on _isFullscreen flag.
-  Future<void> _exitFullscreenIfNeeded() async {
-    if (await windowManager.isFullScreen()) {
-      await FullscreenStateManager().exitFullscreen();
-    }
-  }
-
-  /// Initialize always-on-top state from window manager (desktop only)
-  Future<void> _initAlwaysOnTopState() async {
-    final isOnTop = await windowManager.isAlwaysOnTop();
-    if (mounted && isOnTop != _isAlwaysOnTop) {
-      setState(() {
-        _isAlwaysOnTop = isOnTop;
-      });
-    }
-  }
-
-  /// Toggle always-on-top window mode (desktop only)
-  Future<void> _toggleAlwaysOnTop() async {
-    if (!PlatformDetector.isMobile(context)) {
-      final newValue = !_isAlwaysOnTop;
-      await windowManager.setAlwaysOnTop(newValue);
-      if (!mounted) return;
-      setState(() {
-        _isAlwaysOnTop = newValue;
-      });
-    }
-  }
-
-  /// Check if a key is a directional key (arrow keys)
-  bool _isDirectionalKey(LogicalKeyboardKey key) {
-    return key == LogicalKeyboardKey.arrowUp ||
-        key == LogicalKeyboardKey.arrowDown ||
-        key == LogicalKeyboardKey.arrowLeft ||
-        key == LogicalKeyboardKey.arrowRight;
-  }
-
-  /// Check if a key is a select/enter key
-  bool _isSelectKey(LogicalKeyboardKey key) {
-    return key == LogicalKeyboardKey.select ||
-        key == LogicalKeyboardKey.enter ||
-        key == LogicalKeyboardKey.numpadEnter ||
-        key == LogicalKeyboardKey.gameButtonA;
-  }
-
-  /// Determine if the key event should toggle play/pause based on configured hotkeys.
-  bool _isPlayPauseKey(KeyEvent event) {
-    final logicalKey = event.logicalKey;
-    final physicalKey = event.physicalKey;
-
-    // Always accept hardware media play/pause keys (Android TV remotes)
-    if (logicalKey == LogicalKeyboardKey.mediaPlayPause ||
-        logicalKey == LogicalKeyboardKey.mediaPlay ||
-        logicalKey == LogicalKeyboardKey.mediaPause) {
-      return true;
-    }
-
-    // When the shortcuts service is available, respect the configured play/pause hotkey
-    if (_keyboardService != null) {
-      final hotkey = _keyboardService!.hotkeys['play_pause'];
-      if (hotkey == null) return false;
-      return hotkey.key == physicalKey;
-    }
-
-    // Fallback to defaults while the service is loading
-    return physicalKey == PhysicalKeyboardKey.space || physicalKey == PhysicalKeyboardKey.mediaPlayPause;
-  }
-
-  /// Check if a key is a media seek key (Android TV remotes)
-  bool _isMediaSeekKey(LogicalKeyboardKey key) {
-    return key == LogicalKeyboardKey.mediaFastForward ||
-        key == LogicalKeyboardKey.mediaRewind ||
-        key == LogicalKeyboardKey.mediaSkipForward ||
-        key == LogicalKeyboardKey.mediaSkipBackward;
-  }
-
-  /// Check if a key is a media track key (Android TV remotes)
-  bool _isMediaTrackKey(LogicalKeyboardKey key) {
-    return key == LogicalKeyboardKey.mediaTrackNext || key == LogicalKeyboardKey.mediaTrackPrevious;
-  }
-
-  bool _isPlayPauseActivation(KeyEvent event) {
-    return event is KeyDownEvent && _isPlayPauseKey(event);
-  }
-
-  /// Global key event handler for focus-independent shortcuts (desktop only)
-  bool _handleGlobalKeyEvent(KeyEvent event) {
-    if (!mounted) return false;
-
-    // When an overlay sheet is open (e.g. subtitle search with text fields),
-    // don't consume key events — let text input work normally.
-    if (OverlaySheetController.maybeOf(context)?.isOpen ?? false) {
-      return false;
-    }
-
-    // Back key fallback when _focusNode lost focus (TV, or desktop with nav on).
-    // Focus.onKeyEvent won't fire if _focusNode lost focus, so handle ESC here.
-    if ((_videoPlayerNavigationEnabled || PlatformDetector.isTV()) && event.logicalKey.isBackKey) {
-      if (!_focusNode.hasFocus) {
-        // Skip if an overlay sheet is open — the sheet's FocusScope handles
-        // back keys via its own onKeyEvent. Without this check, this global
-        // handler would call Navigator.pop() alongside the sheet's handler.
-        final sheetOpen = OverlaySheetController.maybeOf(context)?.isOpen ?? false;
-        if (sheetOpen) return false;
-        // On TV, mark coordinator early (KeyDown) so PopScope.onPopInvokedWithResult
-        // sees it before KeyUp — prevents the system back from racing ahead.
-        if (PlatformDetector.isTV() && event is KeyDownEvent) {
-          BackKeyCoordinator.markHandled();
-        }
-        final backResult = handleBackKeyAction(event, () {
-          if (PlatformDetector.isTV()) {
-            if (_showControls) {
-              if (_isContentStripVisible) {
-                _desktopControlsKey.currentState?.dismissContentStrip();
-                setState(() => _isContentStripVisible = false);
-                _restartHideTimerIfPlaying();
-                return;
-              }
-              _hideControls();
-              return;
-            }
-            (widget.onBack ?? () => Navigator.of(context).pop(true))();
-            return;
-          }
-          if (!_showControls) {
-            _showControlsWithFocus();
-          } else {
-            (widget.onBack ?? () => Navigator.of(context).pop(true))();
-          }
-        });
-        if (backResult != KeyEventResult.ignored) return true;
-      }
-    }
-
-    // Only handle when video player navigation is disabled (desktop mode without D-pad nav)
-    if (_videoPlayerNavigationEnabled) return false;
-
-    // Skip on mobile (unless TV)
-    final isMobile = PlatformDetector.isMobile(context) && !PlatformDetector.isTV();
-    if (isMobile) return false;
-
-    // Handle play/pause globally - works regardless of focus
-    if (_isPlayPauseActivation(event)) {
-      _playOrPause();
-      _showControlsWithFocus(requestFocus: false);
-      return true; // Event handled, stop propagation
-    }
-
-    // Fallback: handle all other shortcuts when focus has drifted away
-    // (e.g. after controls auto-hide). The !hasFocus guard prevents
-    // double-handling when the Focus onKeyEvent already processes the event.
-    if (!_focusNode.hasFocus && _keyboardService != null) {
-      // On Windows/Linux with navigation off, ESC only exits fullscreen —
-      // never exits the player. Intercept before the keyboard shortcuts
-      // service which would call onBack and pop the route.
-      // Skip if an overlay sheet is open — let the sheet handle ESC.
-      if (!_videoPlayerNavigationEnabled && (Platform.isWindows || Platform.isLinux) && event.logicalKey.isBackKey) {
-        final sheetOpen = OverlaySheetController.maybeOf(context)?.isOpen ?? false;
-        if (!sheetOpen) {
-          if (event is KeyUpEvent) {
-            _exitFullscreenIfNeeded();
-          }
-          _focusNode.requestFocus();
-          return true;
-        }
-      }
-      final result = _keyboardService!.handleVideoPlayerKeyEvent(
-        event,
-        widget.player,
-        _toggleFullscreen,
-        _toggleSubtitles,
-        _nextAudioTrack,
-        _nextSubtitleTrack,
-        _nextChapter,
-        _previousChapter,
-        onBack: widget.onBack ?? () => Navigator.of(context).pop(true),
-        onToggleShader: _toggleShader,
-      );
-      if (result == KeyEventResult.handled) {
-        _focusNode.requestFocus(); // self-heal focus
-        return true;
-      }
-    }
-
-    return true; // Consume all events while video player is active
-  }
-
-  /// Show controls and optionally focus play/pause on keyboard input (desktop only)
-  void _showControlsWithFocus({bool requestFocus = true}) {
-    if (!_showControls) {
-      setState(() {
-        _showControls = true;
-      });
-      // Notify parent of visibility change (for popup positioning)
-      widget.controlsVisible?.value = true;
-      if (Platform.isMacOS) {
-        _updateTrafficLightVisibility();
-      }
-    }
-    _startHideTimer();
-
-    // Request focus on play/pause button after controls are shown
-    if (requestFocus) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _desktopControlsKey.currentState?.requestPlayPauseFocus();
-      });
-    } else {
-      // When not requesting focus on play/pause, ensure main focus node keeps focus
-      // This prevents focus from being lost when controls become visible
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted && !_focusNode.hasFocus) {
-          _focusNode.requestFocus();
-        }
-      });
-    }
-  }
-
-  /// Show controls and focus timeline on LEFT/RIGHT input (TV/desktop)
-  void _showControlsWithTimelineFocus() {
-    if (!_showControls) {
-      setState(() {
-        _showControls = true;
-      });
-      // Notify parent of visibility change (for popup positioning)
-      widget.controlsVisible?.value = true;
-      if (Platform.isMacOS) {
-        _updateTrafficLightVisibility();
-      }
-    }
-    _startHideTimer();
-
-    // Request focus on timeline after controls are shown
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _desktopControlsKey.currentState?.requestTimelineFocus();
-    });
-  }
-
-  /// Hide controls when navigating up from timeline (keyboard mode)
-  /// If skip marker button or Play Next dialog is visible, focus it instead of hiding controls
-  void _hideControlsFromKeyboard() {
-    // If skip marker button is visible, focus it instead of hiding controls
-    if (_currentMarker != null) {
-      _skipMarkerFocusNode.requestFocus();
-      return;
-    }
-
-    // If Play Next dialog is visible (focus node provided), focus it instead of hiding controls
-    if (widget.playNextFocusNode != null) {
-      widget.playNextFocusNode!.requestFocus();
-      return;
-    }
-
-    if (_showControls) {
-      _hideControls();
-    }
-  }
-
   @override
   Widget build(BuildContext context) {
-    // Use desktop controls for desktop platforms AND Android TV
     final isMobile = PlatformDetector.isMobile(context) && !PlatformDetector.isTV();
 
     // Hide ALL controls when in PiP mode (except macOS where main window stays visible)
@@ -1809,145 +587,7 @@ class _PlexVideoControlsState extends State<PlexVideoControls> with WindowListen
         return Focus(
           focusNode: _focusNode,
           autofocus: true,
-          onKeyEvent: (node, event) {
-            // On Windows/Linux with navigation off, ESC only exits fullscreen —
-            // never exits the player. Consume all back key events and check
-            // actual window state asynchronously.
-            if (!_videoPlayerNavigationEnabled &&
-                (Platform.isWindows || Platform.isLinux) &&
-                event.logicalKey.isBackKey) {
-              if (event is KeyUpEvent) {
-                _exitFullscreenIfNeeded();
-              }
-              return KeyEventResult.handled;
-            }
-            // On TV, mark coordinator early (KeyDown) so PopScope.onPopInvokedWithResult
-            // sees it before KeyUp — prevents the system back from racing ahead.
-            if (PlatformDetector.isTV() && event.logicalKey.isBackKey && event is KeyDownEvent) {
-              BackKeyCoordinator.markHandled();
-            }
-            final backResult = handleBackKeyAction(event, () {
-              if (PlatformDetector.isTV()) {
-                if (_showControls) {
-                  if (_isContentStripVisible) {
-                    _desktopControlsKey.currentState?.dismissContentStrip();
-                    setState(() => _isContentStripVisible = false);
-                    _restartHideTimerIfPlaying();
-                    return;
-                  }
-                  _hideControls();
-                  return;
-                }
-                (widget.onBack ?? () => Navigator.of(context).pop(true))();
-                return;
-              }
-              if (!_showControls) {
-                _showControlsWithFocus();
-                return;
-              }
-              // Controls visible - navigate back
-              (widget.onBack ?? () => Navigator.of(context).pop(true))();
-            });
-            if (backResult != KeyEventResult.ignored) {
-              return backResult;
-            }
-
-            // Only handle KeyDown and KeyRepeat events
-            // Consume KeyUp events for navigation keys to prevent leaking to previous routes
-            // Let non-navigation keys (volume, etc.) pass through to the OS
-            if (!event.isActionable) {
-              if (!event.logicalKey.isNavigationKey) return KeyEventResult.ignored;
-              return KeyEventResult.handled;
-            }
-
-            // Reset hide timer on any keyboard/controller input when controls are visible
-            if (_showControls) {
-              _restartHideTimerIfPlaying();
-            }
-
-            final key = event.logicalKey;
-            final isPlayPauseKey = _isPlayPauseKey(event);
-
-            // Always consume play/pause keys to prevent propagation to background routes
-            // On TV/mobile, handle play/pause here; on desktop, the global handler does it
-            if (isPlayPauseKey) {
-              if (_videoPlayerNavigationEnabled || isMobile) {
-                if (_isPlayPauseActivation(event)) {
-                  _playOrPause();
-                  _showControlsWithFocus(requestFocus: _videoPlayerNavigationEnabled);
-                }
-              }
-              return KeyEventResult.handled;
-            }
-
-            // Handle media seek keys (Android TV remotes)
-            // Uses chapter navigation if chapters are available, otherwise seeks by configured time
-            if (event is KeyDownEvent && _isMediaSeekKey(key)) {
-              if (widget.canControl) {
-                final isForward =
-                    key == LogicalKeyboardKey.mediaFastForward || key == LogicalKeyboardKey.mediaSkipForward;
-                unawaited(_seekToChapter(forward: isForward));
-              }
-              _showControlsWithFocus(requestFocus: _videoPlayerNavigationEnabled);
-              return KeyEventResult.handled;
-            }
-
-            // Handle next/previous track keys (Android TV remotes)
-            // Uses same behavior as seek keys: chapter navigation or time-based seek
-            if (event is KeyDownEvent && _isMediaTrackKey(key)) {
-              if (widget.canControl) {
-                unawaited(_seekToChapter(forward: key == LogicalKeyboardKey.mediaTrackNext));
-              }
-              _showControlsWithFocus(requestFocus: _videoPlayerNavigationEnabled);
-              return KeyEventResult.handled;
-            }
-
-            // Handle Select/Enter when controls are hidden: pause and show controls
-            // Only intercept if this Focus node itself has primary focus (not a descendant)
-            if (_isSelectKey(key) && !_showControls && _focusNode.hasPrimaryFocus) {
-              _playOrPause();
-              _showControlsWithFocus();
-              return KeyEventResult.handled;
-            }
-
-            // On desktop/TV, show controls on directional input
-            // LEFT/RIGHT focuses timeline for seeking, UP/DOWN focuses play/pause
-            if (!isMobile && _isDirectionalKey(key) && (_videoPlayerNavigationEnabled || PlatformDetector.isTV())) {
-              if (!_showControls) {
-                final isHorizontal = key == LogicalKeyboardKey.arrowLeft || key == LogicalKeyboardKey.arrowRight;
-                if (isHorizontal) {
-                  _showControlsWithTimelineFocus();
-                } else {
-                  _showControlsWithFocus();
-                }
-                return KeyEventResult.handled;
-              }
-              // Children (DesktopVideoControls) handle navigation first via their own onKeyEvent.
-              // If we reach here, children already declined the event — consume it to prevent leaking.
-              return KeyEventResult.handled;
-            }
-
-            // Pass other events to the keyboard shortcuts service
-            if (_keyboardService == null) return KeyEventResult.handled;
-
-            final result = _keyboardService!.handleVideoPlayerKeyEvent(
-              event,
-              widget.player,
-              _toggleFullscreen,
-              _toggleSubtitles,
-              _nextAudioTrack,
-              _nextSubtitleTrack,
-              _nextChapter,
-              _previousChapter,
-              onBack: widget.onBack ?? () => Navigator.of(context).pop(true),
-              onToggleShader: _toggleShader,
-              onSkipMarker: _performAutoSkip,
-            );
-            // Let non-navigation keys (volume, etc.) pass through to the OS
-            if (!event.logicalKey.isNavigationKey) return KeyEventResult.ignored;
-            // Never return .ignored for navigation keys — prevent leaking to previous routes
-            return result == KeyEventResult.ignored ? KeyEventResult.handled : result;
-          },
+          onKeyEvent: (node, event) => _handleControlsKeyEvent(event, isMobile),
           child: Listener(
             behavior: HitTestBehavior.translucent,
             onPointerHover: (_) => _showControlsFromPointerActivity(),
@@ -1961,99 +601,25 @@ class _PlexVideoControlsState extends State<PlexVideoControls> with WindowListen
                   // Keep-alive: 1px widget that continuously repaints to prevent
                   // Flutter animations from freezing when the frame clock goes idle
                   if (Platform.isLinux || Platform.isWindows)
-                    const Positioned(top: 0, left: 0, child: _LinuxKeepAlive()),
-                  // Invisible tap detector that always covers the full area
-                  // Also handles long-press for 2x speed
+                    const Positioned(top: 0, left: 0, child: LinuxKeepAlive()),
+                  // Also handles long-press for 2x speed.
                   Positioned.fill(
                     child: GestureDetector(
-                      onTap: _toggleControls,
+                      onTap: _handleOuterTap,
                       onLongPressStart: (_) => _handleLongPressStart(),
                       onLongPressEnd: (_) => _handleLongPressEnd(),
                       onLongPressCancel: _handleLongPressCancel,
                       behavior: HitTestBehavior.opaque,
-                      child: Container(color: Colors.transparent),
+                      child: const ColoredBox(color: Colors.transparent),
                     ),
                   ),
-                  // Middle area double-tap detector for fullscreen (desktop only)
-                  // Only covers the clear video area (20% to 80% vertically)
-                  if (!isMobile)
-                    Positioned(
-                      top: 0,
-                      left: 0,
-                      right: 0,
-                      bottom: 0,
-                      child: LayoutBuilder(
-                        builder: (context, constraints) {
-                          final height = constraints.maxHeight;
-                          final topExclude = height * 0.2; // Top 20%
-                          final bottomExclude = height * 0.2; // Bottom 20%
-
-                          return Stack(
-                            children: [
-                              Positioned(
-                                top: topExclude,
-                                left: 0,
-                                right: 0,
-                                bottom: bottomExclude,
-                                child: GestureDetector(
-                                  onTap: _handleTapInSkipZoneDesktop,
-                                  onDoubleTap: _toggleFullscreen,
-                                  behavior: HitTestBehavior.translucent,
-                                  child: Container(color: Colors.transparent),
-                                ),
-                              ),
-                            ],
-                          );
-                        },
-                      ),
-                    ),
                   // Mobile double-tap zones for skip forward/backward
                   if (isMobile)
-                    Positioned.fill(
-                      child: LayoutBuilder(
-                        builder: (context, constraints) {
-                          final height = constraints.maxHeight;
-                          final width = constraints.maxWidth;
-                          final topExclude = height * 0.15; // Exclude top 15% (top bar)
-                          final bottomExclude = height * 0.15; // Exclude bottom 15% (seek slider)
-                          final leftZoneWidth = width * 0.35; // Left 35%
-
-                          return Stack(
-                            children: [
-                              // Left zone - skip backward (custom double-tap detection)
-                              Positioned(
-                                left: 0,
-                                top: topExclude,
-                                bottom: bottomExclude,
-                                width: leftZoneWidth,
-                                child: GestureDetector(
-                                  onTap: () => _handleTapInSkipZone(isForward: false),
-                                  onLongPressStart: (_) => _handleLongPressStart(),
-                                  onLongPressEnd: (_) => _handleLongPressEnd(),
-                                  onLongPressCancel: _handleLongPressCancel,
-                                  behavior: HitTestBehavior.opaque,
-                                  child: Container(color: Colors.transparent),
-                                ),
-                              ),
-                              // Right zone - skip forward (custom double-tap detection)
-                              Positioned(
-                                right: 0,
-                                top: topExclude,
-                                bottom: bottomExclude,
-                                width: leftZoneWidth,
-                                child: GestureDetector(
-                                  onTap: () => _handleTapInSkipZone(isForward: true),
-                                  onLongPressStart: (_) => _handleLongPressStart(),
-                                  onLongPressEnd: (_) => _handleLongPressEnd(),
-                                  onLongPressCancel: _handleLongPressCancel,
-                                  behavior: HitTestBehavior.opaque,
-                                  child: Container(color: Colors.transparent),
-                                ),
-                              ),
-                            ],
-                          );
-                        },
-                      ),
+                    MobileSkipZones(
+                      onTapInSkipZone: (isForward) => _handleTapInSkipZone(isForward: isForward),
+                      onLongPressStart: (_) => _handleLongPressStart(),
+                      onLongPressEnd: (_) => _handleLongPressEnd(),
+                      onLongPressCancel: _handleLongPressCancel,
                     ),
                   // Custom controls overlay
                   // Positioned AFTER double-tap zones so controls receive taps first
@@ -2114,6 +680,7 @@ class _PlexVideoControlsState extends State<PlexVideoControls> with WindowListen
                                                 metadata: widget.metadata,
                                                 chapters: _chapters,
                                                 chaptersLoaded: _chaptersLoaded,
+                                                showChapterMarkersOnTimeline: _showChapterMarkersOnTimeline,
                                                 seekTimeSmall: _seekTimeSmall,
                                                 trackChapterControls: _buildTrackChapterControlsWidget(
                                                   hideChaptersAndQueue: hasStripContent,
@@ -2171,12 +738,35 @@ class _PlexVideoControlsState extends State<PlexVideoControls> with WindowListen
                         child: AnimatedOpacity(
                           opacity: _doubleTapFeedbackOpacity,
                           duration: tokens(context).slow,
-                          child: _buildDoubleTapFeedback(),
+                          child: DoubleTapFeedback(
+                            isForward: _lastDoubleTapWasForward,
+                            seconds: _accumulatedSkipSeconds,
+                          ),
                         ),
                       ),
                     ),
                   // Speed indicator overlay for long-press 2x
                   if (_showSpeedIndicator) Positioned.fill(child: IgnorePointer(child: _buildSpeedIndicator())),
+                  // Stream-driven VLC-style pill (rate changes, backend-switch notifications)
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: ListenableBuilder(
+                        listenable: widget.toastController,
+                        builder: (context, _) {
+                          final toast = widget.toastController.current;
+                          if (toast == null) return const SizedBox.shrink();
+                          return AnimatedSwitcher(
+                            duration: const Duration(milliseconds: 150),
+                            child: PlayerToastIndicator(
+                              key: ValueKey('${toast.icon.codePoint}:${toast.text}'),
+                              icon: toast.icon,
+                              text: toast.text,
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                  ),
                   // Skip intro/credits button (auto-dismisses after 7s, then only shows with controls)
                   if (_currentMarker != null && (!_skipButtonDismissed || _showControls))
                     AnimatedPositioned(
@@ -2194,16 +784,18 @@ class _PlexVideoControlsState extends State<PlexVideoControls> with WindowListen
                         child: _buildSkipMarkerButton(),
                       ),
                     ),
-                  // Performance overlay (top-left)
                   if (_showPerformanceOverlay)
                     AnimatedPositioned(
                       duration: const Duration(milliseconds: 200),
                       curve: Curves.easeInOut,
                       top: _showControls && isMobile ? 80.0 : 16.0,
                       left: 16,
-                      child: IgnorePointer(child: PlayerPerformanceOverlay(player: widget.player)),
+                      child: AnimatedOpacity(
+                        opacity: (!_autoHidePerformanceOverlay || _showControls || _forceShowControls) ? 1.0 : 0.0,
+                        duration: const Duration(milliseconds: 200),
+                        child: IgnorePointer(child: PlayerPerformanceOverlay(player: widget.player)),
+                      ),
                     ),
-                  // Screen lock overlay - absorbs all touches when active
                   if (_isScreenLocked)
                     Positioned.fill(
                       child: GestureDetector(
@@ -2230,7 +822,11 @@ class _PlexVideoControlsState extends State<PlexVideoControls> with WindowListen
                                   const SizedBox(width: 8),
                                   Text(
                                     t.videoControls.longPressToUnlock,
-                                    style: const TextStyle(color: Colors.white, fontSize: 14, fontWeight: FontWeight.w500),
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.w500,
+                                    ),
                                   ),
                                 ],
                               ),
@@ -2245,319 +841,6 @@ class _PlexVideoControlsState extends State<PlexVideoControls> with WindowListen
           ),
         );
       },
-    );
-  }
-
-  Widget _buildDesktopControlsListener() {
-    final playbackState = context.watch<PlaybackStateProvider>();
-    final trackControlsState = _buildTrackControlsState(
-      playbackState: playbackState,
-      onToggleAlwaysOnTop: Platform.isMacOS ? null : _toggleAlwaysOnTop,
-    );
-    final useDpad = _videoPlayerNavigationEnabled || PlatformDetector.isTV();
-
-    return Listener(
-      behavior: HitTestBehavior.translucent,
-      onPointerDown: (_) => _restartHideTimerIfPlaying(),
-      child: DesktopVideoControls(
-        key: _desktopControlsKey,
-        player: widget.player,
-        metadata: widget.metadata,
-        onNext: widget.onNext,
-        onPrevious: widget.onPrevious,
-        chapters: _chapters,
-        chaptersLoaded: _chaptersLoaded,
-        seekTimeSmall: _seekTimeSmall,
-        onSeekToPreviousChapter: _seekToPreviousChapter,
-        onSeekToNextChapter: _seekToNextChapter,
-        onSeekBackward: () => unawaited(_seekByTime(forward: false)),
-        onSeekForward: () => unawaited(_seekByTime(forward: true)),
-        onSeek: _throttledSeek,
-        onSeekEnd: _finalizeSeek,
-        getReplayIcon: getReplayIcon,
-        getForwardIcon: getForwardIcon,
-        onFocusActivity: _restartHideTimerIfPlaying,
-        onHideControls: _hideControlsFromKeyboard,
-        trackControlsState: trackControlsState,
-        onBack: widget.onBack,
-        hasFirstFrame: widget.hasFirstFrame,
-        thumbnailDataBuilder: widget.thumbnailDataBuilder,
-        liveChannelName: widget.liveChannelName,
-        captureBuffer: widget.captureBuffer,
-        isAtLiveEdge: widget.isAtLiveEdge,
-        streamStartEpoch: widget.streamStartEpoch,
-        currentPositionEpoch: widget.currentPositionEpoch,
-        onLiveSeek: widget.onLiveSeek,
-        onJumpToLive: widget.onJumpToLive,
-        useDpadNavigation: useDpad,
-        serverId: widget.metadata.serverId,
-        showQueueTab: playbackState.isQueueActive,
-        onQueueItemSelected: playbackState.isQueueActive ? _onQueueItemSelected : null,
-        onCancelAutoHide: () => _hideTimer?.cancel(),
-        onStartAutoHide: _startHideTimer,
-        onSeekCompleted: widget.onSeekCompleted,
-        onContentStripVisibilityChanged: (visible) {
-          setState(() => _isContentStripVisible = visible);
-          if (visible) {
-            _hideTimer?.cancel();
-          } else {
-            _restartHideTimerIfPlaying();
-          }
-        },
-      ),
-    );
-  }
-
-  Widget _buildSkipMarkerButton() {
-    final isCredits = _currentMarker!.isCredits;
-    final hasNextEpisode = widget.onNext != null;
-
-    // Show "Next Episode" only when credits extend to end AND there's a next episode
-    final bool creditsAtEnd = isCredits &&
-        widget.player.state.duration > Duration.zero &&
-        (widget.player.state.duration - _currentMarker!.endTime).inMilliseconds <= 1000;
-    final bool showNextEpisode = creditsAtEnd && hasNextEpisode;
-    String baseButtonText;
-    if (showNextEpisode) {
-      baseButtonText = 'Next Episode';
-    } else if (isCredits) {
-      baseButtonText = 'Skip Credits';
-    } else {
-      baseButtonText = 'Skip Intro';
-    }
-
-    final isAutoSkipActive = _autoSkipTimer?.isActive ?? false;
-    final shouldShowAutoSkip = _shouldShowAutoSkip();
-
-    final int remainingSeconds = isAutoSkipActive && shouldShowAutoSkip
-        ? (_autoSkipDelay - (_autoSkipProgress * _autoSkipDelay)).ceil().clamp(0, _autoSkipDelay)
-        : 0;
-
-    final String buttonText = isAutoSkipActive && shouldShowAutoSkip && remainingSeconds > 0
-        ? '$baseButtonText ($remainingSeconds)'
-        : baseButtonText;
-    final IconData buttonIcon = showNextEpisode ? Symbols.skip_next_rounded : Symbols.fast_forward_rounded;
-
-    return FocusableWrapper(
-      focusNode: _skipMarkerFocusNode,
-      onSelect: () {
-        if (isAutoSkipActive) {
-          _cancelAutoSkipTimer();
-        }
-        _performAutoSkip();
-      },
-      borderRadius: tokens(context).radiusSm,
-      useBackgroundFocus: true,
-      autoScroll: false,
-      onKeyEvent: (node, event) {
-        // DOWN arrow returns focus to play/pause button
-        if (event is KeyDownEvent && event.logicalKey == LogicalKeyboardKey.arrowDown) {
-          _desktopControlsKey.currentState?.requestPlayPauseFocus();
-          return KeyEventResult.handled;
-        }
-        return KeyEventResult.ignored;
-      },
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          onTap: () {
-            if (isAutoSkipActive) {
-              _cancelAutoSkipTimer();
-            }
-            _performAutoSkip();
-          },
-          borderRadius: BorderRadius.circular(tokens(context).radiusSm),
-          child: Stack(
-            children: [
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                decoration: BoxDecoration(
-                  color: Colors.white.withValues(alpha: 0.9),
-                  borderRadius: BorderRadius.circular(tokens(context).radiusSm),
-                  boxShadow: [
-                    BoxShadow(color: Colors.black.withValues(alpha: 0.3), blurRadius: 8, offset: const Offset(0, 2)),
-                  ],
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      buttonText,
-                      style: const TextStyle(color: Colors.black, fontSize: 16, fontWeight: FontWeight.w600),
-                    ),
-                    const SizedBox(width: 8),
-                    AppIcon(buttonIcon, fill: 1, color: Colors.black, size: 20),
-                  ],
-                ),
-              ),
-              // Progress indicator overlay
-              if (isAutoSkipActive && shouldShowAutoSkip)
-                Positioned.fill(
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(tokens(context).radiusSm),
-                    child: Row(
-                      children: [
-                        Expanded(
-                          flex: (_autoSkipProgress * 100).round(),
-                          child: Container(
-                            decoration: BoxDecoration(
-                              color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.2),
-                              borderRadius: BorderRadius.circular(tokens(context).radiusSm),
-                            ),
-                          ),
-                        ),
-                        Expanded(
-                          flex: ((1.0 - _autoSkipProgress) * 100).round(),
-                          child: Container(decoration: const BoxDecoration(color: Colors.transparent)),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  /// Switch to a different media version
-  void _onQueueItemSelected(PlexMetadata item) {
-    final videoPlayerState = context.findAncestorStateOfType<VideoPlayerScreenState>();
-    videoPlayerState?.navigateToQueueItem(item);
-  }
-
-  Future<void> _onSubtitleDownloaded() async {
-    if (!mounted) return;
-    // Wait for the server to finish downloading the subtitle file
-    await Future.delayed(const Duration(seconds: 2));
-    if (!mounted) return;
-
-    try {
-      final client = _getClientForMetadata();
-      final data = await client.getVideoPlaybackData(widget.metadata.ratingKey);
-      if (!mounted || data.mediaInfo == null) return;
-
-      final token = client.config.token;
-      if (token == null) return;
-
-      // Find external subtitle tracks from the refreshed metadata
-      final existingUris = widget.player.state.tracks.subtitle
-          .where((t) => t.uri != null)
-          .map((t) => t.uri!)
-          .toSet();
-
-      for (final plexTrack in data.mediaInfo!.subtitleTracks) {
-        if (!plexTrack.isExternal) continue;
-        final url = plexTrack.getSubtitleUrl(client.config.baseUrl, token);
-        if (url == null) continue;
-        // Skip tracks already loaded in the player
-        if (existingUris.any((uri) => uri.contains(plexTrack.key!))) continue;
-
-        await widget.player.addSubtitleTrack(
-          uri: url,
-          title: plexTrack.displayTitle ?? plexTrack.language ?? 'Downloaded',
-          language: plexTrack.languageCode,
-          select: true,
-        );
-
-        // Save the selection on the server so it persists across sessions
-        final partId = data.mediaInfo!.partId;
-        if (partId != null) {
-          await client.selectStreams(partId, subtitleStreamID: plexTrack.id);
-        }
-      }
-    } catch (e) {
-      appLogger.w('Failed to refresh subtitles after download', error: e);
-    }
-  }
-
-  Future<void> _switchMediaVersion(int newMediaIndex) async {
-    if (newMediaIndex == widget.selectedMediaIndex) {
-      return; // Already using this version
-    }
-
-    try {
-      // Save current playback position
-      final currentPosition = widget.player.state.position;
-
-      // Get state reference before async operations
-      final videoPlayerState = context.findAncestorStateOfType<VideoPlayerScreenState>();
-
-      // Save the preference
-      final settingsService = await SettingsService.getInstance();
-      final seriesKey = widget.metadata.grandparentRatingKey ?? widget.metadata.ratingKey;
-      await settingsService.setMediaVersionPreference(seriesKey, newMediaIndex);
-
-      // Set flag on parent VideoPlayerScreen to skip orientation restoration
-      videoPlayerState?.setReplacingWithVideo();
-      // Dispose the existing player before spinning up the replacement to avoid race conditions
-      await videoPlayerState?.disposePlayerForNavigation();
-
-      // Navigate to new player screen with the selected version
-      // Use PageRouteBuilder with zero-duration transitions to prevent orientation reset
-      if (mounted) {
-        Navigator.pushReplacement(
-          context,
-          PageRouteBuilder<bool>(
-            pageBuilder: (context, animation, secondaryAnimation) => VideoPlayerScreen(
-              metadata: widget.metadata.copyWith(viewOffset: currentPosition.inMilliseconds),
-              selectedMediaIndex: newMediaIndex,
-            ),
-            transitionDuration: Duration.zero,
-            reverseTransitionDuration: Duration.zero,
-          ),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        showErrorSnackBar(context, t.messages.errorLoading(error: e.toString()));
-      }
-    }
-  }
-}
-
-/// A 1x1 pixel widget that continuously repaints to keep Flutter's frame clock active on Linux.
-/// This prevents animations from freezing when GTK's frame clock goes idle.
-class _LinuxKeepAlive extends StatefulWidget {
-  const _LinuxKeepAlive();
-
-  @override
-  State<_LinuxKeepAlive> createState() => _LinuxKeepAliveState();
-}
-
-class _LinuxKeepAliveState extends State<_LinuxKeepAlive> {
-  Timer? _timer;
-  int _tick = 0;
-
-  @override
-  void initState() {
-    super.initState();
-    // Repaint every 100ms to keep Flutter's frame scheduler active
-    _timer = Timer.periodic(const Duration(milliseconds: 100), (_) {
-      if (mounted) {
-        setState(() {
-          _tick++;
-        });
-      }
-    });
-  }
-
-  @override
-  void dispose() {
-    _timer?.cancel();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    // Use _tick to force rebuild, render a 1x1 transparent pixel
-    return SizedBox(
-      width: 1,
-      height: 1,
-      child: ColoredBox(
-        color: Color.fromRGBO(0, 0, 0, _tick % 2 == 0 ? 0.1 : 0.2), // Alternate alpha
-      ),
     );
   }
 }

@@ -11,10 +11,12 @@ import 'media_card.dart';
 /// - Handles SELECT key for activation with long-press detection
 /// - Accepts optional external focusNode for programmatic focus control
 class FocusableMediaCard extends StatefulWidget {
-  final dynamic item; // PlexMetadata or PlexPlaylist
+  /// Either a [MediaItem] or a [MediaPlaylist]. Typed as [Object] because
+  /// Dart has no nominal union type. Forwarded as-is to the inner [MediaCard].
+  final Object item;
   final double? width;
   final double? height;
-  final void Function(String ratingKey)? onRefresh;
+  final void Function(String itemId)? onRefresh;
   final VoidCallback? onRemoveFromContinueWatching;
   final VoidCallback? onListRefresh;
   final bool forceGridMode;
@@ -41,6 +43,11 @@ class FocusableMediaCard extends StatefulWidget {
   /// Called when the user presses UP and there's no focusable item above.
   /// Used to navigate from the top row to filter chips.
   final VoidCallback? onNavigateUp;
+
+  /// Called when the user presses DOWN and there's no focusable item below.
+  /// When the grid wires explicit row navigation, this points at the item in
+  /// the next row (or null on the last row).
+  final VoidCallback? onNavigateDown;
 
   /// Called when the user presses LEFT and there's no focusable item to the left.
   /// Used to navigate from the first column to the sidebar.
@@ -76,6 +83,7 @@ class FocusableMediaCard extends StatefulWidget {
     this.disableScale = false,
     this.focusNode,
     this.onNavigateUp,
+    this.onNavigateDown,
     this.onNavigateLeft,
     this.onNavigateRight,
     this.onBack,
@@ -87,7 +95,6 @@ class FocusableMediaCard extends StatefulWidget {
 }
 
 class _FocusableMediaCardState extends State<FocusableMediaCard> {
-  // Key for accessing MediaCard's state
   final GlobalKey<MediaCardState> _mediaCardKey = GlobalKey();
 
   @override
@@ -97,6 +104,7 @@ class _FocusableMediaCardState extends State<FocusableMediaCard> {
       onSelect: () => _mediaCardKey.currentState?.handleTap(),
       onLongPress: () => _mediaCardKey.currentState?.showContextMenu(),
       onNavigateUp: widget.onNavigateUp,
+      onNavigateDown: widget.onNavigateDown,
       onNavigateLeft: widget.onNavigateLeft,
       onNavigateRight: widget.onNavigateRight,
       onBack: widget.onBack,

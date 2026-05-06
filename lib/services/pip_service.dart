@@ -10,7 +10,6 @@ class PipService {
   /// PiP is only implemented natively on Android, iOS, and macOS.
   static bool get _isAvailable => Platform.isAndroid || Platform.isIOS || Platform.isMacOS;
 
-  // Singleton instance
   static final PipService _instance = PipService._internal();
   factory PipService() => _instance;
 
@@ -46,11 +45,7 @@ class PipService {
   /// Tell the native side whether auto-PiP is ready and the current video dimensions
   static Future<void> setAutoPipReady({required bool ready, int? width, int? height}) async {
     if (!_isAvailable) return;
-    await _channel.invokeMethod('setAutoPipReady', {
-      'ready': ready,
-      'width': width,
-      'height': height,
-    });
+    await _channel.invokeMethod('setAutoPipReady', {'ready': ready, 'width': width, 'height': height});
   }
 
   static Future<void> exit() async {

@@ -10,22 +10,23 @@ import '../../../focus/dpad_navigator.dart';
 import '../../../focus/input_mode_tracker.dart';
 import '../../../focus/key_event_utils.dart';
 import '../../../i18n/strings.g.dart';
+import '../../../mixins/mounted_set_state_mixin.dart';
 import '../../../models/livetv_channel.dart';
 import '../../../models/livetv_program.dart';
 import '../../../providers/multi_server_provider.dart';
-import '../../../services/plex_client.dart';
+import '../../../media/media_server_client.dart';
 import '../../../utils/app_logger.dart';
 import '../../../utils/formatters.dart';
-import '../../../utils/plex_image_helper.dart';
+import '../../../utils/media_image_helper.dart';
 import '../../../utils/live_tv_player_navigation.dart';
 import '../../../widgets/app_icon.dart';
 import '../../../widgets/overlay_sheet.dart';
-import '../../../widgets/plex_optimized_image.dart';
+import '../../../widgets/optimized_media_image.dart';
 import '../program_details_sheet.dart';
 
 class GuideTab extends StatefulWidget {
   final List<LiveTvChannel> channels;
-  final Set<String> favoriteChannelIds;
+  final bool Function(LiveTvChannel channel)? isFavoriteChannel;
   final void Function(LiveTvChannel)? onToggleFavorite;
   final VoidCallback? onNavigateUp;
   final VoidCallback? onBack;
@@ -33,7 +34,7 @@ class GuideTab extends StatefulWidget {
   const GuideTab({
     super.key,
     required this.channels,
-    this.favoriteChannelIds = const {},
+    this.isFavoriteChannel,
     this.onToggleFavorite,
     this.onNavigateUp,
     this.onBack,
@@ -45,7 +46,7 @@ class GuideTab extends StatefulWidget {
 
 enum _GuideZone { timeNav, grid }
 
-class GuideTabState extends State<GuideTab> {
+class GuideTabState extends State<GuideTab> with MountedSetStateMixin {
   static const _slotWidth = 180.0;
   static const _channelColumnWidth = 100.0;
   static const _rowHeight = 64.0;
@@ -74,6 +75,7 @@ class GuideTabState extends State<GuideTab> {
   int _gridChannelIndex = 0;
   int _gridColumn = 0; // 0=channel, 1=program
   bool _hasFocus = false;
+  final ValueNotifier<bool> _hasFocusNotifier = ValueNotifier(false);
   LiveTvProgram? _focusedProgram;
   bool _pendingFocus = false;
 
@@ -111,7 +113,7 @@ class GuideTabState extends State<GuideTab> {
 
     _timeIndicatorTimer = Timer.periodic(const Duration(minutes: 1), (_) {
       // ignore: no-empty-block - setState triggers rebuild to update time indicator
-      if (mounted) setState(() {});
+      setStateIfMounted(() {});
     });
   }
 
@@ -121,7 +123,7 @@ class GuideTabState extends State<GuideTab> {
     _timeIndicatorTimer?.cancel();
     _timeIndicatorTimer = Timer.periodic(const Duration(minutes: 1), (_) {
       // ignore: no-empty-block - setState triggers rebuild to update time indicator
-      if (mounted) setState(() {});
+      setStateIfMounted(() {});
     });
   }
 
@@ -143,7 +145,14 @@ class GuideTabState extends State<GuideTab> {
     _gridHorizontalController.dispose();
     _channelVerticalController.dispose();
     _timeIndicatorTimer?.cancel();
+    _hasFocusNotifier.dispose();
     super.dispose();
+  }
+
+  void _handleGuideFocusChange(bool hasFocus) {
+    if (_hasFocus == hasFocus) return;
+    _hasFocus = hasFocus;
+    _hasFocusNotifier.value = hasFocus;
   }
 
   void _syncGridToHeader() {
@@ -200,13 +209,15 @@ class GuideTabState extends State<GuideTab> {
       for (final serverInfo in liveTvServers) {
         if (!queriedServers.add(serverInfo.serverId)) continue;
         try {
-          final client = multiServer.getClientForServer(serverInfo.serverId);
-          if (client == null) continue;
+          final genericClient = multiServer.getClientForServer(serverInfo.serverId);
+          if (genericClient == null) continue;
 
           final startEpoch = _gridStart.millisecondsSinceEpoch ~/ 1000;
           final endEpoch = _gridEnd.millisecondsSinceEpoch ~/ 1000;
 
-          final programs = await client.getEpgGrid(beginsAt: startEpoch, endsAt: endEpoch);
+          final fromDt = DateTime.fromMillisecondsSinceEpoch(startEpoch * 1000, isUtc: true);
+          final toDt = DateTime.fromMillisecondsSinceEpoch(endEpoch * 1000, isUtc: true);
+          final programs = await genericClient.liveTv.fetchSchedule(from: fromDt, to: toDt);
           allPrograms.addAll(programs);
         } catch (e) {
           appLogger.e('Failed to load programs from server ${serverInfo.serverId}', error: e);
@@ -244,7 +255,7 @@ class GuideTabState extends State<GuideTab> {
       final offset = (minutesSinceStart / _minutesPerSlot) * _slotWidth;
       if (_gridHorizontalController.hasClients) {
         _gridHorizontalController.jumpTo(
-          (offset - MediaQuery.of(context).size.width / 3).clamp(0, _gridHorizontalController.position.maxScrollExtent),
+          (offset - MediaQuery.sizeOf(context).width / 3).clamp(0, _gridHorizontalController.position.maxScrollExtent),
         );
       }
     });
@@ -262,28 +273,8 @@ class GuideTabState extends State<GuideTab> {
 
   Future<void> _tuneChannel(LiveTvChannel channel) async {
     final multiServer = context.read<MultiServerProvider>();
-
-    final serverInfo =
-        multiServer.liveTvServers.where((s) => s.serverId == channel.serverId).firstOrNull ??
-        multiServer.liveTvServers.firstOrNull;
-
-    if (serverInfo == null) return;
-
-    final client = multiServer.getClientForServer(serverInfo.serverId);
-    if (client == null) return;
-
-    await navigateToLiveTv(
-      context,
-      client: client,
-      dvrKey: serverInfo.dvrKey,
-      channel: channel,
-      channels: widget.channels,
-    );
+    await tuneAndNavigateToLiveTv(context, multiServer: multiServer, channel: channel, channels: widget.channels);
   }
-
-  // ---------------------------------------------------------------------------
-  // Focus key handling
-  // ---------------------------------------------------------------------------
 
   KeyEventResult _handleKeyEvent(FocusNode _, KeyEvent event) {
     final key = event.logicalKey;
@@ -429,10 +420,6 @@ class GuideTabState extends State<GuideTab> {
     return KeyEventResult.ignored;
   }
 
-  // ---------------------------------------------------------------------------
-  // Focus helpers
-  // ---------------------------------------------------------------------------
-
   LiveTvProgram? _findCurrentProgram(int channelIndex) {
     if (channelIndex < 0 || channelIndex >= widget.channels.length) return null;
     final channel = widget.channels[channelIndex];
@@ -516,10 +503,6 @@ class GuideTabState extends State<GuideTab> {
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Build
-  // ---------------------------------------------------------------------------
-
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -531,7 +514,7 @@ class GuideTabState extends State<GuideTab> {
     return OverlaySheetHost(
       child: Focus(
         focusNode: _guideFocusNode,
-        onFocusChange: (hasFocus) => setState(() => _hasFocus = hasFocus),
+        onFocusChange: _handleGuideFocusChange,
         onKeyEvent: _handleKeyEvent,
         child: _buildGuideGrid(theme),
       ),
@@ -539,87 +522,92 @@ class GuideTabState extends State<GuideTab> {
   }
 
   Widget _buildGuideGrid(ThemeData theme) {
-    return Column(
-      children: [
-        _buildTimeNavigation(theme),
-        Expanded(
-          child: ListenableBuilder(
-            listenable: _gridHorizontalController,
-            builder: (context, child) {
-              return Stack(children: [child!, _buildNowIndicatorOverlay(theme)]);
-            },
-            child: Column(
-              children: [
-                Row(
+    return ValueListenableBuilder<bool>(
+      valueListenable: _hasFocusNotifier,
+      builder: (context, hasFocus, child) {
+        return Column(
+          children: [
+            _buildTimeNavigation(theme),
+            Expanded(
+              child: ListenableBuilder(
+                listenable: _gridHorizontalController,
+                builder: (context, child) {
+                  return Stack(children: [child!, _buildNowIndicatorOverlay(theme)]);
+                },
+                child: Column(
                   children: [
-                    const SizedBox(width: _channelColumnWidth, height: _timeHeaderHeight),
-                    Expanded(
-                      child: SingleChildScrollView(
-                        controller: _headerHorizontalController,
-                        scrollDirection: Axis.horizontal,
-                        physics: const ClampingScrollPhysics(),
-                        child: SizedBox(
-                          width: _totalGridWidth(),
-                          height: _timeHeaderHeight,
-                          child: _buildTimeHeader(theme),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-                Expanded(
-                  child: Row(
-                    children: [
-                      SizedBox(
-                        width: _channelColumnWidth,
-                        child: ListView.builder(
-                          controller: _channelVerticalController,
-                          physics: const NeverScrollableScrollPhysics(),
-                          itemCount: widget.channels.length,
-                          itemExtent: _rowHeight,
-                          itemBuilder: (context, index) =>
-                              _buildChannelCell(widget.channels[index], theme, index: index),
-                        ),
-                      ),
-                      Expanded(
-                        child: NotificationListener<ScrollNotification>(
-                          onNotification: (notification) {
-                            if (notification is ScrollUpdateNotification &&
-                                notification.metrics.axis == Axis.vertical) {
-                              if (_channelVerticalController.hasClients) {
-                                _channelVerticalController.jumpTo(notification.metrics.pixels);
-                              }
-                            }
-                            return false;
-                          },
+                    Row(
+                      children: [
+                        const SizedBox(width: _channelColumnWidth, height: _timeHeaderHeight),
+                        Expanded(
                           child: SingleChildScrollView(
-                            controller: _gridHorizontalController,
+                            controller: _headerHorizontalController,
                             scrollDirection: Axis.horizontal,
                             physics: const ClampingScrollPhysics(),
                             child: SizedBox(
                               width: _totalGridWidth(),
-                              child: ListView.builder(
-                                controller: _gridVerticalController,
-                                itemCount: widget.channels.length,
-                                itemExtent: _rowHeight,
-                                itemBuilder: (context, index) {
-                                  final channel = widget.channels[index];
-                                  final programs = _getProgramsForChannel(channel);
-                                  return _buildProgramRow(channel, programs, theme, channelIndex: index);
-                                },
-                              ),
+                              height: _timeHeaderHeight,
+                              child: _buildTimeHeader(theme),
                             ),
                           ),
                         ),
+                      ],
+                    ),
+                    Expanded(
+                      child: Row(
+                        children: [
+                          SizedBox(
+                            width: _channelColumnWidth,
+                            child: ListView.builder(
+                              controller: _channelVerticalController,
+                              physics: const NeverScrollableScrollPhysics(),
+                              itemCount: widget.channels.length,
+                              itemExtent: _rowHeight,
+                              itemBuilder: (context, index) =>
+                                  _buildChannelCell(widget.channels[index], theme, index: index),
+                            ),
+                          ),
+                          Expanded(
+                            child: NotificationListener<ScrollNotification>(
+                              onNotification: (notification) {
+                                if (notification is ScrollUpdateNotification &&
+                                    notification.metrics.axis == Axis.vertical) {
+                                  if (_channelVerticalController.hasClients) {
+                                    _channelVerticalController.jumpTo(notification.metrics.pixels);
+                                  }
+                                }
+                                return false;
+                              },
+                              child: SingleChildScrollView(
+                                controller: _gridHorizontalController,
+                                scrollDirection: Axis.horizontal,
+                                physics: const ClampingScrollPhysics(),
+                                child: SizedBox(
+                                  width: _totalGridWidth(),
+                                  child: ListView.builder(
+                                    controller: _gridVerticalController,
+                                    itemCount: widget.channels.length,
+                                    itemExtent: _rowHeight,
+                                    itemBuilder: (context, index) {
+                                      final channel = widget.channels[index];
+                                      final programs = _getProgramsForChannel(channel);
+                                      return _buildProgramRow(channel, programs, theme, channelIndex: index);
+                                    },
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
-                    ],
-                  ),
+                    ),
+                  ],
                 ),
-              ],
+              ),
             ),
-          ),
-        ),
-      ],
+          ],
+        );
+      },
     );
   }
 
@@ -774,10 +762,6 @@ class GuideTabState extends State<GuideTab> {
     });
   }
 
-  // ---------------------------------------------------------------------------
-  // Time navigation bar
-  // ---------------------------------------------------------------------------
-
   Widget _timeNavFocusWrap({required Widget child, required int index, required ThemeData theme}) {
     final isFocused = _hasFocus && _focusZone == _GuideZone.timeNav && _timeNavIndex == index;
     if (!isFocused) return child;
@@ -854,10 +838,6 @@ class GuideTabState extends State<GuideTab> {
     );
   }
 
-  // ---------------------------------------------------------------------------
-  // Time header & now indicator
-  // ---------------------------------------------------------------------------
-
   Widget _buildTimeHeader(ThemeData theme) {
     final is24Hour = MediaQuery.alwaysUse24HourFormatOf(context);
     final slots = <Widget>[];
@@ -886,10 +866,6 @@ class GuideTabState extends State<GuideTab> {
     return Row(children: slots);
   }
 
-  // ---------------------------------------------------------------------------
-  // Channel column
-  // ---------------------------------------------------------------------------
-
   Widget _buildChannelCell(LiveTvChannel channel, ThemeData theme, {required int index}) {
     final multiServer = context.read<MultiServerProvider>();
     final client = multiServer.getClientForServer(channel.serverId ?? '');
@@ -906,7 +882,7 @@ class GuideTabState extends State<GuideTab> {
       onTap: () => _tuneChannel(channel),
       onLongPress: widget.onToggleFavorite != null ? () => widget.onToggleFavorite!(channel) : null,
       isFocused: isFocused,
-      isFavorite: widget.favoriteChannelIds.contains(channel.key),
+      isFavorite: widget.isFavoriteChannel?.call(channel) ?? false,
       fallbackBuilder: () => _buildChannelNameFallback(channel, theme),
     );
   }
@@ -931,10 +907,6 @@ class GuideTabState extends State<GuideTab> {
       ],
     );
   }
-
-  // ---------------------------------------------------------------------------
-  // Program grid
-  // ---------------------------------------------------------------------------
 
   Widget _buildProgramRow(
     LiveTvChannel channel,
@@ -977,11 +949,12 @@ class GuideTabState extends State<GuideTab> {
       final duration = progEnd - progStart;
       final left = (startOffset / (_minutesPerSlot * 60)) * _slotWidth;
       final width = (duration / (_minutesPerSlot * 60)) * _slotWidth;
+      final clampedWidth = width.clamp(2.0, double.infinity);
 
       blocks.add(
         Positioned(
           left: left,
-          width: width.clamp(2.0, double.infinity),
+          width: clampedWidth,
           top: 0,
           bottom: 0,
           child: _buildProgramBlock(
@@ -991,6 +964,8 @@ class GuideTabState extends State<GuideTab> {
             isFirst: progStart == gridStartEpoch,
             isLast: program == programs.last && progEnd != gridEndEpoch,
             isFocused: identical(program, focusProg),
+            tileLeft: left,
+            tileWidth: clampedWidth,
           ),
         ),
       );
@@ -1012,6 +987,8 @@ class GuideTabState extends State<GuideTab> {
     bool isFirst = false,
     bool isLast = false,
     bool isFocused = false,
+    double tileLeft = 0,
+    double tileWidth = 0,
   }) {
     final isCurrentlyAiring = program.isCurrentlyAiring;
     final isPast = program.endsAt != null && program.endsAt! < DateTime.now().millisecondsSinceEpoch ~/ 1000;
@@ -1060,37 +1037,44 @@ class GuideTabState extends State<GuideTab> {
                 right: isLast ? BorderSide(color: theme.dividerColor.withValues(alpha: 0.3)) : BorderSide.none,
               ),
             ),
-            child: Container(
-              color: isFocused ? null : materialColor,
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Text(
-                    program.grandparentTitle ?? program.title,
-                    style: theme.textTheme.bodyMedium?.copyWith(
-                      fontWeight: FontWeight.w600,
-                      color: titleColor,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+            child: ListenableBuilder(
+              listenable: _gridHorizontalController,
+              builder: (context, _) {
+                const basePadding = 6.0;
+                final scrollOffset = _gridHorizontalController.hasClients ? _gridHorizontalController.offset : 0.0;
+                final maxInset = (tileWidth - 2 * basePadding - 20).clamp(0.0, double.infinity);
+                final leftInset = (scrollOffset - tileLeft).clamp(0.0, maxInset);
+                return Container(
+                  color: isFocused ? null : materialColor,
+                  padding: EdgeInsets.fromLTRB(basePadding + leftInset, 4, basePadding, 4),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Text(
+                        program.grandparentTitle ?? program.title,
+                        style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600, color: titleColor),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      if (program.grandparentTitle != null)
+                        Text(
+                          '${program.parentIndex != null && program.index != null ? 'S${program.parentIndex}E${program.index} · ' : ''}${program.title}',
+                          style: theme.textTheme.labelSmall?.copyWith(color: subtitleColor),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      if (program.startTime != null)
+                        Text(
+                          '${formatClockTime(program.startTime!, is24Hour: MediaQuery.alwaysUse24HourFormatOf(context))} · ${formatDurationTextual(program.durationMinutes * 60000)}',
+                          style: theme.textTheme.labelSmall?.copyWith(color: subtitleColor),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                    ],
                   ),
-                  if (program.grandparentTitle != null)
-                    Text(
-                      '${program.parentIndex != null && program.index != null ? 'S${program.parentIndex}E${program.index} · ' : ''}${program.title}',
-                      style: theme.textTheme.labelSmall?.copyWith(color: subtitleColor),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  if (program.startTime != null)
-                    Text(
-                      '${formatClockTime(program.startTime!, is24Hour: MediaQuery.alwaysUse24HourFormatOf(context))} · ${formatDurationTextual(program.durationMinutes * 60000)}',
-                      style: theme.textTheme.labelSmall?.copyWith(color: subtitleColor),
-                      maxLines: 1,
-                    ),
-                ],
-              ),
+                );
+              },
             ),
           ),
         ),
@@ -1103,12 +1087,12 @@ class GuideTabState extends State<GuideTab> {
     final client = multiServer.getClientForServer(channel.serverId ?? '');
     String? posterUrl;
     if (program.thumb != null && client != null) {
-      posterUrl = PlexImageHelper.getOptimizedImageUrl(
+      posterUrl = MediaImageHelper.getOptimizedImageUrl(
         client: client,
         thumbPath: program.thumb,
         maxWidth: 80,
         maxHeight: 120,
-        devicePixelRatio: PlexImageHelper.effectiveDevicePixelRatio(context),
+        devicePixelRatio: MediaImageHelper.effectiveDevicePixelRatio(context),
         imageType: ImageType.poster,
       );
     }
@@ -1119,6 +1103,7 @@ class GuideTabState extends State<GuideTab> {
       channel: channel,
       posterUrl: posterUrl,
       onTuneChannel: () => _tuneChannel(channel),
+      client: client,
     );
   }
 }
@@ -1127,7 +1112,7 @@ class _ChannelCell extends StatefulWidget {
   final double rowHeight;
   final double channelColumnWidth;
   final String? channelThumb;
-  final PlexClient? client;
+  final MediaServerClient? client;
   final LiveTvChannel channel;
   final ThemeData theme;
   final VoidCallback onTap;
@@ -1174,42 +1159,42 @@ class _ChannelCellState extends State<_ChannelCell> {
             onTap: widget.onTap,
             onLongPress: widget.onLongPress,
             child: Container(
-            height: widget.rowHeight,
-            padding: const EdgeInsets.symmetric(horizontal: 8),
-            decoration: BoxDecoration(
-              border: Border(
-                bottom: BorderSide(color: theme.dividerColor.withValues(alpha: 0.3)),
-                right: BorderSide(color: theme.dividerColor.withValues(alpha: 0.3)),
-              ),
-            ),
-            child: Stack(
-              alignment: Alignment.center,
-              children: [
-                AnimatedOpacity(
-                  opacity: showAction ? 0.3 : 1.0,
-                  duration: const Duration(milliseconds: 150),
-                  child: widget.channelThumb != null && widget.client != null
-                      ? PlexOptimizedImage.thumb(
-                          client: widget.client!,
-                          imagePath: widget.channelThumb,
-                          width: widget.channelColumnWidth - 16,
-                          height: widget.rowHeight - 16,
-                          fit: BoxFit.contain,
-                        )
-                      : widget.fallbackBuilder(),
+              height: widget.rowHeight,
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              decoration: BoxDecoration(
+                border: Border(
+                  bottom: BorderSide(color: theme.dividerColor.withValues(alpha: 0.3)),
+                  right: BorderSide(color: theme.dividerColor.withValues(alpha: 0.3)),
                 ),
-                if (showAction) AppIcon(Symbols.play_arrow_rounded, size: 32, color: theme.colorScheme.onSurface),
-                if (widget.isFavorite)
-                  Positioned(
-                    top: 2,
-                    right: 0,
-                    child: AppIcon(Symbols.star_rounded, size: 14, color: theme.colorScheme.primary),
+              ),
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  AnimatedOpacity(
+                    opacity: showAction ? 0.3 : 1.0,
+                    duration: const Duration(milliseconds: 150),
+                    child: widget.channelThumb != null && widget.client != null
+                        ? OptimizedMediaImage.thumb(
+                            client: widget.client!,
+                            imagePath: widget.channelThumb,
+                            width: widget.channelColumnWidth - 16,
+                            height: widget.rowHeight - 16,
+                            fit: BoxFit.contain,
+                          )
+                        : widget.fallbackBuilder(),
                   ),
-              ],
+                  if (showAction) AppIcon(Symbols.play_arrow_rounded, size: 32, color: theme.colorScheme.onSurface),
+                  if (widget.isFavorite)
+                    Positioned(
+                      top: 2,
+                      right: 0,
+                      child: AppIcon(Symbols.star_rounded, size: 14, color: theme.colorScheme.primary),
+                    ),
+                ],
+              ),
             ),
           ),
         ),
-      ),
       ),
     );
   }

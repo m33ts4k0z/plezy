@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
@@ -6,10 +7,11 @@ import 'package:material_symbols_icons/symbols.dart';
 import 'package:flutter/services.dart';
 
 import '../../focus/dpad_navigator.dart';
+import '../../media/media_item.dart';
 import '../../mpv/mpv.dart';
-import '../../models/plex_media_info.dart';
-import '../../models/plex_metadata.dart';
+import '../../media/media_source_info.dart';
 import '../../services/fullscreen_state_manager.dart';
+import '../../services/scrub_preview_source.dart';
 import '../../utils/desktop_window_padding.dart';
 import '../../utils/platform_detector.dart';
 import '../../utils/formatters.dart';
@@ -29,11 +31,12 @@ import 'widgets/track_chapter_controls.dart';
 /// Desktop-specific video controls layout with top bar and bottom controls
 class DesktopVideoControls extends StatefulWidget {
   final Player player;
-  final PlexMetadata metadata;
+  final MediaItem metadata;
   final VoidCallback? onNext;
   final VoidCallback? onPrevious;
-  final List<PlexChapter> chapters;
+  final List<MediaChapter> chapters;
   final bool chaptersLoaded;
+  final bool showChapterMarkersOnTimeline;
   final int seekTimeSmall;
   final VoidCallback onSeekToPreviousChapter;
   final VoidCallback onSeekToNextChapter;
@@ -60,7 +63,7 @@ class DesktopVideoControls extends StatefulWidget {
   final ValueNotifier<bool>? hasFirstFrame;
 
   /// Optional callback that returns thumbnail image bytes for a given timestamp.
-  final Uint8List? Function(Duration time)? thumbnailDataBuilder;
+  final ScrubFrame? Function(Duration time)? thumbnailDataBuilder;
 
   /// Channel name for live TV display
   final String? liveChannelName;
@@ -83,7 +86,7 @@ class DesktopVideoControls extends StatefulWidget {
   final bool showQueueTab;
 
   /// Called when a queue item is selected in the content strip
-  final Function(PlexMetadata)? onQueueItemSelected;
+  final Function(MediaItem)? onQueueItemSelected;
 
   /// Called to cancel auto-hide timer (e.g., when content strip is shown)
   final VoidCallback? onCancelAutoHide;
@@ -105,6 +108,7 @@ class DesktopVideoControls extends StatefulWidget {
     this.onPrevious,
     required this.chapters,
     required this.chaptersLoaded,
+    this.showChapterMarkersOnTimeline = true,
     required this.seekTimeSmall,
     required this.onSeekToPreviousChapter,
     required this.onSeekToNextChapter,
@@ -171,6 +175,11 @@ class DesktopVideoControlsState extends State<DesktopVideoControls> {
   LogicalKeyboardKey? _seekDirection; // Current direction being held
   int _seekRepeatCount = 0; // Consecutive key repeats for acceleration
 
+  // Preview thumbnail during sustained dpad/keyboard seeking
+  bool _showKeyRepeatThumbnail = false;
+  Timer? _keyRepeatThumbnailTimer;
+  static const _keyRepeatThumbnailTimeout = Duration(milliseconds: 400);
+
   // Content strip state
   bool _contentStripVisible = false;
   final GlobalKey<ContentStripState> _contentStripKey = GlobalKey<ContentStripState>();
@@ -214,6 +223,7 @@ class DesktopVideoControlsState extends State<DesktopVideoControls> {
 
   @override
   void dispose() {
+    _keyRepeatThumbnailTimer?.cancel();
     _prevItemFocusNode.dispose();
     _prevChapterFocusNode.dispose();
     _skipBackFocusNode.dispose();
@@ -429,6 +439,24 @@ class DesktopVideoControlsState extends State<DesktopVideoControls> {
   void _resetSeekState() {
     _seekDirection = null;
     _seekRepeatCount = 0;
+    _keyRepeatThumbnailTimer?.cancel();
+    _keyRepeatThumbnailTimer = null;
+    if (_showKeyRepeatThumbnail) {
+      setState(() => _showKeyRepeatThumbnail = false);
+    }
+  }
+
+  /// Show the timeline preview thumbnail during sustained key-repeat seeking.
+  /// Arms a short timer that hides the thumbnail once repeats stop.
+  void _triggerKeyRepeatThumbnail() {
+    if (!_showKeyRepeatThumbnail) {
+      setState(() => _showKeyRepeatThumbnail = true);
+    }
+    _keyRepeatThumbnailTimer?.cancel();
+    _keyRepeatThumbnailTimer = Timer(_keyRepeatThumbnailTimeout, () {
+      if (!mounted) return;
+      setState(() => _showKeyRepeatThumbnail = false);
+    });
   }
 
   /// Calculate seek multiplier based on repeat count (stepped tiers)
@@ -490,6 +518,7 @@ class DesktopVideoControlsState extends State<DesktopVideoControls> {
       }
       if (event is KeyRepeatEvent) {
         _seekRepeatCount++;
+        _triggerKeyRepeatThumbnail();
       }
 
       final isForward = key == LogicalKeyboardKey.arrowRight;
@@ -497,7 +526,7 @@ class DesktopVideoControlsState extends State<DesktopVideoControls> {
 
       // Live TV: epoch-based seeking via onLiveSeek
       if (_isLive && widget.onLiveSeek != null && widget.currentPositionEpoch != null) {
-        final stepSeconds = (10.0 * effectiveMultiplier).clamp(1, 300).round();
+        final stepSeconds = (widget.seekTimeSmall * effectiveMultiplier).clamp(1, 300).round();
         final targetEpoch = widget.currentPositionEpoch! + (isForward ? stepSeconds : -stepSeconds);
         widget.onLiveSeek!(targetEpoch);
         widget.onFocusActivity?.call();
@@ -506,9 +535,8 @@ class DesktopVideoControlsState extends State<DesktopVideoControls> {
 
       if (duration.inMilliseconds <= 0) return KeyEventResult.handled;
 
-      // Base step: 0.5% of duration, minimum 500ms, maximum 15s
-      final baseStepMs = (duration.inMilliseconds * 0.005).clamp(500, 15000).toInt();
-      final stepMs = (baseStepMs * effectiveMultiplier).clamp(500, 60000).toInt();
+      final baseStepMs = widget.seekTimeSmall * 1000;
+      final stepMs = (baseStepMs * effectiveMultiplier).clamp(500, 120000).toInt();
       final step = Duration(milliseconds: stepMs);
 
       final newPosition = isForward ? position + step : position - step;
@@ -673,6 +701,7 @@ class DesktopVideoControlsState extends State<DesktopVideoControls> {
               player: widget.player,
               chapters: widget.chapters,
               chaptersLoaded: widget.chaptersLoaded,
+              showChapterMarkersOnTimeline: widget.showChapterMarkersOnTimeline,
               onSeek: widget.onSeek,
               onSeekEnd: widget.onSeekEnd,
               horizontalLayout: true,
@@ -681,6 +710,7 @@ class DesktopVideoControlsState extends State<DesktopVideoControls> {
               onFocusChange: _onFocusChange,
               enabled: canInteract,
               thumbnailDataBuilder: widget.thumbnailDataBuilder,
+              showKeyRepeatThumbnail: _showKeyRepeatThumbnail,
             ),
           ],
           // Row 2: Playback controls and options

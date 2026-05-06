@@ -4,23 +4,21 @@ import 'package:material_symbols_icons/symbols.dart';
 import '../focus/focusable_button.dart';
 import '../focus/focusable_wrapper.dart';
 import '../i18n/strings.g.dart';
+import '../services/file_picker_service.dart';
 import '../services/plex_client.dart';
+import '../utils/app_logger.dart';
 import '../utils/dialogs.dart';
 import '../utils/snackbar_helper.dart';
 import '../widgets/app_icon.dart';
-import '../widgets/plex_optimized_image.dart';
+import '../widgets/optimized_media_image.dart';
+import 'loading_indicator_box.dart';
 
 class ArtworkPickerDialog extends StatefulWidget {
   final PlexClient client;
   final String ratingKey;
   final String element; // "posters" or "arts"
 
-  const ArtworkPickerDialog({
-    super.key,
-    required this.client,
-    required this.ratingKey,
-    required this.element,
-  });
+  const ArtworkPickerDialog({super.key, required this.client, required this.ratingKey, required this.element});
 
   @override
   State<ArtworkPickerDialog> createState() => _ArtworkPickerDialogState();
@@ -31,7 +29,15 @@ class _ArtworkPickerDialogState extends State<ArtworkPickerDialog> {
   bool _isLoading = true;
   bool _isApplying = false;
 
-  bool get _isPosters => widget.element == 'posters';
+  ({int crossAxisCount, double aspectRatio, String title}) get _elementConfig {
+    return switch (widget.element) {
+      'posters' => (crossAxisCount: 3, aspectRatio: 2.0 / 3.0, title: t.metadataEdit.selectPoster),
+      'arts' => (crossAxisCount: 2, aspectRatio: 16.0 / 9.0, title: t.metadataEdit.selectBackground),
+      'clearLogos' => (crossAxisCount: 2, aspectRatio: 2.5 / 1.0, title: t.metadataEdit.selectLogo),
+      'squareArts' => (crossAxisCount: 3, aspectRatio: 1.0, title: t.metadataEdit.selectSquareArt),
+      _ => (crossAxisCount: 3, aspectRatio: 2.0 / 3.0, title: t.metadataEdit.selectPoster),
+    };
+  }
 
   @override
   void initState() {
@@ -55,20 +61,7 @@ class _ArtworkPickerDialogState extends State<ArtworkPickerDialog> {
     // silently ignore the selection despite returning 200.
     final url = artwork['ratingKey'] as String? ?? artwork['key'] as String?;
     if (url == null || _isApplying) return;
-
-    setState(() => _isApplying = true);
-
-    final success = await widget.client.setArtworkFromUrl(widget.ratingKey, widget.element, url);
-
-    if (!mounted) return;
-    setState(() => _isApplying = false);
-
-    if (success) {
-      showSuccessSnackBar(context, t.metadataEdit.artworkUpdated);
-      Navigator.pop(context, true);
-    } else {
-      showErrorSnackBar(context, t.metadataEdit.artworkUpdateFailed);
-    }
+    await _runArtworkUpdate(() => widget.client.setArtworkFromUrl(widget.ratingKey, widget.element, url));
   }
 
   Future<void> _addFromUrl() async {
@@ -80,40 +73,34 @@ class _ArtworkPickerDialogState extends State<ArtworkPickerDialog> {
     );
 
     if (url == null || url.isEmpty || !mounted) return;
-
-    setState(() => _isApplying = true);
-
-    final success = await widget.client.setArtworkFromUrl(widget.ratingKey, widget.element, url);
-
-    if (!mounted) return;
-    setState(() => _isApplying = false);
-
-    if (success) {
-      showSuccessSnackBar(context, t.metadataEdit.artworkUpdated);
-      Navigator.pop(context, true);
-    } else {
-      showErrorSnackBar(context, t.metadataEdit.artworkUpdateFailed);
-    }
+    await _runArtworkUpdate(() => widget.client.setArtworkFromUrl(widget.ratingKey, widget.element, url));
   }
 
   Future<void> _uploadFile() async {
-    final result = await FilePicker.platform.pickFiles(
-      type: FileType.image,
-      withData: true,
-    );
+    final result = await FilePickerService.instance.pickFiles(type: FileType.image, withData: true);
 
     if (result == null || result.files.isEmpty || !mounted) return;
 
     final bytes = result.files.first.bytes;
     if (bytes == null) return;
+    await _runArtworkUpdate(() => widget.client.uploadArtwork(widget.ratingKey, widget.element, bytes));
+  }
 
+  /// Runs an artwork update API call with shared loading-state and
+  /// error-handling. The underlying client throws on HTTP errors (see
+  /// [PlexClient] `_wrapBoolApiCall`), so we must catch here or `_isApplying`
+  /// gets stuck `true` and the user sees an infinite spinner.
+  Future<void> _runArtworkUpdate(Future<bool> Function() action) async {
+    if (_isApplying) return;
     setState(() => _isApplying = true);
-
-    final success = await widget.client.uploadArtwork(widget.ratingKey, widget.element, bytes);
-
+    bool success = false;
+    try {
+      success = await action();
+    } catch (e, st) {
+      appLogger.e('Artwork update failed', error: e, stackTrace: st);
+    }
     if (!mounted) return;
     setState(() => _isApplying = false);
-
     if (success) {
       showSuccessSnackBar(context, t.metadataEdit.artworkUpdated);
       Navigator.pop(context, true);
@@ -124,23 +111,15 @@ class _ArtworkPickerDialogState extends State<ArtworkPickerDialog> {
 
   @override
   Widget build(BuildContext context) {
-    final title = _isPosters ? t.metadataEdit.selectPoster : t.metadataEdit.selectBackground;
-
     return AlertDialog(
-      title: Text(title),
+      title: Text(_elementConfig.title),
       content: SizedBox(
         width: 500,
         height: 400,
-        child: _isLoading
-            ? const Center(child: CircularProgressIndicator())
-            : _buildArtworkContent(),
+        child: _isLoading ? const Center(child: CircularProgressIndicator()) : _buildArtworkContent(),
       ),
       actions: [
-        if (_isApplying)
-          const Padding(
-            padding: EdgeInsets.all(8),
-            child: SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2)),
-          ),
+        if (_isApplying) const Padding(padding: EdgeInsets.all(8), child: LoadingIndicatorBox(size: 24)),
         FocusableButton(
           onPressed: _addFromUrl,
           child: TextButton.icon(
@@ -160,10 +139,7 @@ class _ArtworkPickerDialogState extends State<ArtworkPickerDialog> {
         FocusableButton(
           autofocus: true,
           onPressed: () => Navigator.pop(context),
-          child: TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: Text(t.common.cancel),
-          ),
+          child: TextButton(onPressed: () => Navigator.pop(context), child: Text(t.common.cancel)),
         ),
       ],
     );
@@ -177,15 +153,14 @@ class _ArtworkPickerDialogState extends State<ArtworkPickerDialog> {
   }
 
   Widget _buildGrid() {
-    final crossAxisCount = _isPosters ? 3 : 2;
-    final aspectRatio = _isPosters ? 2.0 / 3.0 : 16.0 / 9.0;
+    final config = _elementConfig;
 
     return GridView.builder(
       gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: crossAxisCount,
+        crossAxisCount: config.crossAxisCount,
         crossAxisSpacing: 8,
         mainAxisSpacing: 8,
-        childAspectRatio: aspectRatio,
+        childAspectRatio: config.aspectRatio,
       ),
       itemCount: _artworkList!.length,
       itemBuilder: (context, index) {
@@ -208,11 +183,7 @@ class _ArtworkPickerDialogState extends State<ArtworkPickerDialog> {
                   ),
                   child: ClipRRect(
                     borderRadius: const BorderRadius.all(Radius.circular(8)),
-                    child: PlexOptimizedImage(
-                      client: widget.client,
-                      imagePath: thumbUrl,
-                      fit: BoxFit.contain,
-                    ),
+                    child: OptimizedMediaImage(client: widget.client, imagePath: thumbUrl, fit: BoxFit.contain),
                   ),
                 ),
                 if (isSelected)
@@ -221,10 +192,7 @@ class _ArtworkPickerDialogState extends State<ArtworkPickerDialog> {
                     bottom: 6,
                     child: Container(
                       padding: const EdgeInsets.all(4),
-                      decoration: BoxDecoration(
-                        color: Theme.of(context).colorScheme.primary,
-                        shape: BoxShape.circle,
-                      ),
+                      decoration: BoxDecoration(color: Theme.of(context).colorScheme.primary, shape: BoxShape.circle),
                       child: Icon(Symbols.check_rounded, size: 16, color: Theme.of(context).colorScheme.onPrimary),
                     ),
                   ),

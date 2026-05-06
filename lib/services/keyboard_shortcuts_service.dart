@@ -1,17 +1,20 @@
 import 'dart:async' show unawaited;
 import 'dart:io';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../models/hotkey_model.dart';
 import '../i18n/strings.g.dart';
 import '../mpv/mpv.dart';
 import 'settings_service.dart';
+import '../utils/platform_detector.dart';
 import '../utils/player_utils.dart';
 
-class KeyboardShortcutsService {
+class KeyboardShortcutsService extends ChangeNotifier {
   static KeyboardShortcutsService? _instance;
   late SettingsService _settingsService;
+  final List<VoidCallback> _settingsDisposers = [];
   Map<String, String> _shortcuts = {}; // Legacy string shortcuts for backward compatibility
   Map<String, HotKey> _hotkeys = {}; // New HotKey objects
   int _seekTimeSmall = 10; // Default, loaded from settings
@@ -30,18 +33,62 @@ class KeyboardShortcutsService {
 
   /// Keyboard shortcut customization is only supported on desktop platforms.
   static bool isPlatformSupported() {
-    return Platform.isWindows || Platform.isLinux || Platform.isMacOS;
+    return PlatformDetector.isDesktopOS();
   }
 
   Future<void> _init() async {
     _settingsService = await SettingsService.getInstance();
-    // Ensure settings service is fully initialized before loading data
-    await Future.delayed(Duration.zero); // Allow event loop to complete
-    _shortcuts = _settingsService.getKeyboardShortcuts(); // Keep for legacy compatibility
-    _hotkeys = await _settingsService.getKeyboardHotkeys(); // Primary method
-    _seekTimeSmall = _settingsService.getSeekTimeSmall();
-    _seekTimeLarge = _settingsService.getSeekTimeLarge();
-    _maxVolume = _settingsService.getMaxVolume();
+    _bindSettings();
+    _syncFromSettings(notify: false);
+  }
+
+  void _bindSettings() {
+    if (_settingsDisposers.isNotEmpty) return;
+    void bind<T>(Pref<T> pref) {
+      final notifier = _settingsService.listenable(pref);
+      notifier.addListener(_onSettingsChanged);
+      _settingsDisposers.add(() => notifier.removeListener(_onSettingsChanged));
+    }
+
+    bind(SettingsService.keyboardShortcuts);
+    bind(SettingsService.keyboardHotkeys);
+    bind(SettingsService.seekTimeSmall);
+    bind(SettingsService.seekTimeLarge);
+    bind(SettingsService.maxVolume);
+  }
+
+  void _onSettingsChanged() => _syncFromSettings();
+
+  void _syncFromSettings({bool notify = true}) {
+    final shortcuts = _settingsService.read(SettingsService.keyboardShortcuts);
+    final hotkeys = _settingsService.read(SettingsService.keyboardHotkeys);
+    final seekTimeSmall = _settingsService.read(SettingsService.seekTimeSmall);
+    final seekTimeLarge = _settingsService.read(SettingsService.seekTimeLarge);
+    final maxVolume = _settingsService.read(SettingsService.maxVolume);
+
+    final changed =
+        !mapEquals(_shortcuts, shortcuts) ||
+        !_hotkeyMapsEqual(_hotkeys, hotkeys) ||
+        _seekTimeSmall != seekTimeSmall ||
+        _seekTimeLarge != seekTimeLarge ||
+        _maxVolume != maxVolume;
+
+    _shortcuts = Map<String, String>.from(shortcuts);
+    _hotkeys = Map<String, HotKey>.from(hotkeys);
+    _seekTimeSmall = seekTimeSmall;
+    _seekTimeLarge = seekTimeLarge;
+    _maxVolume = maxVolume;
+
+    if (notify && changed) notifyListeners();
+  }
+
+  bool _hotkeyMapsEqual(Map<String, HotKey> a, Map<String, HotKey> b) {
+    if (a.length != b.length) return false;
+    for (final entry in a.entries) {
+      final other = b[entry.key];
+      if (other == null || !_hotkeyEquals(entry.value, other)) return false;
+    }
+    return true;
   }
 
   Map<String, String> get shortcuts => Map.from(_shortcuts);
@@ -57,39 +104,34 @@ class KeyboardShortcutsService {
   }
 
   Future<void> setShortcut(String action, String key) async {
-    _shortcuts[action] = key;
-    await _settingsService.setKeyboardShortcuts(_shortcuts);
+    await _settingsService.write(SettingsService.keyboardShortcuts, {..._shortcuts, action: key});
   }
 
   Future<void> setHotkey(String action, HotKey hotkey) async {
-    // Update local cache first
-    _hotkeys[action] = hotkey;
-
-    // Save to persistent storage
-    await _settingsService.setKeyboardHotkey(action, hotkey);
-
-    // Verify local cache is still correct
-    if (_hotkeys[action] != hotkey) {
-      _hotkeys[action] = hotkey; // Restore correct value
-    }
+    await _settingsService.write(SettingsService.keyboardHotkeys, {..._hotkeys, action: hotkey});
   }
 
   Future<void> refreshFromStorage() async {
-    _hotkeys = await _settingsService.getKeyboardHotkeys();
-    _seekTimeSmall = _settingsService.getSeekTimeSmall();
-    _seekTimeLarge = _settingsService.getSeekTimeLarge();
+    _syncFromSettings();
   }
 
   Future<void> resetToDefaults() async {
-    _shortcuts = _settingsService.getDefaultKeyboardShortcuts();
-    _hotkeys = _settingsService.getDefaultKeyboardHotkeys();
-    await _settingsService.setKeyboardShortcuts(_shortcuts);
-    await _settingsService.setKeyboardHotkeys(_hotkeys);
-    // Refresh cache to ensure consistency
-    await refreshFromStorage();
+    final shortcuts = SettingsService.defaultKeyboardShortcuts();
+    final hotkeys = SettingsService.defaultKeyboardHotkeys();
+    await _settingsService.write(SettingsService.keyboardShortcuts, shortcuts);
+    await _settingsService.write(SettingsService.keyboardHotkeys, hotkeys);
   }
 
-  // Format HotKey for display
+  @override
+  void dispose() {
+    for (final dispose in _settingsDisposers) {
+      dispose();
+    }
+    _settingsDisposers.clear();
+    if (identical(_instance, this)) _instance = null;
+    super.dispose();
+  }
+
   String formatHotkey(HotKey? hotKey) {
     if (hotKey == null) return 'No shortcut set';
 
@@ -126,7 +168,6 @@ class KeyboardShortcutsService {
     return modifiers.isEmpty ? keyName : '${modifiers.join(' + ')} + $keyName';
   }
 
-  // Handle keyboard input for video player
   KeyEventResult handleVideoPlayerKeyEvent(
     KeyEvent event,
     Player player,
@@ -139,10 +180,13 @@ class KeyboardShortcutsService {
     VoidCallback? onBack,
     VoidCallback? onToggleShader,
     VoidCallback? onSkipMarker,
+    VoidCallback? onNextEpisode,
+    VoidCallback? onPreviousEpisode,
+    int? currentPositionEpoch,
+    ValueChanged<int>? onLiveSeek,
   }) {
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
 
-    // Handle back navigation keys (Escape)
     if (event.logicalKey == LogicalKeyboardKey.escape) {
       onBack?.call();
       return KeyEventResult.handled;
@@ -154,19 +198,15 @@ class KeyboardShortcutsService {
     final isAltPressed = HardwareKeyboard.instance.isAltPressed;
     final isMetaPressed = HardwareKeyboard.instance.isMetaPressed;
 
-    // Check each hotkey
     for (final entry in _hotkeys.entries) {
       final action = entry.key;
       final hotkey = entry.value;
 
-      // Check if the physical key matches
       if (physicalKey != hotkey.key) continue;
 
-      // Check if modifiers match
       final requiredModifiers = hotkey.modifiers ?? [];
       bool modifiersMatch = true;
 
-      // Check each required modifier
       for (final modifier in requiredModifiers) {
         switch (modifier) {
           case HotKeyModifier.shift:
@@ -216,6 +256,10 @@ class KeyboardShortcutsService {
           onPreviousChapter,
           onToggleShader: onToggleShader,
           onSkipMarker: onSkipMarker,
+          onNextEpisode: onNextEpisode,
+          onPreviousEpisode: onPreviousEpisode,
+          currentPositionEpoch: currentPositionEpoch,
+          onLiveSeek: onLiveSeek,
         );
         return KeyEventResult.handled;
       }
@@ -235,7 +279,20 @@ class KeyboardShortcutsService {
     VoidCallback? onPreviousChapter, {
     VoidCallback? onToggleShader,
     VoidCallback? onSkipMarker,
+    VoidCallback? onNextEpisode,
+    VoidCallback? onPreviousEpisode,
+    int? currentPositionEpoch,
+    ValueChanged<int>? onLiveSeek,
   }) {
+    void performSeek(int offsetSeconds) {
+      if (onLiveSeek != null && currentPositionEpoch != null) {
+        onLiveSeek(currentPositionEpoch + offsetSeconds);
+      } else {
+        final target = clampSeekPosition(player, player.state.position + Duration(seconds: offsetSeconds));
+        unawaited(player.seek(target));
+      }
+    }
+
     switch (action) {
       case 'play_pause':
         player.playOrPause();
@@ -243,28 +300,24 @@ class KeyboardShortcutsService {
       case 'volume_up':
         final newVolume = (player.state.volume + 10).clamp(0.0, _maxVolume.toDouble());
         player.setVolume(newVolume);
-        _settingsService.setVolume(newVolume);
+        _settingsService.write(SettingsService.volume, newVolume);
         break;
       case 'volume_down':
         final newVolume = (player.state.volume - 10).clamp(0.0, _maxVolume.toDouble());
         player.setVolume(newVolume);
-        _settingsService.setVolume(newVolume);
+        _settingsService.write(SettingsService.volume, newVolume);
         break;
       case 'seek_forward':
-        final fwdTarget = clampSeekPosition(player, player.state.position + Duration(seconds: _seekTimeSmall));
-        unawaited(player.seek(fwdTarget));
+        performSeek(_seekTimeSmall);
         break;
       case 'seek_backward':
-        final bwdTarget = clampSeekPosition(player, player.state.position - Duration(seconds: _seekTimeSmall));
-        unawaited(player.seek(bwdTarget));
+        performSeek(-_seekTimeSmall);
         break;
       case 'seek_forward_large':
-        final fwdLTarget = clampSeekPosition(player, player.state.position + Duration(seconds: _seekTimeLarge));
-        unawaited(player.seek(fwdLTarget));
+        performSeek(_seekTimeLarge);
         break;
       case 'seek_backward_large':
-        final bwdLTarget = clampSeekPosition(player, player.state.position - Duration(seconds: _seekTimeLarge));
-        unawaited(player.seek(bwdLTarget));
+        performSeek(-_seekTimeLarge);
         break;
       case 'fullscreen_toggle':
         onToggleFullscreen?.call();
@@ -272,7 +325,7 @@ class KeyboardShortcutsService {
       case 'mute_toggle':
         final newVolume = player.state.volume > 0 ? 0.0 : 100.0;
         player.setVolume(newVolume);
-        _settingsService.setVolume(newVolume);
+        _settingsService.write(SettingsService.volume, newVolume);
         break;
       case 'subtitle_toggle':
         onToggleSubtitles?.call();
@@ -289,19 +342,25 @@ class KeyboardShortcutsService {
       case 'chapter_previous':
         onPreviousChapter?.call();
         break;
+      case 'episode_next':
+        onNextEpisode?.call();
+        break;
+      case 'episode_previous':
+        onPreviousEpisode?.call();
+        break;
       case 'speed_increase':
         final newRateUp = (player.state.rate + 0.25).clamp(0.25, 3.0);
         player.setRate(newRateUp);
-        _settingsService.setDefaultPlaybackSpeed(newRateUp);
+        _settingsService.write(SettingsService.defaultPlaybackSpeed, newRateUp);
         break;
       case 'speed_decrease':
         final newRateDown = (player.state.rate - 0.25).clamp(0.25, 3.0);
         player.setRate(newRateDown);
-        _settingsService.setDefaultPlaybackSpeed(newRateDown);
+        _settingsService.write(SettingsService.defaultPlaybackSpeed, newRateDown);
         break;
       case 'speed_reset':
         player.setRate(1.0);
-        _settingsService.setDefaultPlaybackSpeed(1.0);
+        _settingsService.write(SettingsService.defaultPlaybackSpeed, 1.0);
         break;
       case 'sub_seek_next':
         player.command(['sub-seek', '1']);
@@ -318,7 +377,6 @@ class KeyboardShortcutsService {
     }
   }
 
-  // Get human-readable action names
   String getActionDisplayName(String action) {
     switch (action) {
       case 'play_pause':
@@ -349,6 +407,10 @@ class KeyboardShortcutsService {
         return t.hotkeys.actions.chapterNext;
       case 'chapter_previous':
         return t.hotkeys.actions.chapterPrevious;
+      case 'episode_next':
+        return t.hotkeys.actions.episodeNext;
+      case 'episode_previous':
+        return t.hotkeys.actions.episodePrevious;
       case 'speed_increase':
         return t.hotkeys.actions.speedIncrease;
       case 'speed_decrease':

@@ -3,6 +3,7 @@ import 'dart:io' show Platform;
 import 'package:in_app_review/in_app_review.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../utils/app_logger.dart';
+import 'base_shared_preferences_service.dart';
 
 /// Service to manage in-app review prompts
 /// Only enabled when ENABLE_IN_APP_REVIEW build flag is set
@@ -14,14 +15,8 @@ class InAppReviewService {
 
   final InAppReview _inAppReview = InAppReview.instance;
 
-  // Cached SharedPreferences instance (lazy-initialized)
-  SharedPreferences? _prefs;
+  Future<SharedPreferencesWithCache> _getPrefs() => BaseSharedPreferencesService.sharedCache();
 
-  Future<SharedPreferences> _getPrefs() async {
-    return _prefs ??= await SharedPreferences.getInstance();
-  }
-
-  // SharedPreferences keys
   static const String _keyQualifyingSessionsCount = 'review_qualifying_sessions_count';
   static const String _keyLastPromptTime = 'review_last_prompt_time';
 
@@ -30,11 +25,8 @@ class InAppReviewService {
   static const Duration _minimumSessionDuration = Duration(minutes: 5);
   static const Duration _promptCooldown = Duration(days: 60);
 
-  // Session tracking
   DateTime? _sessionStartTime;
 
-  /// Check if in-app review is enabled via build flag
-  /// Only enabled on mobile platforms (iOS and Android)
   static bool get isEnabled {
     if (!Platform.isIOS && !Platform.isAndroid) {
       return false;
@@ -42,7 +34,6 @@ class InAppReviewService {
     return const bool.fromEnvironment('ENABLE_IN_APP_REVIEW', defaultValue: false);
   }
 
-  /// Start tracking a new session
   void startSession() {
     if (!isEnabled) return;
     _sessionStartTime = DateTime.now();
@@ -67,14 +58,12 @@ class InAppReviewService {
     }
   }
 
-  /// Increment the qualifying sessions counter
   Future<void> _incrementQualifyingSessions() async {
     final prefs = await _getPrefs();
     final currentCount = prefs.getInt(_keyQualifyingSessionsCount) ?? 0;
     await prefs.setInt(_keyQualifyingSessionsCount, currentCount + 1);
   }
 
-  /// Get the current qualifying sessions count
   Future<int> _getQualifyingSessionsCount() async {
     final prefs = await _getPrefs();
     return prefs.getInt(_keyQualifyingSessionsCount) ?? 0;
@@ -84,14 +73,12 @@ class InAppReviewService {
   Future<bool> _shouldRequestReview() async {
     final prefs = await _getPrefs();
 
-    // Check session count
     final sessionCount = await _getQualifyingSessionsCount();
     if (sessionCount < _requiredSessions) {
       appLogger.d('In-app review: Not enough sessions ($sessionCount/$_requiredSessions)');
       return false;
     }
 
-    // Check cooldown
     final lastPromptString = prefs.getString(_keyLastPromptTime);
     if (lastPromptString != null) {
       final lastPrompt = DateTime.parse(lastPromptString);
@@ -106,7 +93,6 @@ class InAppReviewService {
     return true;
   }
 
-  /// Request a review if conditions are met
   Future<void> maybeRequestReview() async {
     if (!isEnabled) return;
 
@@ -114,25 +100,21 @@ class InAppReviewService {
     if (!shouldRequest) return;
 
     try {
-      // Check if in-app review is available on this device
       final isAvailable = await _inAppReview.isAvailable();
       if (!isAvailable) {
         appLogger.d('In-app review: Not available on this device');
         return;
       }
 
-      // Request the review
       await _inAppReview.requestReview();
       appLogger.i('In-app review: Review prompt shown');
 
-      // Record that we showed the prompt and reset session count
       await _recordPromptShown();
     } catch (e) {
       appLogger.e('In-app review: Error requesting review', error: e);
     }
   }
 
-  /// Record that the review prompt was shown
   Future<void> _recordPromptShown() async {
     final prefs = await _getPrefs();
     await prefs.setString(_keyLastPromptTime, DateTime.now().toIso8601String());

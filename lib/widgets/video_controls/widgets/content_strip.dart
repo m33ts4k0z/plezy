@@ -8,26 +8,27 @@ import 'package:provider/provider.dart';
 import '../../../focus/dpad_navigator.dart';
 import '../../../focus/focusable_wrapper.dart';
 import '../../../i18n/strings.g.dart';
+import '../../../media/media_item.dart';
+import '../../../media/media_server_client.dart';
 import '../../../mpv/mpv.dart';
-import '../../../models/plex_media_info.dart';
-import '../../../models/plex_metadata.dart';
+import '../../../media/media_source_info.dart';
 import '../../../providers/playback_state_provider.dart';
 import '../../../services/download_storage_service.dart';
-import '../../../services/plex_client.dart';
 import '../../../utils/formatters.dart';
 import '../../../utils/player_utils.dart';
 import '../../../utils/provider_extensions.dart';
 import '../../app_icon.dart';
-import '../../plex_optimized_image.dart';
+import '../../optimized_media_image.dart';
+import 'media_selector_thumbnail.dart';
 
 /// Horizontal scrollable strip of chapter/queue items shown on swipe-up.
 class ContentStrip extends StatefulWidget {
   final Player player;
-  final List<PlexChapter> chapters;
+  final List<MediaChapter> chapters;
   final bool chaptersLoaded;
   final String? serverId;
   final bool showQueueTab;
-  final Function(PlexMetadata)? onQueueItemSelected;
+  final Function(MediaItem)? onQueueItemSelected;
   final Function(Duration position)? onSeekCompleted;
 
   /// Whether to use dpad/focus-based navigation (TV mode).
@@ -137,7 +138,7 @@ class ContentStripState extends State<ContentStrip> {
       final playbackState = context.read<PlaybackStateProvider>();
       final items = playbackState.loadedItems;
       final currentItemID = playbackState.currentPlayQueueItemID;
-      final idx = items.indexWhere((item) => item.playQueueItemID == currentItemID);
+      final idx = items.indexWhere((item) => playbackState.playQueueItemIdFor(item) == currentItemID);
       return idx >= 0 ? idx : null;
     } catch (_) {
       return null;
@@ -172,7 +173,6 @@ class ContentStripState extends State<ContentStrip> {
 
     final key = event.logicalKey;
 
-    // LEFT/RIGHT - navigate between items
     if (key == LogicalKeyboardKey.arrowLeft) {
       final nodes = page == _StripTab.chapters ? _chapterFocusNodes : _queueFocusNodes;
       if (index > 0) {
@@ -193,7 +193,6 @@ class ContentStripState extends State<ContentStrip> {
       return KeyEventResult.handled;
     }
 
-    // UP - navigate to previous layer
     if (key == LogicalKeyboardKey.arrowUp) {
       if (page == _StripTab.queue && _hasChapters) {
         // Switch to chapters page and focus current chapter
@@ -213,7 +212,6 @@ class ContentStripState extends State<ContentStrip> {
       return KeyEventResult.handled;
     }
 
-    // DOWN - navigate to next layer
     if (key == LogicalKeyboardKey.arrowDown) {
       if (page == _StripTab.chapters && _hasQueue) {
         // Switch to queue page and focus current queue item
@@ -234,8 +232,8 @@ class ContentStripState extends State<ContentStrip> {
     return KeyEventResult.ignored;
   }
 
-  PlexClient? _tryGetClient(BuildContext context, String? serverId) {
-    return context.tryGetClientForServer(serverId);
+  MediaServerClient? _tryGetClient(BuildContext context, String? serverId) {
+    return context.tryGetMediaClientForServer(serverId);
   }
 
   double _itemWidth(bool isTablet) => isTablet ? 212.0 : 132.0; // thumb + 12 padding
@@ -327,30 +325,16 @@ class ContentStripState extends State<ContentStrip> {
       initialData: widget.player.state.position,
       builder: (context, positionSnapshot) {
         final currentPosition = positionSnapshot.data ?? Duration.zero;
-        final currentPositionMs = currentPosition.inMilliseconds;
-
-        int? currentChapterIndex;
-        for (int i = 0; i < widget.chapters.length; i++) {
-          final chapter = widget.chapters[i];
-          final startMs = chapter.startTimeOffset ?? 0;
-          final endMs =
-              chapter.endTimeOffset ??
-              (i < widget.chapters.length - 1 ? widget.chapters[i + 1].startTimeOffset ?? 0 : double.maxFinite.toInt());
-          if (currentPositionMs >= startMs && currentPositionMs < endMs) {
-            currentChapterIndex = i;
-            break;
-          }
-        }
+        final currentChapterIndex = MediaChapter.indexAtPosition(currentPosition, widget.chapters);
 
         // Auto-scroll to current chapter on first build
         if (!_hasAutoScrolledChapters && currentChapterIndex != null) {
           _hasAutoScrolledChapters = true;
           WidgetsBinding.instance.addPostFrameCallback((_) {
-            _autoScrollTo(_chapterScrollController, currentChapterIndex!, isTablet: isTablet);
+            _autoScrollTo(_chapterScrollController, currentChapterIndex, isTablet: isTablet);
           });
         }
 
-        // Ensure focus nodes for focus navigation mode
         if (widget.useFocusNavigation) {
           _ensureFocusNodes(_chapterFocusNodes, widget.chapters.length, 'ChapterFocus');
         }
@@ -376,7 +360,7 @@ class ContentStripState extends State<ContentStrip> {
               isCurrent: isCurrent,
               isTablet: isTablet,
               thumbnail: chapter.thumb != null
-                  ? PlexOptimizedImage.thumb(
+                  ? OptimizedMediaImage.thumb(
                       client: _tryGetClient(context, widget.serverId),
                       imagePath: chapter.thumb,
                       localFilePath: localThumbPath,
@@ -426,7 +410,7 @@ class ContentStripState extends State<ContentStrip> {
       builder: (context, playbackState, _) {
         final items = playbackState.loadedItems;
         final currentItemID = playbackState.currentPlayQueueItemID;
-        final currentIndex = items.indexWhere((item) => item.playQueueItemID == currentItemID);
+        final currentIndex = items.indexWhere((item) => playbackState.playQueueItemIdFor(item) == currentItemID);
 
         if (!_hasAutoScrolledQueue && currentIndex >= 0) {
           _hasAutoScrolledQueue = true;
@@ -435,7 +419,6 @@ class ContentStripState extends State<ContentStrip> {
           });
         }
 
-        // Ensure focus nodes for focus navigation mode
         if (widget.useFocusNavigation) {
           _ensureFocusNodes(_queueFocusNodes, items.length, 'QueueFocus');
         }
@@ -448,14 +431,9 @@ class ContentStripState extends State<ContentStrip> {
           padding: EdgeInsets.symmetric(horizontal: widget.useFocusNavigation ? 12 : 4),
           itemBuilder: (context, index) {
             final item = items[index];
-            final isCurrent = item.playQueueItemID == currentItemID;
+            final isCurrent = playbackState.playQueueItemIdFor(item) == currentItemID;
 
-            PlexClient? client;
-            if (item.serverId != null) {
-              try {
-                client = context.tryGetClientForServer(item.serverId);
-              } catch (_) {}
-            }
+            final client = item.serverId != null ? context.tryGetMediaClientForServer(item.serverId) : null;
 
             void onTap() => widget.onQueueItemSelected?.call(item);
 
@@ -463,10 +441,10 @@ class ContentStripState extends State<ContentStrip> {
               context: context,
               isCurrent: isCurrent,
               isTablet: isTablet,
-              thumbnail: item.thumb != null
-                  ? PlexOptimizedImage.thumb(
+              thumbnail: item.thumbPath != null
+                  ? OptimizedMediaImage.thumb(
                       client: client,
-                      imagePath: item.thumb,
+                      imagePath: item.thumbPath,
                       width: thumbWidth,
                       height: thumbHeight,
                       fit: BoxFit.cover,
@@ -474,7 +452,7 @@ class ContentStripState extends State<ContentStrip> {
                           const AppIcon(Symbols.image_rounded, fill: 1, color: Colors.white54, size: 34),
                     )
                   : null,
-              title: item.title!,
+              title: item.title ?? '',
               subtitle: _buildQueueSubtitle(item),
               onTap: onTap,
             );
@@ -505,13 +483,16 @@ class ContentStripState extends State<ContentStrip> {
     );
   }
 
-  String _buildQueueSubtitle(PlexMetadata item) {
+  String _buildQueueSubtitle(MediaItem item) {
     if (item.grandparentTitle != null && item.parentIndex != null && item.index != null) {
       return '${item.grandparentTitle} \u00b7 S${item.parentIndex}E${item.index}';
     }
     if (item.grandparentTitle != null) return item.grandparentTitle!;
-    if (item.year != null) return item.editionTitle != null ? '${item.year} · ${item.editionTitle}' : '${item.year}';
-    return item.mediaType.name;
+    if (item.year != null) {
+      final edition = item.editionTitle;
+      return edition != null ? '${item.year} · $edition' : '${item.year}';
+    }
+    return item.kind.name;
   }
 
   Widget _buildStripItem({
@@ -538,39 +519,15 @@ class ContentStripState extends State<ContentStrip> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Thumbnail
-            SizedBox(
+            MediaSelectorThumbnail(
               width: itemWidth,
               height: thumbHeight,
-              child: Stack(
-                children: [
-                  ClipRRect(
-                    borderRadius: const BorderRadius.all(Radius.circular(6)),
-                    child:
-                        thumbnail ??
-                        Container(
-                          color: Colors.white10,
-                          child: const Center(
-                            child: AppIcon(Symbols.movie_rounded, fill: 1, color: Colors.white38, size: 28),
-                          ),
-                        ),
-                  ),
-                  if (isCurrent)
-                    Positioned.fill(
-                      child: Container(
-                        decoration: BoxDecoration(
-                          borderRadius: const BorderRadius.all(Radius.circular(6)),
-                          border: Border.fromBorderSide(
-                            BorderSide(color: Colors.white, width: 2),
-                          ),
-                        ),
-                      ),
-                    ),
-                ],
-              ),
+              thumbnail: thumbnail,
+              isCurrent: isCurrent,
+              borderColor: Colors.white,
+              radius: 6,
             ),
             const SizedBox(height: 4),
-            // Title
             Text(
               title,
               style: TextStyle(
@@ -581,7 +538,6 @@ class ContentStripState extends State<ContentStrip> {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
-            // Subtitle
             Text(
               subtitle,
               style: TextStyle(

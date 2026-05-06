@@ -4,14 +4,16 @@ import 'package:material_symbols_icons/symbols.dart';
 import 'package:provider/provider.dart';
 import 'package:rate_limiter/rate_limiter.dart';
 
-import '../focus/dpad_navigator.dart';
+import '../focus/focusable_text_field.dart';
 import '../i18n/strings.g.dart';
+import '../media/media_item.dart';
+import '../mixins/controller_disposer_mixin.dart';
 import '../mixins/refreshable.dart';
-import '../models/plex_metadata.dart';
 import '../providers/multi_server_provider.dart';
 import '../utils/app_logger.dart';
 import '../utils/snackbar_helper.dart';
 import '../widgets/desktop_app_bar.dart';
+import '../widgets/loading_indicator_box.dart';
 import '../widgets/pill_input_decoration.dart';
 import '../widgets/focusable_media_card.dart';
 import '../utils/focus_utils.dart';
@@ -25,11 +27,12 @@ class SearchScreen extends StatefulWidget {
   State<SearchScreen> createState() => _SearchScreenState();
 }
 
-class _SearchScreenState extends State<SearchScreen> with Refreshable, FullRefreshable, SearchInputFocusable, FocusableTab {
-  final _searchController = TextEditingController();
+class _SearchScreenState extends State<SearchScreen>
+    with Refreshable, FullRefreshable, SearchInputFocusable, FocusableTab, ControllerDisposerMixin {
+  late final _searchController = createTextEditingController();
   final _searchFocusNode = FocusNode(debugLabel: 'SearchInput');
   final _firstResultFocusNode = FocusNode(debugLabel: 'SearchFirstResult');
-  List<PlexMetadata> _searchResults = [];
+  List<MediaItem> _searchResults = [];
   bool _isSearching = false;
   bool _hasSearched = false;
   late final Debounce _searchDebounce;
@@ -40,7 +43,6 @@ class _SearchScreenState extends State<SearchScreen> with Refreshable, FullRefre
     super.initState();
     _searchDebounce = debounce(_performSearch, const Duration(milliseconds: 500));
     _searchController.addListener(_onSearchChanged);
-    // Focus the search input when the screen is shown
     FocusUtils.requestFocusAfterBuild(this, _searchFocusNode);
   }
 
@@ -48,7 +50,6 @@ class _SearchScreenState extends State<SearchScreen> with Refreshable, FullRefre
   void dispose() {
     _searchDebounce.cancel();
     _searchController.removeListener(_onSearchChanged);
-    _searchController.dispose();
     _searchFocusNode.dispose();
     _firstResultFocusNode.dispose();
     super.dispose();
@@ -97,11 +98,10 @@ class _SearchScreenState extends State<SearchScreen> with Refreshable, FullRefre
         throw Exception('No servers available');
       }
 
-      // Search across all connected servers
-      final results = await multiServerProvider.aggregationService.searchAcrossServers(query);
+      final neutral = await multiServerProvider.aggregationService.searchAcrossServers(query);
       if (mounted) {
         setState(() {
-          _searchResults = results;
+          _searchResults = neutral;
           _isSearching = false;
           _lastSearchedQuery = query.trim();
         });
@@ -118,7 +118,6 @@ class _SearchScreenState extends State<SearchScreen> with Refreshable, FullRefre
 
   @override
   void refresh() {
-    // Re-run the current search if there is one
     if (_searchController.text.isNotEmpty) {
       _performSearch(_searchController.text);
     }
@@ -167,37 +166,6 @@ class _SearchScreenState extends State<SearchScreen> with Refreshable, FullRefre
     MainScreenFocusScope.of(context)?.focusSidebar();
   }
 
-  /// Handle key events on the search input for D-pad navigation
-  KeyEventResult _handleSearchInputKeyEvent(FocusNode _, KeyEvent event) {
-    if (!event.isActionable) return KeyEventResult.ignored;
-
-    final key = event.logicalKey;
-
-    // DOWN: Focus first result if results exist and not loading
-    if (key.isDownKey && _searchResults.isNotEmpty && !_isSearching) {
-      _firstResultFocusNode.requestFocus();
-      return KeyEventResult.handled;
-    }
-
-    // LEFT at cursor position 0: Navigate to sidebar
-    if (key.isLeftKey && _searchController.selection.baseOffset == 0) {
-      _navigateToSidebar();
-      return KeyEventResult.handled;
-    }
-
-    // BACK: Clear search or navigate to sidebar
-    if (key.isBackKey) {
-      if (_searchController.text.isNotEmpty) {
-        _searchController.clear();
-      } else {
-        _navigateToSidebar();
-      }
-      return KeyEventResult.handled;
-    }
-
-    return KeyEventResult.ignored;
-  }
-
   Widget _buildResultsList(BuildContext context) {
     final multiServer = context.watch<MultiServerProvider>();
     final showServerName = multiServer.totalServerCount > 1;
@@ -212,7 +180,7 @@ class _SearchScreenState extends State<SearchScreen> with Refreshable, FullRefre
             forceListMode: true,
             disableScale: true,
             focusNode: index == 0 ? _firstResultFocusNode : null,
-            onListRefresh: () => updateItem(item.ratingKey),
+            onListRefresh: () => updateItem(item.id),
             onNavigateLeft: _navigateToSidebar,
             onNavigateUp: index == 0 ? focusSearchInput : null,
             showServerName: showServerName,
@@ -233,31 +201,39 @@ class _SearchScreenState extends State<SearchScreen> with Refreshable, FullRefre
             SliverToBoxAdapter(
               child: Padding(
                 padding: const EdgeInsets.only(left: 16, right: 16, bottom: 16),
-                child: Focus(
-                  onKeyEvent: _handleSearchInputKeyEvent,
-                  child: TextField(
-                    controller: _searchController,
-                    focusNode: _searchFocusNode,
-                    decoration: pillInputDecoration(
-                      context,
-                      hintText: t.search.hint,
-                      prefixIcon: const AppIcon(Symbols.search_rounded, fill: 1),
-                      suffixIcon: _searchController.text.isNotEmpty
-                          ? IconButton(
-                              icon: const AppIcon(Symbols.clear_rounded, fill: 1),
-                              onPressed: () {
-                                _searchController.clear();
-                                // State update handled by listener
-                              },
-                            )
-                          : null,
-                    ),
+                child: FocusableTextField(
+                  controller: _searchController,
+                  focusNode: _searchFocusNode,
+                  textInputAction: TextInputAction.search,
+                  onNavigateLeft: _navigateToSidebar,
+                  onNavigateDown: _searchResults.isNotEmpty && !_isSearching
+                      ? _firstResultFocusNode.requestFocus
+                      : null,
+                  onBack: () {
+                    if (_searchController.text.isNotEmpty) {
+                      _searchController.clear();
+                    } else {
+                      _navigateToSidebar();
+                    }
+                  },
+                  decoration: pillInputDecoration(
+                    context,
+                    hintText: t.search.hint,
+                    prefixIcon: const AppIcon(Symbols.search_rounded, fill: 1),
+                    suffixIcon: _searchController.text.isNotEmpty
+                        ? IconButton(
+                            icon: const AppIcon(Symbols.clear_rounded, fill: 1),
+                            onPressed: () {
+                              _searchController.clear();
+                            },
+                          )
+                        : null,
                   ),
                 ),
               ),
             ),
             if (_isSearching)
-              const SliverFillRemaining(child: Center(child: CircularProgressIndicator()))
+              LoadingIndicatorBox.sliver
             else if (!_hasSearched)
               SliverFillRemaining(
                 child: StateMessageWidget(

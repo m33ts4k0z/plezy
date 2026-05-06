@@ -1,12 +1,11 @@
-import 'dart:typed_data';
-
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/symbols.dart';
 
+import '../../media/media_item.dart';
 import '../../mpv/mpv.dart';
 import '../../models/livetv_capture_buffer.dart';
-import '../../models/plex_media_info.dart';
-import '../../models/plex_metadata.dart';
+import '../../media/media_source_info.dart';
+import '../../services/scrub_preview_source.dart';
 import '../../utils/desktop_window_padding.dart';
 import '../../i18n/strings.g.dart';
 import 'widgets/circular_control_button.dart';
@@ -29,9 +28,10 @@ import 'widgets/video_timeline_bar.dart';
 /// fade out while the strip slides up — only the top bar stays fixed.
 class MobileVideoControls extends StatefulWidget {
   final Player player;
-  final PlexMetadata metadata;
-  final List<PlexChapter> chapters;
+  final MediaItem metadata;
+  final List<MediaChapter> chapters;
   final bool chaptersLoaded;
+  final bool showChapterMarkersOnTimeline;
   final int seekTimeSmall;
   final Widget trackChapterControls;
   final Function(Duration) onSeek;
@@ -43,6 +43,7 @@ class MobileVideoControls extends StatefulWidget {
   final VoidCallback? onBack;
   final VoidCallback? onNext;
   final VoidCallback? onPrevious;
+
   /// Whether the user can control playback (false in host-only mode for non-host).
   final bool canControl;
 
@@ -50,7 +51,7 @@ class MobileVideoControls extends StatefulWidget {
   final ValueNotifier<bool>? hasFirstFrame;
 
   /// Optional callback that returns thumbnail image bytes for a given timestamp.
-  final Uint8List? Function(Duration time)? thumbnailDataBuilder;
+  final ScrubFrame? Function(Duration time)? thumbnailDataBuilder;
 
   /// Whether this is a live TV stream
   final bool isLive;
@@ -71,7 +72,7 @@ class MobileVideoControls extends StatefulWidget {
   final bool showQueueTab;
 
   /// Callback when a queue item is selected from the content strip
-  final Function(PlexMetadata)? onQueueItemSelected;
+  final Function(MediaItem)? onQueueItemSelected;
 
   /// Notifier for controls visibility (used to reset strip on hide)
   final ValueNotifier<bool>? controlsVisible;
@@ -85,6 +86,7 @@ class MobileVideoControls extends StatefulWidget {
     required this.metadata,
     required this.chapters,
     required this.chaptersLoaded,
+    this.showChapterMarkersOnTimeline = true,
     required this.seekTimeSmall,
     required this.trackChapterControls,
     required this.onSeek,
@@ -116,8 +118,7 @@ class MobileVideoControls extends StatefulWidget {
   State<MobileVideoControls> createState() => _MobileVideoControlsState();
 }
 
-class _MobileVideoControlsState extends State<MobileVideoControls>
-    with SingleTickerProviderStateMixin {
+class _MobileVideoControlsState extends State<MobileVideoControls> with SingleTickerProviderStateMixin {
   late final AnimationController _stripAnim;
   bool _stripVisible = false;
 
@@ -130,10 +131,7 @@ class _MobileVideoControlsState extends State<MobileVideoControls>
   @override
   void initState() {
     super.initState();
-    _stripAnim = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 250),
-    );
+    _stripAnim = AnimationController(vsync: this, duration: const Duration(milliseconds: 250));
     _stripAnim.addListener(_onStripAnimChanged);
     widget.controlsVisible?.addListener(_onControlsVisibilityChanged);
   }
@@ -325,7 +323,10 @@ class _MobileVideoControlsState extends State<MobileVideoControls>
       return const SizedBox.shrink();
     }
 
-    return FirstFrameGuard(hasFirstFrame: widget.hasFirstFrame, builder: (context) => _buildPlaybackControlsContent(context));
+    return FirstFrameGuard(
+      hasFirstFrame: widget.hasFirstFrame,
+      builder: (context) => _buildPlaybackControlsContent(context),
+    );
   }
 
   Widget _buildPlaybackControlsContent(BuildContext _) {
@@ -422,6 +423,7 @@ class _MobileVideoControlsState extends State<MobileVideoControls>
           player: widget.player,
           chapters: widget.chapters,
           chaptersLoaded: widget.chaptersLoaded,
+          showChapterMarkersOnTimeline: widget.showChapterMarkersOnTimeline,
           onSeek: widget.onSeek,
           onSeekEnd: widget.onSeekEnd,
           horizontalLayout: false,
@@ -440,7 +442,7 @@ class _MobileVideoControlsState extends State<MobileVideoControls>
     bool top = true,
     bool bottom = true,
   }) {
-    final orientation = MediaQuery.of(context).orientation;
+    final orientation = MediaQuery.orientationOf(context);
     final isPortrait = orientation == Orientation.portrait;
 
     // Only apply SafeArea in portrait mode

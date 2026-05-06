@@ -8,7 +8,12 @@ void scrollContextToCenter(BuildContext? context) {
   if (context == null) return;
   WidgetsBinding.instance.addPostFrameCallback((_) {
     if (!context.mounted) return;
-    Scrollable.ensureVisible(context, alignment: 0.5, duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
+    Scrollable.ensureVisible(
+      context,
+      alignment: 0.5,
+      duration: const Duration(milliseconds: 200),
+      curve: Curves.easeOut,
+    );
   });
 }
 
@@ -28,6 +33,21 @@ void scrollToCurrentItem(ScrollController controller, GlobalKey firstItemKey, in
     final target = (currentIndex * itemHeight).clamp(0.0, maxExtent);
     controller.jumpTo(target);
   });
+}
+
+/// Owns the boilerplate for one-time initial scrolling in selectable lists.
+class InitialItemScrollController {
+  final GlobalKey firstItemKey = GlobalKey();
+  final ScrollController controller = ScrollController();
+  bool _didInitialScroll = false;
+
+  void maybeScrollTo(int? selectedIndex) {
+    if (_didInitialScroll || selectedIndex == null || selectedIndex <= 0) return;
+    _didInitialScroll = true;
+    scrollToCurrentItem(controller, firstItemKey, selectedIndex);
+  }
+
+  void dispose() => controller.dispose();
 }
 
 /// Scroll a horizontal list to center the item at the given index.

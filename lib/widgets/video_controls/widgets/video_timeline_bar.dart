@@ -1,9 +1,8 @@
-import 'dart:typed_data';
-
 import 'package:flutter/material.dart';
 
 import '../../../mpv/mpv.dart';
-import '../../../models/plex_media_info.dart';
+import '../../../media/media_source_info.dart';
+import '../../../services/scrub_preview_source.dart';
 import '../../../utils/formatters.dart';
 import 'timeline_slider.dart';
 
@@ -14,8 +13,9 @@ import 'timeline_slider.dart';
 /// layout (timestamps beside slider) and vertical layout (timestamps below slider).
 class VideoTimelineBar extends StatelessWidget {
   final Player player;
-  final List<PlexChapter> chapters;
+  final List<MediaChapter> chapters;
   final bool chaptersLoaded;
+  final bool showChapterMarkersOnTimeline;
   final ValueChanged<Duration> onSeek;
   final ValueChanged<Duration> onSeekEnd;
 
@@ -39,13 +39,18 @@ class VideoTimelineBar extends StatelessWidget {
   final bool showFinishTime;
 
   /// Optional callback that returns thumbnail image bytes for a given timestamp.
-  final Uint8List? Function(Duration time)? thumbnailDataBuilder;
+  final ScrubFrame? Function(Duration time)? thumbnailDataBuilder;
+
+  /// When true, show the preview thumbnail at the current playback position
+  /// (used during sustained dpad/keyboard key-repeat seeking).
+  final bool showKeyRepeatThumbnail;
 
   const VideoTimelineBar({
     super.key,
     required this.player,
     required this.chapters,
     required this.chaptersLoaded,
+    this.showChapterMarkersOnTimeline = true,
     required this.onSeek,
     required this.onSeekEnd,
     this.horizontalLayout = true,
@@ -55,6 +60,7 @@ class VideoTimelineBar extends StatelessWidget {
     this.enabled = true,
     this.showFinishTime = false,
     this.thumbnailDataBuilder,
+    this.showKeyRepeatThumbnail = false,
   });
 
   @override
@@ -87,7 +93,12 @@ class VideoTimelineBar extends StatelessWidget {
     );
   }
 
-  Widget _buildHorizontalLayout(Duration position, Duration duration, Duration remaining, List<BufferRange> bufferRanges) {
+  Widget _buildHorizontalLayout(
+    Duration position,
+    Duration duration,
+    Duration remaining,
+    List<BufferRange> bufferRanges,
+  ) {
     return Row(
       children: [
         _buildTimestamp(position),
@@ -99,7 +110,12 @@ class VideoTimelineBar extends StatelessWidget {
     );
   }
 
-  Widget _buildVerticalLayout(Duration position, Duration duration, Duration remaining, List<BufferRange> bufferRanges) {
+  Widget _buildVerticalLayout(
+    Duration position,
+    Duration duration,
+    Duration remaining,
+    List<BufferRange> bufferRanges,
+  ) {
     return Column(
       children: [
         _buildSlider(position, duration, bufferRanges),
@@ -114,7 +130,11 @@ class VideoTimelineBar extends StatelessWidget {
     );
   }
 
-  static const _timestampStyle = TextStyle(color: Colors.white, fontSize: 14, fontFeatures: [FontFeature.tabularFigures()]);
+  static const _timestampStyle = TextStyle(
+    color: Colors.white,
+    fontSize: 14,
+    fontFeatures: [FontFeature.tabularFigures()],
+  );
 
   Widget _buildTimestamp(Duration time) {
     return Text(formatDurationTimestamp(time), style: _timestampStyle);
@@ -129,7 +149,8 @@ class VideoTimelineBar extends StatelessWidget {
       initialData: player.state.rate,
       builder: (context, rateSnap) {
         final rate = rateSnap.data ?? 1.0;
-        final text = '${formatDurationTimestamp(remaining)} · ${formatFinishTime(remaining.abs(), rate: rate, is24Hour: MediaQuery.alwaysUse24HourFormatOf(context))}';
+        final text =
+            '${formatDurationTimestamp(remaining)} · ${formatFinishTime(remaining.abs(), rate: rate, is24Hour: MediaQuery.alwaysUse24HourFormatOf(context))}';
         return Text(text, style: _timestampStyle);
       },
     );
@@ -142,6 +163,7 @@ class VideoTimelineBar extends StatelessWidget {
       bufferRanges: bufferRanges,
       chapters: chapters,
       chaptersLoaded: chaptersLoaded,
+      showChapterMarkersOnTimeline: showChapterMarkersOnTimeline,
       onSeek: onSeek,
       onSeekEnd: onSeekEnd,
       focusNode: focusNode,
@@ -149,6 +171,7 @@ class VideoTimelineBar extends StatelessWidget {
       onFocusChange: onFocusChange,
       enabled: enabled,
       thumbnailDataBuilder: thumbnailDataBuilder,
+      showKeyRepeatThumbnail: showKeyRepeatThumbnail,
     );
   }
 }

@@ -10,22 +10,35 @@ import '../focus/focusable_action_bar.dart';
 import '../focus/input_mode_tracker.dart';
 import '../focus/key_event_utils.dart';
 import '../utils/global_key_utils.dart';
-import 'package:cached_network_image/cached_network_image.dart';
-import '../../services/plex_client.dart';
-import '../utils/plex_image_helper.dart';
-import '../widgets/plex_optimized_image.dart' show blurArtwork;
-import '../models/plex_metadata.dart';
+import 'package:cached_network_image_ce/cached_network_image.dart';
+
+import '../services/image_cache_service.dart';
+import '../media/media_item.dart';
+import '../media/media_item_types.dart';
+import '../media/media_server_client.dart';
+import '../media/media_hub.dart';
+import '../utils/media_image_helper.dart';
 import '../utils/content_utils.dart';
-import '../models/plex_hub.dart';
+import '../widgets/optimized_media_image.dart' show blurArtwork;
 import '../providers/multi_server_provider.dart';
 import '../providers/hidden_libraries_provider.dart';
 import '../providers/libraries_provider.dart';
 import '../providers/playback_state_provider.dart';
-import 'profile/user_avatar_widget.dart';
 import '../widgets/hub_section.dart';
+import '../widgets/loading_indicator_box.dart';
 import 'profile/profile_switch_screen.dart';
+import '../connection/connection_registry.dart';
+import '../profiles/active_profile_provider.dart';
+import '../profiles/plex_home_service.dart';
+import '../profiles/profile.dart';
+import '../profiles/profile_activation.dart';
+import '../profiles/profile_avatar.dart';
+import '../profiles/profile_connection_registry.dart';
+import '../profiles/profile_registry.dart';
 import '../providers/user_profile_provider.dart';
-import '../providers/settings_provider.dart';
+import '../services/storage_service.dart';
+import '../services/settings_service.dart';
+import '../widgets/settings_builder.dart';
 import '../mixins/refreshable.dart';
 import '../mixins/tab_visibility_aware.dart';
 import '../i18n/strings.g.dart';
@@ -34,6 +47,7 @@ import '../mixins/watch_state_aware.dart';
 import '../utils/watch_state_notifier.dart';
 import '../utils/app_logger.dart';
 import '../utils/dialogs.dart';
+import '../utils/formatters.dart';
 import '../utils/provider_extensions.dart';
 import '../utils/video_player_navigation.dart';
 import '../utils/layout_constants.dart';
@@ -41,7 +55,7 @@ import '../utils/platform_detector.dart';
 import '../theme/mono_tokens.dart';
 import '../services/watch_next_service.dart';
 import 'auth_screen.dart';
-import 'libraries/state_messages.dart';
+import 'libraries/content_state_builder.dart';
 import 'main_screen.dart';
 import '../watch_together/watch_together.dart';
 import '../providers/companion_remote_provider.dart';
@@ -49,31 +63,57 @@ import '../widgets/companion_remote/remote_session_dialog.dart';
 import 'companion_remote/mobile_remote_screen.dart';
 
 class DiscoverScreen extends StatefulWidget {
-  final VoidCallback? onBecameVisible;
-
-  const DiscoverScreen({super.key, this.onBecameVisible});
+  const DiscoverScreen({super.key});
 
   @override
   State<DiscoverScreen> createState() => _DiscoverScreenState();
 }
 
 class _DiscoverScreenState extends State<DiscoverScreen>
-    with Refreshable, FullRefreshable, ItemUpdatable, WatchStateAware, TabVisibilityAware, FocusableTab, WidgetsBindingObserver {
+    with
+        Refreshable,
+        FullRefreshable,
+        ItemUpdatable,
+        WatchStateAware,
+        TabVisibilityAware,
+        FocusableTab,
+        WidgetsBindingObserver {
   static const Duration _heroAutoScrollDuration = Duration(seconds: 8);
   static const Duration _indicatorUpdateInterval = Duration(milliseconds: 200);
 
+  /// Items in [_onDeck] and [_hubs] can come from any registered server
+  /// (Plex or Jellyfin), so resolve the server per-item rather than via the
+  /// mixin's single-server [itemServerId] hook.
   @override
-  PlexClient get client {
-    final multiServerProvider = Provider.of<MultiServerProvider>(context, listen: false);
-    final serverId = multiServerProvider.onlineServerIds.firstOrNull;
-    if (serverId == null) {
-      throw Exception('No servers available');
+  Future<void> updateItem(String itemId) async {
+    try {
+      final serverId = _serverIdForItem(itemId);
+      if (serverId == null) return;
+      final updated = await context.tryGetMediaClientForServer(serverId)?.fetchItem(itemId);
+      if (updated == null || !mounted) return;
+      setState(() {
+        updateItemInLists(itemId, updated);
+      });
+    } catch (_) {
+      // Silently fail — the item will refresh on the next full reload.
     }
-    return context.getClientForServer(serverId);
   }
 
-  List<PlexMetadata> _onDeck = [];
-  List<PlexHub> _hubs = [];
+  /// Locate the server that owns [itemId] by scanning the visible lists.
+  String? _serverIdForItem(String itemId) {
+    for (final item in _onDeck) {
+      if (item.id == itemId) return item.serverId;
+    }
+    for (final hub in _hubs) {
+      for (final item in hub.items) {
+        if (item.id == itemId) return item.serverId;
+      }
+    }
+    return null;
+  }
+
+  List<MediaItem> _onDeck = [];
+  List<MediaHub> _hubs = [];
   bool _isLoading = true;
   bool _areHubsLoading = true;
   String? _errorMessage;
@@ -90,15 +130,15 @@ class _DiscoverScreenState extends State<DiscoverScreen>
 
   // WatchStateAware: watch on-deck items and their parent shows/seasons
   @override
-  Set<String>? get watchedRatingKeys {
+  Set<String>? get watchedIds {
     final keys = <String>{};
     for (final item in _onDeck) {
-      keys.add(item.ratingKey);
-      if (item.parentRatingKey != null) {
-        keys.add(item.parentRatingKey!);
+      keys.add(item.id);
+      if (item.parentId != null) {
+        keys.add(item.parentId!);
       }
-      if (item.grandparentRatingKey != null) {
-        keys.add(item.grandparentRatingKey!);
+      if (item.grandparentId != null) {
+        keys.add(item.grandparentId!);
       }
     }
     return keys;
@@ -111,12 +151,12 @@ class _DiscoverScreenState extends State<DiscoverScreen>
       final serverId = item.serverId;
       if (serverId == null) return null;
 
-      keys.add(buildGlobalKey(serverId, item.ratingKey));
-      if (item.parentRatingKey != null) {
-        keys.add(buildGlobalKey(serverId, item.parentRatingKey!));
+      keys.add(buildGlobalKey(serverId, item.id));
+      if (item.parentId != null) {
+        keys.add(buildGlobalKey(serverId, item.parentId!));
       }
-      if (item.grandparentRatingKey != null) {
-        keys.add(buildGlobalKey(serverId, item.grandparentRatingKey!));
+      if (item.grandparentId != null) {
+        keys.add(buildGlobalKey(serverId, item.grandparentId!));
       }
     }
     return keys;
@@ -139,19 +179,15 @@ class _DiscoverScreenState extends State<DiscoverScreen>
   late FocusNode _heroFocusNode;
   final _actionBarKey = GlobalKey<FocusableActionBarState>();
 
-  /// Get the correct PlexClient for an item's server
-  PlexClient _getClientForItem(PlexMetadata? item) {
-    // Items should always have a serverId, but if not, fall back to first available server
+  /// Backend-neutral hero client lookup. Returns the actual
+  /// [MediaServerClient] for the item's server (Plex or Jellyfin) so
+  /// [MediaImageHelper] uses the right transcoder for sized URLs.
+  MediaServerClient? _getMediaClientForItem(MediaItem? item) {
     final serverId = item?.serverId;
     if (serverId == null) {
-      final multiServerProvider = Provider.of<MultiServerProvider>(context, listen: false);
-      final fallbackId = multiServerProvider.onlineServerIds.firstOrNull;
-      if (fallbackId == null) {
-        throw Exception('No servers available');
-      }
-      return context.getClientForServer(fallbackId);
+      return context.tryGetMediaClientForServer(null);
     }
-    return context.getClientForServer(serverId);
+    return context.tryGetMediaClientForServer(serverId);
   }
 
   /// Update hub keys when hubs list changes — reuse existing keys to avoid
@@ -176,7 +212,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
     return keys;
   }
 
-  bool get _isHeroSectionVisible => _onDeck.isNotEmpty && context.read<SettingsProvider>().showHeroSection;
+  bool get _isHeroSectionVisible => _onDeck.isNotEmpty && context.settingsRead(SettingsService.showHeroSection);
 
   void _scrollToTop() {
     if (!_scrollController.hasClients) return;
@@ -188,7 +224,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
     if (_isHeroSectionVisible) {
       _heroFocusNode.requestFocus();
     } else {
-      _actionBarKey.currentState?.getFocusNode(0).requestFocus();
+      _actionBarKey.currentState?.requestFocusOnFirst();
     }
     _scrollToTop();
   }
@@ -275,7 +311,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
       final keys = _allHubKeys;
       if (keys.isNotEmpty) keys.first.currentState?.requestFocusFromMemory();
     },
-    onUp: () => _actionBarKey.currentState?.getFocusNode(0).requestFocus(),
+    onUp: () => _actionBarKey.currentState?.requestFocusOnFirst(),
     onLeft: () {
       if (_currentHeroIndex > 0) {
         _heroController.previousPage(duration: tokens(context).slow, curve: Curves.easeInOut);
@@ -318,8 +354,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
       if (Platform.isIOS || Platform.isAndroid) {
         _refreshContinueWatching();
       }
-    } else if (state == AppLifecycleState.inactive ||
-        state == AppLifecycleState.hidden) {
+    } else if (state == AppLifecycleState.inactive || state == AppLifecycleState.hidden) {
       // Stop animations to prevent scroll state corruption while backgrounded
       _autoScrollTimer?.cancel();
       _stopIndicatorProgress();
@@ -419,8 +454,8 @@ class _DiscoverScreenState extends State<DiscoverScreen>
 
     // Center the active dot when possible
     final center = _currentHeroIndex;
-    int start = (center - 2).clamp(0, totalDots - 5);
-    int end = start + 4; // 5 dots total (0-4 inclusive)
+    final int start = (center - 2).clamp(0, totalDots - 5);
+    final int end = start + 4; // 5 dots total (0-4 inclusive)
 
     return (start: start, end: end);
   }
@@ -458,23 +493,23 @@ class _DiscoverScreenState extends State<DiscoverScreen>
       final multiServerProvider = Provider.of<MultiServerProvider>(context, listen: false);
 
       if (!multiServerProvider.hasConnectedServers) {
+        // Stay in the loading state set above (no error, no spinner replacement)
+        // when the binder hasn't finished wiring servers yet — main_screen
+        // calls fullRefresh() once binding settles. Surfacing the throw here
+        // would briefly flash an error during cold start.
+        final activeProfile = Provider.of<ActiveProfileProvider>(context, listen: false);
+        if (activeProfile.isBinding) return;
         throw Exception('No servers available');
       }
 
       // Get hidden libraries for filtering
       final hiddenLibrariesProvider = Provider.of<HiddenLibrariesProvider>(context, listen: false);
+      await hiddenLibrariesProvider.ensureInitialized();
+      if (!mounted) return;
       _lastSeenHiddenKeys = Set.of(hiddenLibrariesProvider.hiddenLibraryKeys);
 
-      // Get settings for hub mode preference (ensure initialized before accessing)
-      final settingsProvider = Provider.of<SettingsProvider>(context, listen: false);
-
-      // Reuse already-loaded libraries to avoid a redundant API call inside hub fetching
-      final librariesProvider = context.read<LibrariesProvider>();
-      final librariesByServer = librariesProvider.libraries.isNotEmpty
-          ? multiServerProvider.aggregationService.groupLibrariesByServer(librariesProvider.libraries)
-          : null;
-
-      await settingsProvider.ensureInitialized();
+      // Let aggregation service fetch libraries internally; the LibrariesProvider
+      // stores neutral MediaLibrary objects.
 
       // Start OnDeck and hubs fetch in parallel
       final onDeckFuture = multiServerProvider.aggregationService.getOnDeckFromAllServers(
@@ -483,8 +518,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
       );
       final hubsFuture = multiServerProvider.aggregationService.getHubsFromAllServers(
         hiddenLibraryKeys: hiddenLibrariesProvider.hiddenLibraryKeys,
-        useGlobalHubs: settingsProvider.useGlobalHubs,
-        librariesByServer: librariesByServer,
+        useGlobalHubs: context.settingsRead(SettingsService.useGlobalHubs),
       );
 
       // Wait for OnDeck to complete and show it immediately
@@ -511,7 +545,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
 
       // Sync to Android TV Watch Next row
       if (Platform.isAndroid) {
-        _syncWatchNext(onDeck);
+        unawaited(_syncWatchNext(onDeck));
       }
 
       // Sync PageController to first page after OnDeck loads
@@ -534,14 +568,16 @@ class _DiscoverScreenState extends State<DiscoverScreen>
 
       if (!mounted) return;
 
-      // Filter out Continue Watching / On Deck hubs (handled separately in hero section)
+      // Filter out playback-progress hubs handled by the top Continue Watching row.
       final filteredHubs = allHubs.where((hub) {
-        final hubId = hub.hubIdentifier?.toLowerCase() ?? '';
+        final hubId = hub.identifier?.toLowerCase() ?? '';
         final title = hub.title.toLowerCase();
         return !hubId.contains('ondeck') &&
             !hubId.contains('continue') &&
+            !hubId.contains('nextup') &&
             !title.contains('continue watching') &&
-            !title.contains('on deck');
+            !title.contains('on deck') &&
+            !title.contains('next up');
       }).toList();
 
       // Sort hubs by the user's library order
@@ -574,6 +610,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
       appLogger.d('Discover content loaded successfully');
     } catch (e) {
       appLogger.e('Failed to load discover content', error: e);
+      if (!mounted) return;
       setState(() {
         _errorMessage = 'Failed to load content: $e';
         _isLoading = false;
@@ -583,12 +620,12 @@ class _DiscoverScreenState extends State<DiscoverScreen>
   }
 
   /// Resolve the library globalKey for a hub (for sorting by library order).
-  String? _hubLibraryGlobalKey(PlexHub hub) {
+  String? _hubLibraryGlobalKey(MediaHub hub) {
     final serverId = hub.serverId;
     if (serverId == null) return null;
-    final sectionId = hub.librarySectionID ?? hub.items.firstOrNull?.librarySectionID;
+    final sectionId = hub.libraryId ?? hub.items.firstOrNull?.libraryId;
     if (sectionId == null) return null;
-    return buildGlobalKey(serverId, sectionId.toString());
+    return buildGlobalKey(serverId, sectionId);
   }
 
   /// Refresh only the Continue Watching section in the background
@@ -623,7 +660,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
 
         // Sync to Android TV Watch Next row
         if (Platform.isAndroid) {
-          _syncWatchNext(onDeck);
+          unawaited(_syncWatchNext(onDeck));
         }
 
         appLogger.d('Continue Watching refreshed successfully');
@@ -634,10 +671,14 @@ class _DiscoverScreenState extends State<DiscoverScreen>
     }
   }
 
-  /// Sync On Deck items to Android TV Watch Next row
-  Future<void> _syncWatchNext(List<PlexMetadata> onDeck) async {
+  /// Sync On Deck items to Android TV Watch Next row.
+  Future<void> _syncWatchNext(List<MediaItem> onDeck) async {
     try {
-      await WatchNextService().syncFromOnDeck(onDeck, (serverId) => context.getClientForServer(serverId));
+      await WatchNextService().syncFromOnDeck(
+        onDeck,
+        (serverId) => context.getMediaClientWithFallback(serverId),
+        hideSpoilers: context.settingsRead(SettingsService.hideSpoilers),
+      );
     } catch (e) {
       appLogger.w('Failed to sync Watch Next', error: e);
     }
@@ -764,18 +805,22 @@ class _DiscoverScreenState extends State<DiscoverScreen>
   }
 
   @override
-  void updateItemInLists(String ratingKey, PlexMetadata updatedMetadata) {
+  void updateItemInLists(String itemId, MediaItem updatedItem) {
     // Check and update in _onDeck list
-    final onDeckIndex = _onDeck.indexWhere((item) => item.ratingKey == ratingKey);
+    final onDeckIndex = _onDeck.indexWhere((item) => item.id == itemId);
     if (onDeckIndex != -1) {
-      _onDeck[onDeckIndex] = updatedMetadata;
+      _onDeck[onDeckIndex] = updatedItem;
     }
 
-    // Check and update in hub items
-    for (final hub in _hubs) {
-      final itemIndex = hub.items.indexWhere((item) => item.ratingKey == ratingKey);
+    // Check and update in hub items. [MediaHub.items] is immutable list view;
+    // rebuild the hub when one of its items needs to change.
+    for (var i = 0; i < _hubs.length; i++) {
+      final hub = _hubs[i];
+      final itemIndex = hub.items.indexWhere((item) => item.id == itemId);
       if (itemIndex != -1) {
-        hub.items[itemIndex] = updatedMetadata;
+        final newItems = List<MediaItem>.from(hub.items);
+        newItems[itemIndex] = updatedItem;
+        _hubs[i] = hub.copyWith(items: newItems);
       }
     }
   }
@@ -790,22 +835,38 @@ class _DiscoverScreenState extends State<DiscoverScreen>
     );
 
     if (confirm && mounted) {
+      final navigator = Navigator.of(context, rootNavigator: true);
       // Use comprehensive logout through UserProfileProvider
       final userProfileProvider = Provider.of<UserProfileProvider>(context, listen: false);
       final multiServerProvider = context.read<MultiServerProvider>();
       final hiddenLibrariesProvider = context.read<HiddenLibrariesProvider>();
       final playbackStateProvider = context.read<PlaybackStateProvider>();
+      final connectionRegistry = context.read<ConnectionRegistry>();
+      final profileRegistry = context.read<ProfileRegistry>();
+      final profileConnReg = context.read<ProfileConnectionRegistry>();
+      final plexHome = context.read<PlexHomeService>();
+      final companionRemote = context.read<CompanionRemoteProvider>();
 
       // Clear all user data and provider states
+      await companionRemote.resetForLogout();
       await userProfileProvider.logout();
       multiServerProvider.clearAllConnections();
+      // Drop the profile/connection rows so the next sign-in starts clean
+      // and doesn't bind to stale tokens or orphaned profile rows.
+      await profileConnReg.clear();
+      await profileRegistry.clear();
+      await connectionRegistry.clear();
+      await plexHome.clearAll();
+      final storage = await StorageService.getInstance();
+      await storage.clearActiveProfileId();
+      await storage.clearAllProfileLastUsed();
       await hiddenLibrariesProvider.refresh();
       playbackStateProvider.clearShuffle();
 
-      if (mounted) {
-        Navigator.of(
-          context,
-        ).pushAndRemoveUntil(MaterialPageRoute(builder: (context) => const AuthScreen()), (route) => false);
+      if (navigator.mounted) {
+        unawaited(
+          navigator.pushAndRemoveUntil(MaterialPageRoute(builder: (context) => const AuthScreen()), (route) => false),
+        );
       }
     }
   }
@@ -814,12 +875,96 @@ class _DiscoverScreenState extends State<DiscoverScreen>
     Navigator.push(context, MaterialPageRoute(builder: (context) => const ProfileSwitchScreen()));
   }
 
+  /// Build the [FocusableAction] wrapping the user-menu PopupMenuButton.
+  /// Pulls live state from [ActiveProfileProvider]; the menu reuses
+  /// [_userMenuItems] for the menu contents so d-pad and tap paths
+  /// stay in sync.
+  FocusableAction _buildUserMenuAction(BuildContext context) {
+    final activeProvider = context.watch<ActiveProfileProvider>();
+    final active = activeProvider.active;
+    final profiles = activeProvider.profiles;
+
+    return FocusableAction(
+      onPressed: () => _showUserMenu(context),
+      child: PopupMenuButton<String>(
+        icon: active != null
+            ? ProfileAvatar(profile: active, size: 32)
+            : const AppIcon(Symbols.account_circle_rounded, fill: 1, size: 32, color: Colors.white),
+        itemBuilder: (context) => _userMenuItems(context, activeProfile: active, profiles: profiles),
+      ),
+    );
+  }
+
+  List<PopupMenuEntry<String>> _userMenuItems(
+    BuildContext context, {
+    required Profile? activeProfile,
+    required List<Profile> profiles,
+  }) {
+    final theme = Theme.of(context);
+    final switchable = profiles.where((p) => p.id != activeProfile?.id).toList();
+    void deferAction(String value) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (context.mounted) _handleUserMenuAction(context, value);
+      });
+    }
+
+    return [
+      for (final p in switchable)
+        PopupMenuItem<String>(
+          value: 'profile:${p.id}',
+          onTap: () => deferAction('profile:${p.id}'),
+          child: Row(
+            children: [
+              ProfileAvatar(profile: p, size: 24),
+              const SizedBox(width: 12),
+              Expanded(child: Text(p.displayName, overflow: TextOverflow.ellipsis)),
+              if (p.isPinProtected) ...[
+                const SizedBox(width: 8),
+                AppIcon(Symbols.lock_rounded, fill: 1, size: 14, color: theme.colorScheme.onSurfaceVariant),
+              ],
+            ],
+          ),
+        ),
+      if (switchable.isNotEmpty) const PopupMenuDivider(),
+      PopupMenuItem<String>(
+        value: 'manage_profiles',
+        onTap: () => deferAction('manage_profiles'),
+        child: const Row(children: [AppIcon(Symbols.group_rounded, fill: 1), SizedBox(width: 8), Text('Profiles')]),
+      ),
+      PopupMenuItem<String>(
+        value: 'logout',
+        onTap: () => deferAction('logout'),
+        child: Row(
+          children: [const AppIcon(Symbols.logout_rounded, fill: 1), const SizedBox(width: 8), Text(t.common.logout)],
+        ),
+      ),
+    ];
+  }
+
+  Future<void> _handleUserMenuAction(BuildContext context, String value) async {
+    if (value == 'logout') {
+      unawaited(_handleLogout());
+      return;
+    }
+    if (value == 'manage_profiles') {
+      _handleSwitchProfile(context);
+      return;
+    }
+    if (value.startsWith('profile:')) {
+      final id = value.substring('profile:'.length);
+      final active = context.read<ActiveProfileProvider>();
+      final target = active.profiles.where((p) => p.id == id).firstOrNull;
+      if (target == null) return;
+      await activateProfileWithPin(context, target);
+    }
+  }
+
   /// Show user menu programmatically (for D-pad select)
-  void _showUserMenu(BuildContext context, UserProfileProvider userProvider) {
+  void _showUserMenu(BuildContext context) {
     final actionBar = _actionBarKey.currentState;
     if (actionBar == null) return;
     final lastNode = actionBar.getFocusNode(actionBar.widget.actions.length - 1);
-    final RenderBox? button = lastNode.context?.findRenderObject() as RenderBox?;
+    final RenderBox? button = lastNode?.context?.findRenderObject() as RenderBox?;
     if (button == null) return;
 
     final RenderBox overlay = Navigator.of(context).overlay!.context.findRenderObject() as RenderBox;
@@ -831,41 +976,19 @@ class _DiscoverScreenState extends State<DiscoverScreen>
       Offset.zero & overlay.size,
     );
 
-    showMenu<String>(
-      context: context,
-      position: position,
-      items: [
-        if (userProvider.hasMultipleUsers)
-          PopupMenuItem(
-            value: 'switch_profile',
-            child: Row(
-              children: [
-                AppIcon(Symbols.people_rounded, fill: 1),
-                const SizedBox(width: 8),
-                Text(t.discover.switchProfile),
-              ],
-            ),
-          ),
-        PopupMenuItem(
-          value: 'logout',
-          child: Row(
-            children: [AppIcon(Symbols.logout_rounded, fill: 1), const SizedBox(width: 8), Text(t.common.logout)],
-          ),
-        ),
-      ],
-    ).then((value) {
-      if (!context.mounted) return;
-      if (value == 'switch_profile') {
-        _handleSwitchProfile(context);
-      } else if (value == 'logout') {
-        _handleLogout();
-      }
-    });
+    final activeProvider = context.read<ActiveProfileProvider>();
+    unawaited(
+      showMenu<String>(
+        context: context,
+        position: position,
+        items: _userMenuItems(context, activeProfile: activeProvider.active, profiles: activeProvider.profiles),
+      ),
+    );
   }
 
   Widget _buildOverlaidAppBar() {
-    final statusBarHeight = MediaQuery.of(context).padding.top;
-    return Container(
+    final statusBarHeight = MediaQuery.paddingOf(context).top;
+    return DecoratedBox(
       decoration: BoxDecoration(
         gradient: LinearGradient(
           begin: Alignment.topCenter,
@@ -895,7 +1018,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
               Consumer2<WatchTogetherProvider, CompanionRemoteProvider>(
                 builder: (context, watchTogether, companionRemote, _) {
                   final isDesktop = PlatformDetector.shouldActAsRemoteHost(context);
-                  final userProvider = context.watch<UserProfileProvider>();
+                  final colorScheme = Theme.of(context).colorScheme;
 
                   return FocusableActionBar(
                     key: _actionBarKey,
@@ -913,7 +1036,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
                               icon: AppIcon(
                                 Symbols.group_rounded,
                                 fill: watchTogether.isInSession ? 1 : 0,
-                                color: watchTogether.isInSession ? Theme.of(context).colorScheme.primary : Colors.white,
+                                color: watchTogether.isInSession ? colorScheme.primary : Colors.white,
                               ),
                               onPressed: () => Navigator.push(
                                 context,
@@ -928,13 +1051,13 @@ class _DiscoverScreenState extends State<DiscoverScreen>
                                 child: Container(
                                   padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
                                   decoration: BoxDecoration(
-                                    color: Theme.of(context).colorScheme.primary,
+                                    color: colorScheme.primary,
                                     borderRadius: const BorderRadius.all(Radius.circular(8)),
                                   ),
                                   child: Text(
                                     '${watchTogether.participantCount}',
                                     style: TextStyle(
-                                      color: Theme.of(context).colorScheme.onPrimary,
+                                      color: colorScheme.onPrimary,
                                       fontSize: 10,
                                       fontWeight: FontWeight.bold,
                                     ),
@@ -962,9 +1085,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
                               icon: AppIcon(
                                 Symbols.phone_android_rounded,
                                 fill: companionRemote.isConnected ? 1 : 0,
-                                color: companionRemote.isConnected
-                                    ? Theme.of(context).colorScheme.primary
-                                    : Colors.white,
+                                color: companionRemote.isConnected ? colorScheme.primary : Colors.white,
                               ),
                               onPressed: () {
                                 if (isDesktop) {
@@ -995,48 +1116,15 @@ class _DiscoverScreenState extends State<DiscoverScreen>
                           ],
                         ),
                       ),
-                      // Server Tasks
-                      if (PlatformDetector.isDesktop(context))
+                      // Server Tasks — Plex-only (`/activities` API has no
+                      // Jellyfin equivalent), hide the button entirely on
+                      // Jellyfin-only profiles so the chrome doesn't show
+                      // a permanently empty popover.
+                      if (PlatformDetector.isDesktop(context) &&
+                          context.select<MultiServerProvider, bool>((p) => p.hasOnlinePlexServers))
                         const FocusableAction(child: ServerActivitiesButton()),
-                      // User menu
-                      FocusableAction(
-                        onPressed: () => _showUserMenu(context, userProvider),
-                        child: PopupMenuButton<String>(
-                          icon: userProvider.currentUser?.thumb != null
-                              ? UserAvatarWidget(user: userProvider.currentUser!, size: 32, showIndicators: false)
-                              : const AppIcon(Symbols.account_circle_rounded, fill: 1, size: 32, color: Colors.white),
-                          onSelected: (value) {
-                            if (value == 'switch_profile') {
-                              _handleSwitchProfile(context);
-                            } else if (value == 'logout') {
-                              _handleLogout();
-                            }
-                          },
-                          itemBuilder: (context) => [
-                            if (userProvider.hasMultipleUsers)
-                              PopupMenuItem(
-                                value: 'switch_profile',
-                                child: Row(
-                                  children: [
-                                    AppIcon(Symbols.people_rounded, fill: 1),
-                                    const SizedBox(width: 8),
-                                    Text(t.discover.switchProfile),
-                                  ],
-                                ),
-                              ),
-                            PopupMenuItem(
-                              value: 'logout',
-                              child: Row(
-                                children: [
-                                  AppIcon(Symbols.logout_rounded, fill: 1),
-                                  const SizedBox(width: 8),
-                                  Text(t.common.logout),
-                                ],
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
+                      // User menu — profiles + sign out
+                      _buildUserMenuAction(context),
                     ],
                   );
                 },
@@ -1050,50 +1138,56 @@ class _DiscoverScreenState extends State<DiscoverScreen>
 
   @override
   Widget build(BuildContext context) {
-    // Get settings for server name display
-    final showServerNameOnHubs = context.watch<SettingsProvider>().showServerNameOnHubs;
+    return SettingsBuilder(
+      prefs: const [
+        SettingsService.showServerNameOnHubs,
+        SettingsService.showHeroSection,
+        SettingsService.hideSpoilers,
+      ],
+      builder: (context) => _buildContent(context),
+    );
+  }
+
+  Widget _buildContent(BuildContext context) {
+    final svc = SettingsService.instanceOrNull!;
+    final showServerNameOnHubs = svc.read(SettingsService.showServerNameOnHubs);
+    final showHeroSection = svc.read(SettingsService.showHeroSection);
     final duplicateHubTitles = _getDuplicateHubTitles();
 
-    final bottomPadding = MediaQuery.of(context).padding.bottom;
+    final bottomPadding = MediaQuery.paddingOf(context).bottom;
+    final theme = Theme.of(context);
     return Material(
-      color: Theme.of(context).scaffoldBackgroundColor,
+      color: theme.scaffoldBackgroundColor,
       child: Stack(
         children: [
           CustomScrollView(
             controller: _scrollController,
             slivers: [
               // Hero Section (Continue Watching) - at top of screen
-              Consumer<SettingsProvider>(
-                builder: (context, settingsProvider, child) {
-                  if (_onDeck.isNotEmpty && settingsProvider.showHeroSection) {
+              Builder(
+                builder: (context) {
+                  if (_onDeck.isNotEmpty && showHeroSection) {
                     return _buildHeroSection();
                   }
                   // Add top padding when hero is not shown
                   return SliverToBoxAdapter(
-                    child: SizedBox(height: kToolbarHeight + MediaQuery.of(context).padding.top + 16),
+                    child: SizedBox(height: kToolbarHeight + MediaQuery.paddingOf(context).top + 16),
                   );
                 },
               ),
-              if (_isLoading) const SliverFillRemaining(child: Center(child: CircularProgressIndicator())),
-              if (_errorMessage != null)
-                SliverFillRemaining(
-                  child: ErrorStateWidget(
-                    message: _errorMessage!,
-                    icon: Symbols.error_outline_rounded,
-                    onRetry: _loadContent,
-                  ),
-                ),
+              if (_isLoading) LoadingIndicatorBox.sliver,
+              if (_errorMessage != null) SliverErrorState(message: _errorMessage!, onRetry: _loadContent),
               if (!_isLoading && _errorMessage == null) ...[
                 // On Deck / Continue Watching
                 if (_onDeck.isNotEmpty)
                   SliverToBoxAdapter(
                     child: HubSection(
                       key: _continueWatchingHubKey,
-                      hub: PlexHub(
-                        hubKey: 'continue_watching',
+                      hub: MediaHub(
+                        id: 'continue_watching',
                         title: t.discover.continueWatching,
                         type: 'mixed',
-                        hubIdentifier: '_continue_watching_',
+                        identifier: '_continue_watching_',
                         size: _onDeck.length,
                         more: false,
                         items: _onDeck,
@@ -1133,17 +1227,15 @@ class _DiscoverScreenState extends State<DiscoverScreen>
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            // Hub title skeleton
                             Container(
                               width: 200,
                               height: 24,
                               decoration: BoxDecoration(
-                                color: Theme.of(context).colorScheme.surfaceContainerHighest,
+                                color: theme.colorScheme.surfaceContainerHighest,
                                 borderRadius: const BorderRadius.all(Radius.circular(4)),
                               ),
                             ),
                             const SizedBox(height: 16),
-                            // Hub items skeleton
                             SizedBox(
                               height: 200,
                               child: ListView.builder(
@@ -1196,9 +1288,9 @@ class _DiscoverScreenState extends State<DiscoverScreen>
   }
 
   Widget _buildHeroSection() {
-    final statusBarHeight = MediaQuery.of(context).padding.top;
+    final statusBarHeight = MediaQuery.paddingOf(context).top;
     final useSideNav = PlatformDetector.shouldUseSideNavigation(context);
-    final heroHeight = useSideNav ? MediaQuery.of(context).size.height * 0.75 : 500 + statusBarHeight;
+    final heroHeight = useSideNav ? MediaQuery.sizeOf(context).height * 0.75 : 500 + statusBarHeight;
     return SliverToBoxAdapter(
       child: Focus(
         focusNode: _heroFocusNode,
@@ -1226,87 +1318,85 @@ class _DiscoverScreenState extends State<DiscoverScreen>
               ),
               // Page indicators with animated progress and pause/play button
               if (!InputModeTracker.isKeyboardMode(context))
-              Positioned(
-                bottom: 16,
-                left: -26,
-                right: 0,
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    // Pause/Play button
-                    GestureDetector(
-                      onTap: () {
-                        if (_isAutoScrollPaused) {
-                          _resumeAutoScroll();
-                        } else {
-                          _pauseAutoScroll();
-                        }
-                      },
-                      child: AppIcon(
-                        _isAutoScrollPaused ? Symbols.play_arrow_rounded : Symbols.pause_rounded,
-                        fill: 1,
-                        color: Theme.of(context).colorScheme.onSurface,
-                        size: 18,
-                        semanticLabel: '${_isAutoScrollPaused ? t.common.play : t.common.pause} auto-scroll',
+                Positioned(
+                  bottom: 16,
+                  left: -26,
+                  right: 0,
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      // Pause/Play button
+                      GestureDetector(
+                        onTap: () {
+                          if (_isAutoScrollPaused) {
+                            _resumeAutoScroll();
+                          } else {
+                            _pauseAutoScroll();
+                          }
+                        },
+                        child: AppIcon(
+                          _isAutoScrollPaused ? Symbols.play_arrow_rounded : Symbols.pause_rounded,
+                          fill: 1,
+                          color: Theme.of(context).colorScheme.onSurface,
+                          size: 18,
+                          semanticLabel: '${_isAutoScrollPaused ? t.common.play : t.common.pause} auto-scroll',
+                        ),
                       ),
-                    ),
-                    // Spacer to separate indicators from button
-                    const SizedBox(width: 8),
-                    // Page indicators (limited to 5 dots)
-                    ...() {
-                      final range = _getVisibleDotRange();
-                      return List.generate(range.end - range.start + 1, (i) {
-                        final index = range.start + i;
-                        final isActive = _currentHeroIndex == index;
-                        final dotSize = _getDotSize(index, range.start, range.end);
+                      const SizedBox(width: 8),
+                      ...() {
+                        final range = _getVisibleDotRange();
+                        return List.generate(range.end - range.start + 1, (i) {
+                          final index = range.start + i;
+                          final isActive = _currentHeroIndex == index;
+                          final dotSize = _getDotSize(index, range.start, range.end);
 
-                        return isActive
-                            // Progress indicator for active page (~5fps via Timer)
-                            ? ValueListenableBuilder<double>(
-                                valueListenable: _indicatorProgress,
-                                builder: (context, progress, child) {
-                                  final maxWidth = dotSize * 3; // 24px for normal, 15px for small
-                                  final fillWidth = dotSize + ((maxWidth - dotSize) * progress);
-                                  final onSurface = Theme.of(context).colorScheme.onSurface;
-                                  return Container(
-                                    margin: const EdgeInsets.symmetric(horizontal: 4),
-                                    width: maxWidth,
-                                    height: dotSize,
-                                    decoration: BoxDecoration(
-                                      color: onSurface.withValues(alpha: 0.4),
-                                      borderRadius: BorderRadius.circular(dotSize / 2),
-                                    ),
-                                    child: Align(
-                                      alignment: Alignment.centerLeft,
-                                      child: Container(
-                                        width: fillWidth,
-                                        height: dotSize,
-                                        decoration: BoxDecoration(
-                                          color: onSurface,
-                                          borderRadius: BorderRadius.circular(dotSize / 2),
+                          return isActive
+                              // Progress indicator for active page (~5fps via Timer)
+                              ? ValueListenableBuilder<double>(
+                                  valueListenable: _indicatorProgress,
+                                  builder: (context, progress, child) {
+                                    final maxWidth = dotSize * 3; // 24px for normal, 15px for small
+                                    final fillWidth = dotSize + ((maxWidth - dotSize) * progress);
+                                    final onSurface = Theme.of(context).colorScheme.onSurface;
+                                    return Container(
+                                      margin: const EdgeInsets.symmetric(horizontal: 4),
+                                      width: maxWidth,
+                                      height: dotSize,
+                                      decoration: BoxDecoration(
+                                        color: onSurface.withValues(alpha: 0.4),
+                                        borderRadius: BorderRadius.circular(dotSize / 2),
+                                      ),
+                                      child: Align(
+                                        alignment: Alignment.centerLeft,
+                                        child: Container(
+                                          width: fillWidth,
+                                          height: dotSize,
+                                          decoration: BoxDecoration(
+                                            color: onSurface,
+                                            borderRadius: BorderRadius.circular(dotSize / 2),
+                                          ),
                                         ),
                                       ),
-                                    ),
-                                  );
-                                },
-                              )
-                            // Static indicator for inactive pages
-                            : AnimatedContainer(
-                                duration: tokens(context).slow,
-                                curve: Curves.easeInOut,
-                                margin: const EdgeInsets.symmetric(horizontal: 4),
-                                width: dotSize,
-                                height: dotSize,
-                                decoration: BoxDecoration(
-                                  color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.4),
-                                  borderRadius: BorderRadius.circular(dotSize / 2),
-                                ),
-                              );
-                      });
-                    }(),
-                  ],
+                                    );
+                                  },
+                                )
+                              // Static indicator for inactive pages
+                              : AnimatedContainer(
+                                  duration: tokens(context).slow,
+                                  curve: Curves.easeInOut,
+                                  margin: const EdgeInsets.symmetric(horizontal: 4),
+                                  width: dotSize,
+                                  height: dotSize,
+                                  decoration: BoxDecoration(
+                                    color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.4),
+                                    borderRadius: BorderRadius.circular(dotSize / 2),
+                                  ),
+                                );
+                        });
+                      }(),
+                    ],
+                  ),
                 ),
-              ),
             ],
           ),
         ),
@@ -1314,17 +1404,20 @@ class _DiscoverScreenState extends State<DiscoverScreen>
     );
   }
 
-  Widget _buildHeroItem(PlexMetadata heroItem, double heroHeight) {
+  Widget _buildHeroItem(MediaItem heroItem, double heroHeight) {
+    final heroClient = _getMediaClientForItem(heroItem);
     final isEpisode = heroItem.isEpisode;
     final showName = heroItem.grandparentTitle ?? heroItem.displayTitle;
-    final screenWidth = MediaQuery.of(context).size.width;
+    final screenWidth = MediaQuery.sizeOf(context).width;
     final isLargeScreen = ScreenBreakpoints.isWideTabletOrLarger(screenWidth);
+    final theme = Theme.of(context);
+    final colorScheme = theme.colorScheme;
 
     // Determine content type label for chip
     final contentTypeLabel = heroItem.isMovie ? t.discover.movie : t.discover.tvShow;
 
     // Spoiler protection
-    final hideSpoilers = context.watch<SettingsProvider>().hideSpoilers;
+    final hideSpoilers = SettingsService.instanceOrNull!.read(SettingsService.hideSpoilers);
     final shouldHideSpoiler = hideSpoilers && heroItem.shouldHideSpoiler;
 
     // Build semantic label for hero item
@@ -1344,7 +1437,9 @@ class _DiscoverScreenState extends State<DiscoverScreen>
           clipBehavior: Clip.none,
           children: [
             // Background Image with fade/zoom animation and parallax
-            if (heroItem.art != null || heroItem.backgroundSquare != null || heroItem.grandparentArt != null)
+            if (heroItem.artPath != null ||
+                heroItem.backgroundSquarePath != null ||
+                heroItem.grandparentArtPath != null)
               ClipRect(
                 child: AnimatedBuilder(
                   animation: _scrollController,
@@ -1364,27 +1459,38 @@ class _DiscoverScreenState extends State<DiscoverScreen>
                     },
                     child: Builder(
                       builder: (context) {
-                        final client = _getClientForItem(heroItem);
-                        final mediaQuery = MediaQuery.of(context);
-                        final dpr = PlexImageHelper.effectiveDevicePixelRatio(context);
+                        // heroClient resolves to the actual server's client
+                        // (Plex or Jellyfin) so each backend's transcoder
+                        // builds sized URLs.
+                        final size = MediaQuery.sizeOf(context);
+                        final dpr = MediaImageHelper.effectiveDevicePixelRatio(context);
                         final containerAspect = screenWidth / heroHeight;
-                        final imageUrl = PlexImageHelper.getOptimizedImageUrl(
-                          client: client,
-                          thumbPath: heroItem.heroArt(containerAspectRatio: containerAspect) ?? heroItem.grandparentArt,
-                          maxWidth: mediaQuery.size.width,
-                          maxHeight: mediaQuery.size.height * 0.7,
+                        final imageUrl = MediaImageHelper.getOptimizedImageUrl(
+                          client: heroClient,
+                          thumbPath:
+                              heroItem.heroArt(containerAspectRatio: containerAspect) ?? heroItem.grandparentArtPath,
+                          maxWidth: size.width,
+                          maxHeight: size.height * 0.7,
                           devicePixelRatio: dpr,
+                          imageType: ImageType.art,
+                        );
+
+                        final (_, memHeight) = MediaImageHelper.getMemCacheDimensions(
+                          displayWidth: (screenWidth * dpr).round(),
+                          displayHeight: (heroHeight * dpr).round(),
                           imageType: ImageType.art,
                         );
 
                         return blurArtwork(
                           CachedNetworkImage(
                             imageUrl: imageUrl,
+                            cacheManager: PlexImageCacheManager.instance,
                             fit: BoxFit.cover,
+                            memCacheHeight: memHeight,
                             placeholder: (context, url) =>
-                                Container(color: Theme.of(context).colorScheme.surfaceContainerHighest),
-                            errorWidget: (context, url, error) =>
-                                Container(color: Theme.of(context).colorScheme.surfaceContainerHighest),
+                                ColoredBox(color: Theme.of(context).colorScheme.surfaceContainerHighest),
+                            errorBuilder: (context, error, stackTrace) =>
+                                ColoredBox(color: Theme.of(context).colorScheme.surfaceContainerHighest),
                           ),
                         );
                       },
@@ -1393,7 +1499,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
                 ),
               )
             else
-              Container(color: Theme.of(context).colorScheme.surfaceContainerHighest),
+              ColoredBox(color: colorScheme.surfaceContainerHighest),
 
             // Gradient Overlay - blends into scaffold background
             Positioned(
@@ -1432,17 +1538,16 @@ class _DiscoverScreenState extends State<DiscoverScreen>
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     // Show logo or name/title
-                    if (heroItem.clearLogo != null)
+                    if (heroItem.clearLogoPath != null)
                       SizedBox(
                         height: 120,
                         width: 400,
                         child: Builder(
                           builder: (context) {
-                            final client = _getClientForItem(heroItem);
-                            final dpr = PlexImageHelper.effectiveDevicePixelRatio(context);
-                            final logoUrl = PlexImageHelper.getOptimizedImageUrl(
-                              client: client,
-                              thumbPath: heroItem.clearLogo,
+                            final dpr = MediaImageHelper.effectiveDevicePixelRatio(context);
+                            final logoUrl = MediaImageHelper.getOptimizedImageUrl(
+                              client: heroClient,
+                              thumbPath: heroItem.clearLogoPath,
                               maxWidth: 400,
                               maxHeight: 120,
                               devicePixelRatio: dpr,
@@ -1452,43 +1557,25 @@ class _DiscoverScreenState extends State<DiscoverScreen>
                             return blurArtwork(
                               CachedNetworkImage(
                                 imageUrl: logoUrl,
+                                cacheManager: PlexImageCacheManager.instance,
                                 filterQuality: FilterQuality.medium,
                                 fit: BoxFit.contain,
                                 memCacheWidth: (400 * dpr).clamp(200, 800).round(),
                                 alignment: isLargeScreen ? Alignment.bottomLeft : Alignment.bottomCenter,
-                                placeholder: (context, url) => Align(
-                                  alignment: isLargeScreen ? Alignment.centerLeft : Alignment.center,
-                                  child: Text(
-                                    showName,
-                                    style: Theme.of(context).textTheme.displaySmall?.copyWith(
-                                      color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.3),
-                                      fontWeight: FontWeight.bold,
-                                      shadows: [
-                                        Shadow(
-                                          color: Theme.of(context).colorScheme.surface.withValues(alpha: 0.8),
-                                          blurRadius: 8,
-                                        ),
-                                      ],
-                                    ),
-                                    maxLines: 2,
-                                    overflow: TextOverflow.ellipsis,
-                                    textAlign: isLargeScreen ? TextAlign.left : TextAlign.center,
-                                  ),
-                                ),
-                                errorWidget: (context, url, error) {
+                                placeholder: (context, url) => const SizedBox.shrink(),
+                                errorBuilder: (context, error, stackTrace) {
                                   // Fallback to text if logo fails to load
+                                  final theme = Theme.of(context);
+                                  final colorScheme = theme.colorScheme;
                                   return Align(
                                     alignment: isLargeScreen ? Alignment.centerLeft : Alignment.center,
                                     child: Text(
                                       showName,
-                                      style: Theme.of(context).textTheme.displaySmall?.copyWith(
-                                        color: Theme.of(context).colorScheme.onSurface,
+                                      style: theme.textTheme.displaySmall?.copyWith(
+                                        color: colorScheme.onSurface,
                                         fontWeight: FontWeight.bold,
                                         shadows: [
-                                          Shadow(
-                                            color: Theme.of(context).colorScheme.surface.withValues(alpha: 0.8),
-                                            blurRadius: 8,
-                                          ),
+                                          Shadow(color: colorScheme.surface.withValues(alpha: 0.8), blurRadius: 8),
                                         ],
                                       ),
                                       maxLines: 2,
@@ -1507,12 +1594,10 @@ class _DiscoverScreenState extends State<DiscoverScreen>
                     else
                       Text(
                         showName,
-                        style: Theme.of(context).textTheme.displaySmall?.copyWith(
-                          color: Theme.of(context).colorScheme.onSurface,
+                        style: theme.textTheme.displaySmall?.copyWith(
+                          color: colorScheme.onSurface,
                           fontWeight: FontWeight.bold,
-                          shadows: [
-                            Shadow(color: Theme.of(context).colorScheme.surface.withValues(alpha: 0.8), blurRadius: 8),
-                          ],
+                          shadows: [Shadow(color: colorScheme.surface.withValues(alpha: 0.8), blurRadius: 8)],
                         ),
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
@@ -1525,7 +1610,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
                       Text(
                         [
                           contentTypeLabel,
-                          if (heroItem.rating != null) '★ ${heroItem.rating!.toStringAsFixed(1)}',
+                          if (heroItem.rating != null) '★ ${formatRating(heroItem.rating!)}',
                           if (heroItem.contentRating != null) formatContentRating(heroItem.contentRating!),
                           if (heroItem.year != null) heroItem.year.toString(),
                         ].join(' • '),
@@ -1548,7 +1633,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
                           style: TextStyle(
                             color: isLargeScreen
                                 ? Colors.white.withValues(alpha: 0.7)
-                                : Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.7),
+                                : colorScheme.onSurface.withValues(alpha: 0.7),
                             fontSize: 14,
                             height: 1.4,
                           ),
@@ -1558,18 +1643,21 @@ class _DiscoverScreenState extends State<DiscoverScreen>
                                 text: 'S${heroItem.parentIndex}, E${heroItem.index}: ',
                                 style: TextStyle(
                                   fontWeight: FontWeight.bold,
-                                  color: isLargeScreen ? Colors.white : Theme.of(context).colorScheme.onSurface,
+                                  color: isLargeScreen ? Colors.white : colorScheme.onSurface,
                                 ),
                               ),
                             TextSpan(
                               text: heroItem.summary?.isNotEmpty == true
                                   ? heroItem.summary!
-                                  : 'No description available',
+                                  : t.messages.noDescriptionAvailable,
                             ),
                           ],
                         ),
                       ),
-                    ] else if (shouldHideSpoiler && isEpisode && heroItem.parentIndex != null && heroItem.index != null) ...[
+                    ] else if (shouldHideSpoiler &&
+                        isEpisode &&
+                        heroItem.parentIndex != null &&
+                        heroItem.index != null) ...[
                       const SizedBox(height: 12),
                       Text(
                         'S${heroItem.parentIndex}, E${heroItem.index}: ${heroItem.title}',
@@ -1579,7 +1667,7 @@ class _DiscoverScreenState extends State<DiscoverScreen>
                         style: TextStyle(
                           color: isLargeScreen
                               ? Colors.white.withValues(alpha: 0.7)
-                              : Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.7),
+                              : colorScheme.onSurface.withValues(alpha: 0.7),
                           fontSize: 14,
                           height: 1.4,
                         ),
@@ -1598,13 +1686,12 @@ class _DiscoverScreenState extends State<DiscoverScreen>
     );
   }
 
-  Widget _buildSmartPlayButton(PlexMetadata heroItem) {
-    final hasProgress =
-        heroItem.viewOffset != null && heroItem.duration != null && heroItem.viewOffset! > 0 && heroItem.duration! > 0;
+  Widget _buildSmartPlayButton(MediaItem heroItem) {
+    final hasProgress = heroItem.hasActiveProgress;
 
-    final minutesLeft = hasProgress ? ((heroItem.duration! - heroItem.viewOffset!) / 60000).round() : 0;
+    final minutesLeft = hasProgress ? ((heroItem.durationMs! - heroItem.viewOffsetMs!) / 60000).round() : 0;
 
-    final progress = hasProgress ? heroItem.viewOffset! / heroItem.duration! : 0.0;
+    final progress = hasProgress ? heroItem.viewOffsetMs! / heroItem.durationMs! : 0.0;
 
     return InkWell(
       onTap: () {

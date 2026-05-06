@@ -1,11 +1,16 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
-import 'package:qr_flutter/qr_flutter.dart';
 
+import '../../connection/connection_registry.dart';
 import '../../i18n/strings.g.dart';
+import '../../mixins/mounted_set_state_mixin.dart';
+import '../../profiles/active_plex_identity.dart';
+import '../../profiles/active_profile_provider.dart';
+import '../../profiles/plex_home_service.dart';
+import '../../profiles/profile_connection_registry.dart';
 import '../../providers/companion_remote_provider.dart';
 import '../../focus/focusable_button.dart';
+import '../../focus/key_event_utils.dart';
 import '../../utils/app_logger.dart';
 
 class RemoteSessionDialog extends StatefulWidget {
@@ -23,296 +28,262 @@ class RemoteSessionDialog extends StatefulWidget {
   }
 }
 
-class _RemoteSessionDialogState extends State<RemoteSessionDialog> {
-  bool _isCreatingSession = false;
+class _RemoteSessionDialogState extends State<RemoteSessionDialog> with MountedSetStateMixin {
+  bool _isStarting = false;
   String? _errorMessage;
-  List<String>? _hostAddresses; // Each format: "ip:port"
 
   @override
   void initState() {
     super.initState();
-    // Defer to avoid notifyListeners() during build phase
-    WidgetsBinding.instance.addPostFrameCallback((_) => _createSession());
+    WidgetsBinding.instance.addPostFrameCallback((_) => _ensureServerRunning());
   }
 
-  Future<void> _createSession() async {
+  Future<void> _ensureServerRunning() async {
+    final provider = context.read<CompanionRemoteProvider>();
+
     setState(() {
-      _isCreatingSession = true;
+      _isStarting = true;
       _errorMessage = null;
-      _hostAddresses = null;
     });
 
     try {
-      final provider = context.read<CompanionRemoteProvider>();
-      final result = await provider.createSession();
+      final connections = context.read<ConnectionRegistry>();
+      final activeProfile = context.read<ActiveProfileProvider>();
+      final profileConnections = context.read<ProfileConnectionRegistry>();
+      final plexHome = context.read<PlexHomeService>();
+      final identity = await resolveActivePlexIdentity(
+        activeProfile: activeProfile,
+        connections: connections,
+        profileConnections: profileConnections,
+      );
+      if (!mounted) return;
+      final home = identity == null ? null : await plexHome.materializePlexHomeForConnection(identity.account.id);
+      if (!mounted) return;
+      final ok = await provider.ensureCryptoReady(
+        home,
+        connections: connections,
+        activeProfile: activeProfile,
+        profileConnections: profileConnections,
+        identity: identity,
+        plexHomeForConnection: plexHome.materializePlexHomeForConnection,
+      );
+      if (!mounted) return;
+      if (!ok) {
+        setState(() {
+          _isStarting = false;
+          _errorMessage = t.companionRemote.pairing.cryptoInitFailed;
+        });
+        return;
+      }
+      if (!provider.isHostServerRunning) {
+        await provider.startHostServer();
+      }
 
-      if (!mounted) return;
-      setState(() {
-        _isCreatingSession = false;
-        _hostAddresses = result.addresses;
-      });
+      setStateIfMounted(() => _isStarting = false);
     } catch (e) {
-      appLogger.e('Failed to create companion remote session', error: e);
+      appLogger.e('Failed to start companion remote server', error: e);
       if (!mounted) return;
       setState(() {
-        _isCreatingSession = false;
+        _isStarting = false;
         _errorMessage = e.toString();
       });
     }
   }
 
-  void _copyToClipboard(String text, String label) {
-    Clipboard.setData(ClipboardData(text: text));
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(t.companionRemote.session.copiedToClipboard(label: label)),
-        duration: const Duration(seconds: 2),
-      ),
-    );
+  Future<void> _toggleServer() async {
+    final provider = context.read<CompanionRemoteProvider>();
+    if (provider.isHostServerRunning) {
+      await provider.stopHostServer();
+    } else {
+      await _ensureServerRunning();
+    }
   }
 
   @override
   Widget build(BuildContext context) {
-    return Consumer<CompanionRemoteProvider>(
-      builder: (context, provider, child) {
-        if (_isCreatingSession) {
-          return Dialog(
-            child: Padding(
-              padding: const EdgeInsets.all(32.0),
-              child: Column(
+    return Focus(
+      autofocus: true,
+      onKeyEvent: (node, event) => handleBackKeyNavigation(context, event),
+      child: Consumer<CompanionRemoteProvider>(
+        builder: (context, provider, child) {
+          if (_isStarting) {
+            return Dialog(
+              child: Padding(
+                padding: const EdgeInsets.all(32.0),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const CircularProgressIndicator(),
+                    const SizedBox(height: 16),
+                    Text(t.companionRemote.session.startingServer, style: Theme.of(context).textTheme.titleMedium),
+                  ],
+                ),
+              ),
+            );
+          }
+
+          if (_errorMessage != null) {
+            return AlertDialog(
+              title: Text(t.common.error),
+              content: Column(
                 mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const CircularProgressIndicator(),
-                  const SizedBox(height: 16),
-                  Text(t.companionRemote.session.creatingSession, style: Theme.of(context).textTheme.titleMedium),
+                  Text(t.companionRemote.session.failedToCreate),
+                  const SizedBox(height: 8),
+                  Text(_errorMessage!, style: const TextStyle(fontFamily: 'monospace')),
                 ],
               ),
-            ),
-          );
-        }
-
-        if (_errorMessage != null) {
-          return AlertDialog(
-            title: Text(t.common.error),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(t.companionRemote.session.failedToCreate),
-                const SizedBox(height: 8),
-                Text(_errorMessage!, style: const TextStyle(fontFamily: 'monospace')),
+              actions: [
+                TextButton(onPressed: () => Navigator.of(context).pop(), child: Text(t.common.close)),
+                TextButton(onPressed: _ensureServerRunning, child: Text(t.common.retry)),
               ],
-            ),
-            actions: [
-              TextButton(onPressed: () => Navigator.of(context).pop(), child: Text(t.common.close)),
-              TextButton(onPressed: _createSession, child: Text(t.common.retry)),
-            ],
-          );
-        }
+            );
+          }
 
-        final session = provider.session;
-        if (session == null || _hostAddresses == null || _hostAddresses!.isEmpty) {
-          return AlertDialog(
-            title: Text(t.common.error),
-            content: Text(t.companionRemote.session.noSession),
-            actions: [TextButton(onPressed: () => Navigator.of(context).pop(), child: Text(t.common.close))],
-          );
-        }
-
-        // Extract port from first address (all share the same port)
-        final port = _hostAddresses!.first.split(':').last;
-        final ips = _hostAddresses!.map((a) => a.split(':').first).join(',');
-
-        // URL-wrapped QR format: comma-separated IPs for multi-NIC support
-        final qrData = 'https://plezy.app/scan#$ips|$port|${session.sessionId}|${session.pin}';
-
-        return Dialog(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 500),
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(24.0),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Row(
-                    children: [
-                      const Icon(Icons.phone_android, size: 32),
-                      const SizedBox(width: 16),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(t.companionRemote.title, style: Theme.of(context).textTheme.headlineSmall),
-                            const SizedBox(height: 4),
-                            Text(
-                              session.connectedDevice != null
-                                  ? t.companionRemote.connectedTo(name: session.connectedDevice!.name)
-                                  : t.companionRemote.session.waitingForConnection,
-                              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                                color: session.connectedDevice != null
-                                    ? Colors.green
-                                    : Theme.of(context).textTheme.bodySmall?.color,
-                              ),
-                            ),
-                          ],
+          return Dialog(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 500),
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(24.0),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      children: [
+                        const Icon(Icons.phone_android, size: 32),
+                        const SizedBox(width: 16),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(t.companionRemote.title, style: Theme.of(context).textTheme.headlineSmall),
+                              const SizedBox(height: 4),
+                              _buildStatusLine(context, provider),
+                            ],
+                          ),
                         ),
-                      ),
-                      IconButton(icon: const Icon(Icons.close), onPressed: () => Navigator.of(context).pop()),
-                    ],
-                  ),
-                  const SizedBox(height: 24),
-                  if (session.connectedDevice == null) ...[
-                    Text(
-                      t.companionRemote.session.scanQrCode,
-                      style: Theme.of(context).textTheme.titleMedium,
-                      textAlign: TextAlign.center,
-                    ),
-                    const SizedBox(height: 16),
-                    Center(
-                      child: Container(
-                        padding: const EdgeInsets.all(16),
-                        decoration: const BoxDecoration(
-                          color: Colors.white,
-                          borderRadius: BorderRadius.all(Radius.circular(12)),
-                        ),
-                        child: QrImageView(
-                          data: qrData,
-                          version: QrVersions.auto,
-                          size: 200,
-                          backgroundColor: Colors.white,
-                        ),
-                      ),
+                        IconButton(icon: const Icon(Icons.close), onPressed: () => Navigator.of(context).pop()),
+                      ],
                     ),
                     const SizedBox(height: 24),
-                    const Divider(),
-                    const SizedBox(height: 16),
-                    Text(
-                      t.companionRemote.session.orEnterManually,
-                      style: Theme.of(context).textTheme.titleMedium,
-                      textAlign: TextAlign.center,
-                    ),
-                    const SizedBox(height: 16),
-                    ..._hostAddresses!.map(
-                      (addr) => Padding(
-                        padding: const EdgeInsets.only(bottom: 12),
-                        child: _buildCodeCard(
-                          context,
-                          t.companionRemote.session.hostAddress,
-                          addr,
-                          onCopy: () => _copyToClipboard(addr, t.companionRemote.session.hostAddress),
+
+                    _buildServerStatus(context, provider),
+
+                    if (provider.connectedDevice != null) ...[
+                      const SizedBox(height: 16),
+                      _buildConnectedDevice(context, provider),
+                    ],
+
+                    const SizedBox(height: 24),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.end,
+                      children: [
+                        TextButton.icon(
+                          onPressed: _toggleServer,
+                          icon: Icon(provider.isHostServerRunning ? Icons.stop : Icons.play_arrow),
+                          label: Text(
+                            provider.isHostServerRunning
+                                ? t.companionRemote.session.stopServer
+                                : t.companionRemote.session.startServer,
+                          ),
                         ),
-                      ),
-                    ),
-                    _buildCodeCard(
-                      context,
-                      t.companionRemote.session.sessionId,
-                      session.sessionId,
-                      onCopy: () => _copyToClipboard(session.sessionId, t.companionRemote.session.sessionId),
-                    ),
-                    const SizedBox(height: 12),
-                    _buildCodeCard(
-                      context,
-                      t.companionRemote.session.pin,
-                      session.pin,
-                      onCopy: () => _copyToClipboard(session.pin, t.companionRemote.session.pin),
-                    ),
-                  ] else ...[
-                    Card(
-                      child: Padding(
-                        padding: const EdgeInsets.all(16.0),
-                        child: Column(
-                          children: [
-                            const Icon(Icons.check_circle, color: Colors.green, size: 48),
-                            const SizedBox(height: 8),
-                            Text(t.companionRemote.session.connected, style: Theme.of(context).textTheme.titleLarge),
-                            const SizedBox(height: 8),
-                            Text(session.connectedDevice!.name, style: Theme.of(context).textTheme.bodyLarge),
-                            Text(session.connectedDevice!.platform, style: Theme.of(context).textTheme.bodySmall),
-                          ],
+                        const SizedBox(width: 8),
+                        FocusableButton(
+                          onPressed: () => Navigator.of(context).pop(),
+                          child: FilledButton(
+                            onPressed: () => Navigator.of(context).pop(),
+                            child: Text(t.companionRemote.session.minimize),
+                          ),
                         ),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    Text(
-                      t.companionRemote.session.usePhoneToControl,
-                      style: Theme.of(context).textTheme.bodyMedium,
-                      textAlign: TextAlign.center,
+                      ],
                     ),
                   ],
-                  const SizedBox(height: 24),
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.end,
-                    children: [
-                      if (session.connectedDevice != null)
-                        TextButton.icon(
-                          onPressed: () async {
-                            await provider.leaveSession();
-                            await _createSession();
-                          },
-                          icon: const Icon(Icons.refresh),
-                          label: Text(t.companionRemote.session.newSession),
-                        ),
-                      const SizedBox(width: 8),
-                      FocusableButton(
-                        onPressed: () async {
-                          await provider.leaveSession();
-                          if (context.mounted) {
-                            Navigator.of(context).pop();
-                          }
-                        },
-                        child: TextButton(
-                          onPressed: () async {
-                            await provider.leaveSession();
-                            if (context.mounted) {
-                              Navigator.of(context).pop();
-                            }
-                          },
-                          child: Text(t.common.disconnect),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      FocusableButton(
-                        onPressed: () => Navigator.of(context).pop(),
-                        child: FilledButton(
-                          onPressed: () => Navigator.of(context).pop(),
-                          child: Text(t.companionRemote.session.minimize),
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
+                ),
               ),
             ),
-          ),
-        );
-      },
+          );
+        },
+      ),
     );
   }
 
-  Widget _buildCodeCard(BuildContext context, String label, String code, {VoidCallback? onCopy}) {
+  Widget _buildStatusLine(BuildContext context, CompanionRemoteProvider provider) {
+    if (provider.connectedDevice != null) {
+      return Text(
+        t.companionRemote.connectedTo(name: provider.connectedDevice!.name),
+        style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Colors.green),
+      );
+    }
+    if (provider.isHostServerRunning) {
+      return Text(
+        t.companionRemote.session.serverRunning,
+        style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Theme.of(context).textTheme.bodySmall?.color),
+      );
+    }
+    return Text(
+      t.companionRemote.session.serverStopped,
+      style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Colors.grey),
+    );
+  }
+
+  Widget _buildServerStatus(BuildContext context, CompanionRemoteProvider provider) {
+    final isRunning = provider.isHostServerRunning;
+
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16.0),
         child: Row(
           children: [
+            Container(
+              width: 12,
+              height: 12,
+              decoration: BoxDecoration(shape: BoxShape.circle, color: isRunning ? Colors.green : Colors.grey),
+            ),
+            const SizedBox(width: 16),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(label, style: Theme.of(context).textTheme.bodySmall),
+                  Text(
+                    isRunning ? t.companionRemote.session.serverRunning : t.companionRemote.session.serverStopped,
+                    style: Theme.of(context).textTheme.titleMedium,
+                  ),
                   const SizedBox(height: 4),
                   Text(
-                    code,
-                    style: Theme.of(context).textTheme.titleLarge?.copyWith(fontFamily: 'monospace', letterSpacing: 2),
+                    isRunning
+                        ? t.companionRemote.session.serverRunningDescription
+                        : t.companionRemote.session.serverStoppedDescription,
+                    style: Theme.of(context).textTheme.bodySmall,
                   ),
                 ],
               ),
             ),
-            IconButton(
-              icon: const Icon(Icons.copy),
-              onPressed: onCopy,
-              tooltip: t.companionRemote.session.copyToClipboard,
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildConnectedDevice(BuildContext context, CompanionRemoteProvider provider) {
+    final device = provider.connectedDevice!;
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          children: [
+            const Icon(Icons.check_circle, color: Colors.green, size: 48),
+            const SizedBox(height: 8),
+            Text(t.companionRemote.session.connected, style: Theme.of(context).textTheme.titleLarge),
+            const SizedBox(height: 8),
+            Text(device.name, style: Theme.of(context).textTheme.bodyLarge),
+            Text(device.platform, style: Theme.of(context).textTheme.bodySmall),
+            const SizedBox(height: 12),
+            Text(
+              t.companionRemote.session.usePhoneToControl,
+              style: Theme.of(context).textTheme.bodyMedium,
+              textAlign: TextAlign.center,
             ),
           ],
         ),

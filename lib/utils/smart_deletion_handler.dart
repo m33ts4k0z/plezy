@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../i18n/strings.g.dart';
 import '../providers/download_provider.dart';
 import '../widgets/deletion_progress_dialog.dart';
 
@@ -15,7 +16,6 @@ class SmartDeletionHandler {
     bool dialogShown = false;
     bool deletionComplete = false;
 
-    // Start a timer to show dialog after delay
     Future.delayed(Duration(milliseconds: delayMs), () {
       if (!deletionComplete && context.mounted) {
         dialogShown = true;
@@ -34,7 +34,6 @@ class SmartDeletionHandler {
     }
   }
 
-  /// Show progress dialog and listen to updates
   static void _showProgressDialog(BuildContext context, DownloadProvider _, String globalKey) {
     showDialog(
       context: context,
@@ -43,12 +42,11 @@ class SmartDeletionHandler {
         builder: (context, provider, child) {
           final progress = provider.getDeletionProgress(globalKey);
 
-          // If no progress, show simple fallback
           if (progress == null) {
-            return const AlertDialog(
+            return AlertDialog(
               content: Row(
                 mainAxisSize: MainAxisSize.min,
-                children: [CircularProgressIndicator(), SizedBox(width: 20), Text('Deleting...')],
+                children: [const CircularProgressIndicator(), const SizedBox(width: 20), Text(t.downloads.deleting)],
               ),
             );
           }

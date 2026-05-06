@@ -8,7 +8,7 @@ import '../focus/key_event_utils.dart';
 import '../i18n/strings.g.dart';
 import '../theme/mono_tokens.dart';
 import 'package:plezy/widgets/app_icon.dart';
-import '../models/plex_activity.dart';
+import '../models/plex/plex_activity.dart';
 import '../providers/multi_server_provider.dart';
 
 class ServerActivitiesButton extends StatefulWidget {
@@ -25,11 +25,7 @@ class _ServerResult {
   final String serverName;
   final List<PlexActivity> activities;
 
-  _ServerResult({
-    required this.serverId,
-    required this.serverName,
-    required this.activities,
-  });
+  const _ServerResult({required this.serverId, required this.serverName, required this.activities});
 }
 
 class _PanelData {
@@ -77,7 +73,7 @@ class _ServerActivitiesButtonState extends State<ServerActivitiesButton> {
     if (renderBox == null) return;
     final buttonOffset = renderBox.localToGlobal(Offset.zero);
     final buttonSize = renderBox.size;
-    final screenSize = MediaQuery.of(context).size;
+    final screenSize = MediaQuery.sizeOf(context);
 
     final right = screenSize.width - (buttonOffset.dx + buttonSize.width);
     final top = buttonOffset.dy + buttonSize.height + 4;
@@ -95,14 +91,11 @@ class _ServerActivitiesButtonState extends State<ServerActivitiesButton> {
     final serverIds = multiServer.onlineServerIds;
 
     final futures = serverIds.map((serverId) async {
-      final client = multiServer.getClientForServer(serverId);
+      // Plex-only: `/activities` API is Plex-specific.
+      final client = multiServer.getPlexClientForServer(serverId);
       if (client == null) return null;
       final activities = await client.getActivities();
-      return _ServerResult(
-        serverId: serverId,
-        serverName: client.serverName ?? serverId,
-        activities: activities,
-      );
+      return _ServerResult(serverId: serverId, serverName: client.serverName ?? serverId, activities: activities);
     });
 
     final rawResults = await Future.wait(futures);
@@ -134,14 +127,13 @@ class _ServerActivitiesButtonState extends State<ServerActivitiesButton> {
       final results = await _loadFromServers();
       if (!mounted) return;
       _panelNotifier.value = _PanelData(fetchState: _FetchState.loaded, results: results);
-    } catch (_) {
-      // silently ignore poll errors
-    }
+    } catch (_) {}
   }
 
   Future<void> _cancelActivity(String serverId, String uuid) async {
     final multiServer = Provider.of<MultiServerProvider>(context, listen: false);
-    final client = multiServer.getClientForServer(serverId);
+    // Plex-only: `/activities` API is Plex-specific.
+    final client = multiServer.getPlexClientForServer(serverId);
     if (client == null) return;
     try {
       await client.cancelActivity(uuid);
@@ -151,17 +143,14 @@ class _ServerActivitiesButtonState extends State<ServerActivitiesButton> {
     _pollTimer?.cancel();
     _pollTimer = null;
     _panelNotifier.value = _PanelData.loading;
-    _fetchActivities();
+    unawaited(_fetchActivities());
   }
 
   Widget _buildOverlay(BuildContext overlayContext, {required double right, required double top}) {
     return Stack(
       children: [
         Positioned.fill(
-          child: GestureDetector(
-            onTap: _removeOverlay,
-            behavior: HitTestBehavior.opaque,
-          ),
+          child: GestureDetector(onTap: _removeOverlay, behavior: HitTestBehavior.opaque),
         ),
         Positioned(
           right: right,
@@ -196,9 +185,7 @@ class _ServerActivitiesButtonState extends State<ServerActivitiesButton> {
             Divider(height: 1, color: theme.dividerColor),
             ConstrainedBox(
               constraints: const BoxConstraints(maxHeight: 360),
-              child: SingleChildScrollView(
-                child: _buildPanelBody(context, data),
-              ),
+              child: SingleChildScrollView(child: _buildPanelBody(context, data)),
             ),
           ],
         ),
@@ -214,10 +201,7 @@ class _ServerActivitiesButtonState extends State<ServerActivitiesButton> {
         children: [
           AppIcon(Symbols.monitor_heart_rounded, size: 18, color: theme.colorScheme.onSurface),
           const SizedBox(width: 8),
-          Text(
-            t.serverTasks.title,
-            style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.bold),
-          ),
+          Text(t.serverTasks.title, style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.bold)),
         ],
       ),
     );
@@ -232,9 +216,7 @@ class _ServerActivitiesButtonState extends State<ServerActivitiesButton> {
         child: Center(
           child: Text(
             t.common.loading,
-            style: theme.textTheme.bodyMedium?.copyWith(
-              color: theme.colorScheme.onSurface.withValues(alpha: 0.55),
-            ),
+            style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurface.withValues(alpha: 0.55)),
           ),
         ),
       );
@@ -261,9 +243,7 @@ class _ServerActivitiesButtonState extends State<ServerActivitiesButton> {
         child: Center(
           child: Text(
             t.serverTasks.noTasks,
-            style: theme.textTheme.bodyMedium?.copyWith(
-              color: theme.colorScheme.onSurface.withValues(alpha: 0.55),
-            ),
+            style: theme.textTheme.bodyMedium?.copyWith(color: theme.colorScheme.onSurface.withValues(alpha: 0.55)),
           ),
         ),
       );
@@ -288,10 +268,7 @@ class _ServerActivitiesButtonState extends State<ServerActivitiesButton> {
                   const SizedBox(width: 6),
                   Container(
                     padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
-                    decoration: BoxDecoration(
-                      color: tokens(context).text,
-                      borderRadius: BorderRadius.circular(10),
-                    ),
+                    decoration: BoxDecoration(color: tokens(context).text, borderRadius: BorderRadius.circular(10)),
                     child: Text(
                       '${result.activities.length}',
                       style: theme.textTheme.labelSmall?.copyWith(
@@ -304,8 +281,7 @@ class _ServerActivitiesButtonState extends State<ServerActivitiesButton> {
                 ],
               ),
             ),
-            for (final activity in result.activities)
-              _buildActivityTile(context, result.serverId, activity),
+            for (final activity in result.activities) _buildActivityTile(context, result.serverId, activity),
           ],
         const SizedBox(height: 8),
       ],
