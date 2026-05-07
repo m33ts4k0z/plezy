@@ -5,11 +5,13 @@
 /// transcoding entirely and uses the direct-play URL.
 enum TranscodeQualityPreset {
   original(null, null, null),
+  // Curated tier list — only presets that reliably deliver their
+  // advertised resolution are kept. Plex's transcoder uses bitrate as
+  // the primary input for resolution (with `videoResolution` acting
+  // only as a ceiling), so 720p@2–3 Mbps presets capped at 480p output
+  // server-side and misled users; 320p was redundant with 240p / 480p.
   p240_320(320, '420x240', 30),
-  p320_720(720, '576x320', 40),
   p480_1_5mbps(1500, '720x480', 60),
-  p720_2mbps(2000, '1280x720', 60),
-  p720_3mbps(3000, '1280x720', 75),
   p720_4mbps(4000, '1280x720', 100),
   p1080_8mbps(8000, '1920x1080', 60),
   p1080_10mbps(10000, '1920x1080', 75),
