@@ -137,11 +137,22 @@ class PlayerAndroid extends PlayerBase {
     if (disposed) return;
     await _ensureInitialized();
     setSeekable(false);
+    // Drop any track-list left over from a previous open() so consumers that
+    // poll `state.tracks` (e.g. TrackManager.applyTrackSelectionWhenReady) can
+    // tell when fresh tracks have arrived rather than picking stale IDs from
+    // the prior media. ExoPlayer re-emits the track list on STATE_READY.
+    clearTracks();
 
+    // ExoPlayer handles HLS seeking via the manifest. Plex now serves the
+    // transcode from source 0 (full manifest), so ExoPlayer can seek to any
+    // position — including before the user's resume point, fixing backward
+    // seek and resume-after-quality-change. The wrapper's "server-managed
+    // start" mode (which told ExoPlayer to start at 0 and adjusted reported
+    // time-pos by the offset) is no longer needed: with ExoPlayer doing the
+    // seek locally via setMediaItem(item, startPositionMs), time-pos already
+    // reflects source-time and sidecar SRT timestamps line up naturally.
     final requestedStart = media.start ?? Duration.zero;
-    final usesServerManagedStart = requestedStart > Duration.zero && _isPlexServerManagedStartUri(media.uri);
-    _serverManagedStartOffset = usesServerManagedStart ? requestedStart : Duration.zero;
-    final nativeStart = usesServerManagedStart ? Duration.zero : requestedStart;
+    _serverManagedStartOffset = Duration.zero;
 
     // Show the video layer
     await setVisible(true);
@@ -149,7 +160,7 @@ class PlayerAndroid extends PlayerBase {
     await invoke('open', {
       'uri': media.uri,
       'headers': media.headers,
-      'startPositionMs': nativeStart.inMilliseconds,
+      'startPositionMs': requestedStart.inMilliseconds,
       'autoPlay': play,
       'isLive': isLive,
       if (externalSubtitles != null && externalSubtitles.isNotEmpty)
