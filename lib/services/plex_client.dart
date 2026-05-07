@@ -2537,7 +2537,16 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
         // [_transcodePlatformName] for the mapping.
         'X-Plex-Platform': _transcodePlatformName(),
         if (config.device != null) 'X-Plex-Device': config.device!,
-        if (offsetMs != null) 'offset': (offsetMs ~/ 1000).toString(),
+        // Align the offset to Plex's HLS keyframe boundary (default 2-sec
+        // GOP) so the server doesn't round our request down to a different
+        // value. With a keyframe-aligned offset, the first transcoded
+        // segment's PTS == our requested offset, so the player's offset
+        // arithmetic and sub-delay correction match the actual segment
+        // start. The mpv wrapper applies the same alignment to
+        // `_serverManagedStartOffset` to keep them in sync. Without this,
+        // sidecar subtitles drift ahead of speech by 0–2 sec depending on
+        // how far the requested time was from the nearest keyframe.
+        if (offsetMs != null) 'offset': (((offsetMs ~/ 1000) ~/ 2) * 2).toString(),
         if (config.token != null) 'X-Plex-Token': config.token!,
       };
 

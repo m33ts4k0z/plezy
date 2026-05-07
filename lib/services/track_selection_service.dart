@@ -429,10 +429,23 @@ class TrackSelectionService {
       }
     }
 
-    // Try to match: language only
+    // Try to match: language only (strict)
     for (final track in validTracks) {
       if (getLanguage(track) == preferredLanguage) {
         return track;
+      }
+    }
+
+    // Final fallback: fuzzy language match — handles 'el' vs 'ell' (ISO 639-1
+    // vs ISO 639-2) and region suffixes like 'en-US'. Without this, carrying
+    // a track across player reloads (e.g. a quality change that re-loads the
+    // sidecar SRTs) drops the user's selection whenever the two players
+    // report the same language with different code lengths.
+    if (preferredLanguage != null) {
+      for (final track in validTracks) {
+        if (languageMatches(getLanguage(track), preferredLanguage)) {
+          return track;
+        }
       }
     }
 

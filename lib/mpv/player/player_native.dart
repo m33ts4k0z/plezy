@@ -149,10 +149,22 @@ class PlayerNative extends PlayerBase {
     // Plex HLS transcode URLs already honor offset server-side.
     // Applying MPV's local start on top of that can leave playback stuck
     // on a black frame while the server keeps transcoding.
+    //
+    // Align the offset to Plex's HLS keyframe boundary (default 2-sec
+    // GOP) — must match the rounding done in
+    // PlexClient.buildTranscodeStartPath. The server transcodes from
+    // exactly that boundary, so for the player's offset arithmetic and
+    // sub-delay to match the actual segment PTS, _serverManagedStartOffset
+    // must use the same value sent in the URL. Trade-off: playback
+    // resumes up to ~2 sec before the user's exact position, but with
+    // sidecar subtitles aligned to the speech (preferred over a 2-sec
+    // sub drift).
     final requestedStart = media.start ?? Duration.zero;
     final usesServerManagedStart =
         requestedStart > Duration.zero && _isPlexServerManagedStartUri(media.uri);
-    _serverManagedStartOffset = usesServerManagedStart ? requestedStart : Duration.zero;
+    final alignedSeconds = (requestedStart.inSeconds ~/ 2) * 2;
+    _serverManagedStartOffset =
+        usesServerManagedStart ? Duration(seconds: alignedSeconds) : Duration.zero;
 
     // Set start position if provided (must be set before loading file)
     if (requestedStart > Duration.zero && !usesServerManagedStart) {
@@ -161,6 +173,15 @@ class PlayerNative extends PlayerBase {
       // Reset start position if not resuming
       await setProperty('start', 'none');
     }
+
+    // Sidecar SRT files carry absolute source-time stamps, but mpv's
+    // playback clock for a server-positioned HLS stream starts at 0. So
+    // the subtitle for "10:05:00" would naturally display at mpv-time
+    // 10:05:00 — i.e. ~10 minutes after the user actually reaches that
+    // point in the show. Negative sub-delay advances subs by the offset
+    // so they align with what the user is watching from the first frame.
+    final subDelaySeconds = usesServerManagedStart ? -_serverManagedStartOffset.inSeconds.toDouble() : 0.0;
+    await setProperty('sub-delay', subDelaySeconds.toString());
 
     // Set pause BEFORE loadfile to prevent decoder from starting immediately.
     // This is important for adding external subtitles before playback begins,
