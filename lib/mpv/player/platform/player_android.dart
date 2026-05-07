@@ -438,7 +438,11 @@ class PlayerAndroid extends PlayerBase {
 
   Future<void> setBoxFitMode(int mode) async {
     if (disposed) return;
-    await invoke('setMpvProperty', {'name': 'box-fit-mode', 'value': mode.toString()});
+    // ExoPlayer has its own dedicated method-channel handler for this —
+    // routing it through `setMpvProperty` was a no-op (ExoPlayer has no
+    // `box-fit-mode` mpv property), which made the letterbox / fill /
+    // stretch button do nothing on the ExoPlayer backend.
+    await invoke('setBoxFitMode', {'mode': mode});
   }
 
   @override
