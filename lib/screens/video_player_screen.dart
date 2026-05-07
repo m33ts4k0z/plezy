@@ -255,8 +255,15 @@ class VideoPlayerScreenState extends State<VideoPlayerScreen> with WidgetsBindin
   // `player.open()` so the semantics are unchanged — we just eat the cost
   // during otherwise-idle setup time.
   Future<void>? _audioFocusFuture;
-  late final String _playbackSessionIdentifier;
-  late final String _playbackTranscodeSessionId;
+  // Mutable so [swapMediaForQualityChange] can mint fresh ids on a quality
+  // switch. With the same X-Plex-Session-Identifier, Plex reuses the
+  // existing server-side transcode (which is pinned to its original start
+  // offset) and ignores the new offset we send — meaning the user would
+  // see the show replay from the original starting position. Fresh ids
+  // force Plex to start a brand-new transcode at the current playback
+  // position.
+  late String _playbackSessionIdentifier;
+  late String _playbackTranscodeSessionId;
   String? _playbackPlaySessionId;
   String? _playbackPlayMethod;
   StreamSubscription<PlayerError>? _errorSubscription;
@@ -1170,6 +1177,189 @@ class VideoPlayerScreenState extends State<VideoPlayerScreen> with WidgetsBindin
     });
     _stoppedProgressFuture = future;
     return future;
+  }
+
+  /// Swap the active media in-place for a quality / version / audio change.
+  /// Reuses the same player (and screen) instead of pushReplacement so the
+  /// switch is seamless — no screen rebuild, no orientation flicker, no
+  /// session re-init. Mirrors [_swapEpisodeInPip] but for quality changes.
+  Future<void> swapMediaForQualityChange({
+    int? newMediaIndex,
+    TranscodeQualityPreset? newPreset,
+    int? newAudioStreamId,
+  }) async {
+    final currentPlayer = player;
+    if (currentPlayer == null || !mounted) return;
+
+    final effectiveMediaIndex = newMediaIndex ?? widget.selectedMediaIndex;
+    final effectivePreset = newPreset ?? _selectedQualityPreset;
+    final effectiveAudioStreamId = newAudioStreamId ?? _selectedAudioStreamId;
+
+    final isVersionChange = effectiveMediaIndex != _activeMediaIndex;
+    final isPresetChange = effectivePreset != _selectedQualityPreset;
+    final isAudioChange = effectiveAudioStreamId != _selectedAudioStreamId;
+    if (!isVersionChange && !isPresetChange && !isAudioChange) return;
+
+    // Capture current position + tracks BEFORE we start the async dance so
+    // resume position is accurate and the new player can re-select the
+    // same audio/sub the user was on.
+    final currentPosition = currentPlayer.state.position;
+    final currentAudioTrack = currentPlayer.state.track.audio;
+    final currentSubtitleTrack = currentPlayer.state.track.subtitle;
+    final currentSecondarySubtitleTrack = currentPlayer.state.track.secondarySubtitle;
+
+    // Capture context-dependent values before any async gaps.
+    final mediaClient = _isOfflinePlayback ? null : _getMediaServerClient(context);
+    final plexClient = mediaClient is PlexClient ? mediaClient : null;
+    final streamHeaders = mediaClient?.streamHeaders ?? const <String, String>{};
+    final offlineWatchService = context.read<OfflineWatchSyncService>();
+    final userProfileProvider = context.read<UserProfileProvider>();
+    final database = context.read<AppDatabase>();
+
+    // Persist version preference for the series (mirrors navigation.dart's
+    // pre-existing behavior so the user's chosen version sticks).
+    if (isVersionChange) {
+      try {
+        final settingsService = await SettingsService.getInstance();
+        final seriesKey = _currentMetadata.grandparentId ?? _currentMetadata.id;
+        await settingsService.write(SettingsService.mediaVersionPreferences, {
+          ...settingsService.read(SettingsService.mediaVersionPreferences),
+          seriesKey: effectiveMediaIndex,
+        });
+      } catch (e) {
+        appLogger.d('Failed to persist version preference', error: e);
+      }
+    }
+
+    // Stop progress tracking + scrobblers tied to the OLD playback config.
+    // Stopping the timeline ping (and the Plex transcode session implicitly,
+    // because the new start.m3u8 fetch supersedes it) prevents stale
+    // dashboard state during the swap.
+    await _sendStoppedProgressOnce();
+    _progressTracker?.stopTracking();
+    _progressTracker?.dispose();
+    _progressTracker = null;
+    unawaited(DiscordRPCService.instance.stopPlayback());
+    unawaited(TraktScrobbleService.instance.stopPlayback());
+    unawaited(TrackerCoordinator.instance.stopPlayback());
+
+    // Update active selection state.
+    _selectedQualityPreset = effectivePreset;
+    _selectedAudioStreamId = effectiveAudioStreamId;
+    _activeMediaIndex = effectiveMediaIndex;
+
+    _hasFirstFrame.value = false;
+    _stoppedProgressFuture = null;
+
+    try {
+      // Mint fresh session ids for the new (quality, audio, version)
+      // combination. Reusing the X-Plex-Session-Identifier across a
+      // quality change makes Plex stick with the existing server-side
+      // transcode (pinned to its original start offset) and ignore our
+      // new offset, so the user sees the stream replay from where it
+      // originally started. Fresh ids force a new transcode at the
+      // current playback position.
+      _playbackSessionIdentifier = generateSessionIdentifier();
+      _playbackTranscodeSessionId = generateSessionIdentifier();
+
+      // Update the metadata's viewOffset to the *current* playback position
+      // so the new transcode starts at where the user actually is — not at
+      // the original cold-start position baked into widget.metadata.
+      _currentMetadata = _currentMetadata.copyWith(viewOffsetMs: currentPosition.inMilliseconds);
+
+      final playbackService = PlaybackInitializationService(client: mediaClient, database: database);
+      final result = await playbackService.getPlaybackData(
+        metadata: _currentMetadata,
+        selectedMediaIndex: effectiveMediaIndex,
+        preferOffline: _isOfflinePlayback || _selectedQualityPreset.isOriginal,
+        qualityPreset: _selectedQualityPreset,
+        selectedAudioStreamId: _selectedAudioStreamId,
+        sessionIdentifier: _playbackSessionIdentifier,
+        transcodeSessionId: _playbackTranscodeSessionId,
+      );
+
+      if (result.videoUrl == null) {
+        throw PlaybackException(t.messages.fileInfoNotAvailable);
+      }
+
+      _isTranscoding = result.isTranscoding;
+      _effectiveIsOffline = result.isOffline;
+      _playbackPlaySessionId = result.playSessionId;
+      _playbackPlayMethod = result.playMethod;
+      if (result.activeAudioStreamId != null) {
+        _selectedAudioStreamId = result.activeAudioStreamId;
+      }
+      if (result.fallbackReason != null && !_selectedQualityPreset.isOriginal) {
+        if (mounted) showErrorSnackBar(context, t.videoControls.transcodeUnavailableFallback);
+        _selectedQualityPreset = TranscodeQualityPreset.original;
+      }
+
+      final hasExternalSubs = result.externalSubtitles.isNotEmpty;
+      final isExoPlayer = currentPlayer is PlayerAndroid;
+
+      // Reload media on the SAME player instance — no dispose, no
+      // pushReplacement. mpv internally swaps the loaded file; the screen,
+      // surface, and orientation stay put.
+      await currentPlayer.open(
+        Media(result.videoUrl!, start: currentPosition, headers: streamHeaders),
+        play: isExoPlayer || !hasExternalSubs,
+        externalSubtitles: isExoPlayer && hasExternalSubs ? result.externalSubtitles : null,
+      );
+
+      if (!mounted) return;
+
+      _scrubPreviewSource?.dispose();
+      _setPlayerState(() {
+        _availableVersions = result.availableVersions;
+        _currentMediaInfo = result.mediaInfo;
+        _scrubPreviewSource = null;
+      });
+
+      // Rebuild the track manager with the carried-over selection so the
+      // user's audio/sub picks persist across the swap.
+      _trackManager?.dispose();
+      _trackManager = TrackManager(
+        player: currentPlayer,
+        isActive: () => mounted && player != null,
+        persistTrackPreference: plexClient != null ? _plexTrackPersister(() => plexClient) : null,
+        getProfileSettings: () => userProfileProvider.profileSettings,
+        waitForProfileSettings: _waitForProfileSettingsIfNeeded,
+        metadata: _currentMetadata,
+        mediaInfo: _currentMediaInfo,
+        preferredAudioTrack: currentAudioTrack,
+        preferredSubtitleTrack: currentSubtitleTrack,
+        preferredSecondarySubtitleTrack: currentSecondarySubtitleTrack,
+        showMessage: (message, {duration}) {
+          if (mounted) showAppSnackBar(context, message, duration: duration);
+        },
+      );
+      _trackManager!.cacheExternalSubtitles(result.externalSubtitles);
+
+      if (currentPlayer is! PlayerAndroid && hasExternalSubs) {
+        _trackManager!.waitingForExternalSubsTrackSelection = true;
+        try {
+          await _trackManager!.addExternalSubtitles(result.externalSubtitles);
+        } finally {
+          await _trackManager!.resumeAfterSubtitleLoad();
+        }
+      } else {
+        _trackManager!.applyTrackSelectionWhenReady();
+      }
+
+      // Re-wire per-item playback services (progress tracker + scrobblers)
+      // for the new (quality, audio, version) configuration.
+      _wirePerItemPlaybackServices(
+        metadata: _currentMetadata,
+        mediaClient: mediaClient,
+        offlineWatchService: offlineWatchService,
+        playSessionId: _playbackPlaySessionId,
+        playMethod: _playbackPlayMethod,
+        mediaInfo: _currentMediaInfo,
+      );
+    } catch (e) {
+      appLogger.e('Failed to swap media for quality change', error: e);
+      if (mounted) showErrorSnackBar(context, t.messages.errorLoading(error: e.toString()));
+    }
   }
 
   /// Dispose the player before replacing the video to avoid race conditions

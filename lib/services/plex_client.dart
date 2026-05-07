@@ -2747,11 +2747,14 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
       final wantTranscode = !options.qualityPreset.isOriginal;
       if (wantTranscode && options.sessionIdentifier != null && options.transcodeSessionId != null) {
         final resolvedAudioId = _resolveAudioStreamId(options.selectedAudioStreamId, data.mediaInfo);
-        // Note: no `offsetMs` — seeking is handled by the player via the HLS
-        // manifest, matching Plex Web's behavior. Baking `offset=` into the URL
-        // makes the server pre-position the transcoder, but the resulting
-        // segments and mpv's native HLS positioning fight each other, leaving
-        // the player clock at 0 and desyncing sidecar subtitles.
+        // Forward the resume position so the server transcodes from where
+        // the user actually is. Without this, every transcode starts at
+        // source 0 — meaning a quality change mid-show would replay from
+        // the beginning even though the player thinks it's at the right
+        // position. The mpv wrapper's `_serverManagedStartOffset` is set
+        // from the same value (via `media.start`) so the seeker and
+        // sidecar subtitle delay arithmetic stay aligned.
+        final offsetMs = options.metadata.viewOffsetMs;
         final result = await buildTranscodeStartPath(
           ratingKey: options.metadata.id,
           mediaIndex: options.selectedMediaIndex,
@@ -2759,6 +2762,7 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
           sessionIdentifier: options.sessionIdentifier!,
           transcodeSessionId: options.transcodeSessionId!,
           audioStreamId: resolvedAudioId,
+          offsetMs: (offsetMs != null && offsetMs > 0) ? offsetMs : null,
         );
 
         if (result.outcome == TranscodeDecisionOutcome.transcodeOk && result.startPath != null) {
