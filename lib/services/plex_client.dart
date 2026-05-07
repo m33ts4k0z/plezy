@@ -2443,6 +2443,38 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
     }
   }
 
+  /// Tell Plex to terminate a server-side transcode session.
+  ///
+  /// Without this, repeated quality/version/audio swaps within one playback
+  /// pile up zombie transcode sessions on the server (each new
+  /// `start.m3u8` mints a new session — the prior one is *not* reaped just
+  /// because a fresh manifest is fetched). On constrained servers the
+  /// accumulated work starves the new session of CPU/disk and the new
+  /// stream stalls in buffering after a frame or two.
+  ///
+  /// Best-effort: failures are logged and swallowed.
+  Future<void> stopTranscodeSession({required String transcodeSessionId}) async {
+    try {
+      final params = <String, String>{
+        'session': transcodeSessionId,
+        'X-Plex-Client-Identifier': config.clientIdentifier,
+        'X-Plex-Product': config.product,
+        'X-Plex-Version': config.version,
+        if (config.token != null) 'X-Plex-Token': config.token!,
+      };
+      final query = params.entries.map((e) => '${_plexEncode(e.key)}=${_plexEncode(e.value)}').join('&');
+      final url = '${config.baseUrl}/video/:/transcode/universal/stop?$query';
+      final stopClient = MediaServerHttpClient(
+        connectTimeout: MediaServerTimeouts.connect,
+        receiveTimeout: MediaServerTimeouts.receive,
+      );
+      final response = await stopClient.get(url);
+      appLogger.d('Transcode stop [${response.statusCode}] for session $transcodeSessionId');
+    } catch (e) {
+      appLogger.d('Transcode stop failed (best-effort)', error: e);
+    }
+  }
+
   /// Build a VOD transcode stream URL (decision + start path).
   ///
   /// Mirrors [buildLiveStreamPath] but for on-demand video with a quality
@@ -2889,9 +2921,28 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
     return '${config.baseUrl}$path.$ext?encoding=utf-8&X-Plex-Token=$token';
   }
 
-  /// Build sidecar SubtitleTracks for ALL source subtitle streams (internal +
+  /// Image-based subtitle codecs Plex's `/library/streams/<id>.srt` endpoint
+  /// can't reliably serve. They're either bitmap (DVD / DVB / Blu-ray) or
+  /// require OCR (PGS) — in practice Plex returns persistent HTTP 501 for
+  /// them, so we skip them rather than letting the player burn time
+  /// retrying URLs that will never succeed. Users who need bitmap subs
+  /// would need a transcode that burns them in (separate code path).
+  static bool _isImageBasedSubtitleCodec(String? codec) {
+    if (codec == null || codec.isEmpty) return false;
+    final c = codec.toLowerCase();
+    return c.contains('pgs') ||
+        c.contains('dvd') ||
+        c.contains('dvb') ||
+        c.contains('vobsub') ||
+        c.contains('bluray') ||
+        c == 'hdmv';
+  }
+
+  /// Build sidecar SubtitleTracks for source subtitle streams (internal +
   /// external) so the player can hot-swap between them when the main stream
-  /// is transcoded and has no embedded subs.
+  /// is transcoded and has no embedded subs. Image-based codecs (PGS, DVD,
+  /// DVB) are filtered out — Plex's SRT endpoint can't convert them and
+  /// they'd just drive the load-error path on every quality change.
   List<SubtitleTrack> _buildTranscodeSidecarSubtitles(MediaSourceInfo? mediaInfo) {
     if (mediaInfo == null) return const [];
     if (config.token == null) {
@@ -2900,7 +2951,12 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
     }
 
     final tracks = <SubtitleTrack>[];
+    var skippedImage = 0;
     for (final sub in mediaInfo.subtitleTracks) {
+      if (_isImageBasedSubtitleCodec(sub.codec)) {
+        skippedImage++;
+        continue;
+      }
       try {
         final url = _buildSidecarSubtitleUrl(sub);
         if (url == null) continue;
@@ -2914,6 +2970,9 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
       } catch (e) {
         appLogger.w('Failed to build sidecar subtitle for stream ${sub.id}', error: e);
       }
+    }
+    if (skippedImage > 0) {
+      appLogger.i('Skipped $skippedImage image-based subtitle track(s) — Plex SRT endpoint cannot serve them');
     }
     return tracks;
   }

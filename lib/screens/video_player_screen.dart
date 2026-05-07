@@ -1233,10 +1233,12 @@ class VideoPlayerScreenState extends State<VideoPlayerScreen> with WidgetsBindin
     }
 
     // Stop progress tracking + scrobblers tied to the OLD playback config.
-    // Stopping the timeline ping (and the Plex transcode session implicitly,
-    // because the new start.m3u8 fetch supersedes it) prevents stale
-    // dashboard state during the swap.
-    await _sendStoppedProgressOnce();
+    // Fire-and-forget — `await`ing the timeline ping just delays the swap
+    // by an extra Plex round-trip (often 1–3 s on a busy server). The new
+    // start.m3u8 fetch implicitly supersedes the old transcode anyway, and
+    // `stopTranscodeSession` (below) explicitly tears it down, so the
+    // dashboard converges on the new state without us blocking.
+    unawaited(_sendStoppedProgressOnce());
     _progressTracker?.stopTracking();
     _progressTracker?.dispose();
     _progressTracker = null;
@@ -1253,6 +1255,18 @@ class VideoPlayerScreenState extends State<VideoPlayerScreen> with WidgetsBindin
     _stoppedProgressFuture = null;
 
     try {
+      // Tell Plex to terminate the *previous* server-side transcode before
+      // we mint a new session — Plex does not auto-reap old sessions when
+      // a fresh `start.m3u8` is requested, so without this each successive
+      // quality change leaves a zombie transcode running. After two or
+      // three swaps the server is busy enough that the new HLS stream
+      // stalls in buffering after a frame or two (visible as a spinner).
+      // Best-effort: we don't gate the swap on its result.
+      final previousTranscodeSessionId = _playbackTranscodeSessionId;
+      if (plexClient != null && previousTranscodeSessionId != null) {
+        unawaited(plexClient.stopTranscodeSession(transcodeSessionId: previousTranscodeSessionId));
+      }
+
       // Mint fresh session ids for the new (quality, audio, version)
       // combination. Reusing the X-Plex-Session-Identifier across a
       // quality change makes Plex stick with the existing server-side
