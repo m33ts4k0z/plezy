@@ -1359,6 +1359,8 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
     required int time,
     required String state, // 'playing', 'paused', 'stopped', 'buffering'
     int? duration,
+    String? sessionIdentifier,
+    int? playbackTime,
   }) async {
     final response = await _http.post(
       '/:/timeline',
@@ -1368,6 +1370,12 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
         'time': time,
         'state': state,
         'duration': ?duration,
+        // When a session id is present we are tied to a transcode session;
+        // pass hasMDE + playbackTime + the session header so the server
+        // surfaces the Transcoding label and decision on the dashboard.
+        if (sessionIdentifier != null) 'hasMDE': 1,
+        if (sessionIdentifier != null) 'playbackTime': playbackTime ?? time,
+        if (sessionIdentifier != null) 'X-Plex-Session-Identifier': sessionIdentifier,
       },
     );
     // Surface non-2xx instead of swallowing — progress is the cornerstone
@@ -2794,6 +2802,12 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
             isOffline: false,
             isTranscoding: true,
             activeAudioStreamId: resolvedAudioId,
+            // Echo the Plex transcode session id back so timeline pings can
+            // tag themselves with X-Plex-Session-Identifier — without this,
+            // /:/timeline cannot be linked to the active transcode session
+            // and the dashboard hides the Transcoding label, showing
+            // "Direct Play" instead.
+            playSessionId: options.sessionIdentifier,
             playMethod: 'Transcode',
           );
         }
@@ -3301,7 +3315,13 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
     String? mediaSourceId,
     int? audioStreamIndex,
     int? subtitleStreamIndex,
-  }) => updateProgress(itemId, time: position.inMilliseconds, state: 'playing', duration: duration?.inMilliseconds);
+  }) => updateProgress(
+    itemId,
+    time: position.inMilliseconds,
+    state: 'playing',
+    duration: duration?.inMilliseconds,
+    sessionIdentifier: playSessionId,
+  );
 
   @override
   Future<void> reportPlaybackProgress({
@@ -3319,6 +3339,7 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
     time: position.inMilliseconds,
     state: isPaused ? 'paused' : 'playing',
     duration: duration.inMilliseconds,
+    sessionIdentifier: playSessionId,
   );
 
   @override
@@ -3328,7 +3349,13 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
     Duration? duration,
     String? playSessionId,
     String? mediaSourceId,
-  }) => updateProgress(itemId, time: position.inMilliseconds, state: 'stopped', duration: duration?.inMilliseconds);
+  }) => updateProgress(
+    itemId,
+    time: position.inMilliseconds,
+    state: 'stopped',
+    duration: duration?.inMilliseconds,
+    sessionIdentifier: playSessionId,
+  );
 
   // ── Downloads ────────────────────────────────────────────────────
 
