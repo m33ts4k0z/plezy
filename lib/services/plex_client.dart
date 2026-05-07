@@ -2465,9 +2465,16 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
       // See openapi.md §"Profile Augmentations" for the DSL reference.
       final profileExtraClauses = <String>[];
       if (!isOriginal && preset.videoBitrateKbps != null) {
+        // Profile limitations describe *decoder capability*, not the user's
+        // bitrate selection. Baking the preset's bitrate (e.g. 1500) here
+        // tells Plex "this client cannot decode above 1.5 Mbps" and the
+        // decision engine then refuses to transcode (or downgrades), which
+        // also drops the sidecar subtitles we need. Plex Web pins this to
+        // a high static cap and lets `maxVideoBitrate` (URL param) do the
+        // user's actual cap. 80000 mirrors Plex Web's h264 limit.
         profileExtraClauses.add(
           'add-limitation(scope=videoCodec&scopeName=*&type=upperBound'
-          '&name=video.bitrate&value=${preset.videoBitrateKbps}&replace=true)',
+          '&name=video.bitrate&value=80000&replace=true)',
         );
       }
       // Declare both h264 and hevc as allowed transcode targets. In practice
@@ -2498,9 +2505,11 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
         'subtitleSize': '100',
         'audioBoost': '100',
         'location': 'lan',
+        // Plex Web only sends `maxVideoBitrate`. Stacking `videoBitrate`
+        // and `peakBitrate` at the same value (target == cap == peak)
+        // makes the encoder over-conservative and downgrades resolution
+        // (e.g. 720p@2Mbps falls back to 480p@1.5Mbps). One cap is enough.
         if (!isOriginal && preset.videoBitrateKbps != null) 'maxVideoBitrate': preset.videoBitrateKbps.toString(),
-        if (!isOriginal && preset.videoBitrateKbps != null) 'videoBitrate': preset.videoBitrateKbps.toString(),
-        if (!isOriginal && preset.videoBitrateKbps != null) 'peakBitrate': preset.videoBitrateKbps.toString(),
         if (!isOriginal && preset.videoResolution != null) 'videoResolution': preset.videoResolution!,
         if (!isOriginal && preset.videoQuality != null) 'videoQuality': preset.videoQuality.toString(),
         'addDebugOverlay': '0',
@@ -2756,14 +2765,15 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
       final wantTranscode = !options.qualityPreset.isOriginal;
       if (wantTranscode && options.sessionIdentifier != null && options.transcodeSessionId != null) {
         final resolvedAudioId = _resolveAudioStreamId(options.selectedAudioStreamId, data.mediaInfo);
-        // Forward the resume position so the server transcodes from where
-        // the user actually is. Without this, every transcode starts at
-        // source 0 — meaning a quality change mid-show would replay from
-        // the beginning even though the player thinks it's at the right
-        // position. The mpv wrapper's `_serverManagedStartOffset` is set
-        // from the same value (via `media.start`) so the seeker and
-        // sidecar subtitle delay arithmetic stay aligned.
-        final offsetMs = options.metadata.viewOffsetMs;
+        // Don't pass `offsetMs` here. The server-side transcode starts at
+        // source 0 and the resulting HLS manifest covers the entire
+        // duration, so mpv can seek anywhere — both forward and backward
+        // — via the manifest. Baking offset= into the URL pins the
+        // server's transcode to that offset and produces a manifest
+        // covering only [offset, end], breaking backward seeks. mpv's
+        // local `start:` (set on the [Media] passed to `player.open`)
+        // handles resume-to-position via the manifest, matching how
+        // Plex Web uses MSE for the same job.
         final result = await buildTranscodeStartPath(
           ratingKey: options.metadata.id,
           mediaIndex: options.selectedMediaIndex,
@@ -2771,7 +2781,6 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
           sessionIdentifier: options.sessionIdentifier!,
           transcodeSessionId: options.transcodeSessionId!,
           audioStreamId: resolvedAudioId,
-          offsetMs: (offsetMs != null && offsetMs > 0) ? offsetMs : null,
         );
 
         if (result.outcome == TranscodeDecisionOutcome.transcodeOk && result.startPath != null) {

@@ -146,42 +146,21 @@ class PlayerNative extends PlayerBase {
       await setProperty('http-header-fields', headerList.join(','));
     }
 
-    // Plex HLS transcode URLs already honor offset server-side.
-    // Applying MPV's local start on top of that can leave playback stuck
-    // on a black frame while the server keeps transcoding.
-    //
-    // Align the offset to Plex's HLS keyframe boundary (default 2-sec
-    // GOP) — must match the rounding done in
-    // PlexClient.buildTranscodeStartPath. The server transcodes from
-    // exactly that boundary, so for the player's offset arithmetic and
-    // sub-delay to match the actual segment PTS, _serverManagedStartOffset
-    // must use the same value sent in the URL. Trade-off: playback
-    // resumes up to ~2 sec before the user's exact position, but with
-    // sidecar subtitles aligned to the speech (preferred over a 2-sec
-    // sub drift).
+    // mpv handles HLS seeking via the manifest. Plex now serves the
+    // transcode from source 0 (full manifest), so mpv can seek to any
+    // position — including before the user's resume position, fixing
+    // backward seek. The wrapper's "server-managed start" mode (which
+    // adds an offset to time-pos and shifts sub-delay) is no longer
+    // needed: with mpv doing the seek locally, time-pos already reflects
+    // source-time and sidecar SRT timestamps line up naturally.
     final requestedStart = media.start ?? Duration.zero;
-    final usesServerManagedStart =
-        requestedStart > Duration.zero && _isPlexServerManagedStartUri(media.uri);
-    final alignedSeconds = (requestedStart.inSeconds ~/ 6) * 6;
-    _serverManagedStartOffset =
-        usesServerManagedStart ? Duration(seconds: alignedSeconds) : Duration.zero;
-
-    // Set start position if provided (must be set before loading file)
-    if (requestedStart > Duration.zero && !usesServerManagedStart) {
+    _serverManagedStartOffset = Duration.zero;
+    if (requestedStart > Duration.zero) {
       await setProperty('start', requestedStart.inSeconds.toString());
     } else {
-      // Reset start position if not resuming
       await setProperty('start', 'none');
     }
-
-    // Sidecar SRT files carry absolute source-time stamps, but mpv's
-    // playback clock for a server-positioned HLS stream starts at 0. So
-    // the subtitle for "10:05:00" would naturally display at mpv-time
-    // 10:05:00 — i.e. ~10 minutes after the user actually reaches that
-    // point in the show. Negative sub-delay advances subs by the offset
-    // so they align with what the user is watching from the first frame.
-    final subDelaySeconds = usesServerManagedStart ? -_serverManagedStartOffset.inSeconds.toDouble() : 0.0;
-    await setProperty('sub-delay', subDelaySeconds.toString());
+    await setProperty('sub-delay', '0.0');
 
     // Set pause BEFORE loadfile to prevent decoder from starting immediately.
     // This is important for adding external subtitles before playback begins,

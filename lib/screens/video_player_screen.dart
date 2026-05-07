@@ -1297,6 +1297,19 @@ class VideoPlayerScreenState extends State<VideoPlayerScreen> with WidgetsBindin
       final hasExternalSubs = result.externalSubtitles.isNotEmpty;
       final isExoPlayer = currentPlayer is PlayerAndroid;
 
+      // Listen for mpv's playback-restart BEFORE issuing loadfile, so we
+      // can wait for the new file to be fully loaded before calling
+      // sub-add. `player.open()` only awaits the loadfile command's
+      // dispatch — without this gate, sub-add commands race with the
+      // still-pending file load and end up applied to the OLD file
+      // (which gets unloaded), causing subs to silently disappear after
+      // a quality change.
+      final playbackRestartCompleter = Completer<void>();
+      late final StreamSubscription<void> playbackRestartSub;
+      playbackRestartSub = currentPlayer.streams.playbackRestart.listen((_) {
+        if (!playbackRestartCompleter.isCompleted) playbackRestartCompleter.complete();
+      });
+
       // Reload media on the SAME player instance — no dispose, no
       // pushReplacement. mpv internally swaps the loaded file; the screen,
       // surface, and orientation stay put.
@@ -1305,6 +1318,15 @@ class VideoPlayerScreenState extends State<VideoPlayerScreen> with WidgetsBindin
         play: isExoPlayer || !hasExternalSubs,
         externalSubtitles: isExoPlayer && hasExternalSubs ? result.externalSubtitles : null,
       );
+
+      // Wait for the playback-restart event (= file-loaded) or timeout.
+      try {
+        await playbackRestartCompleter.future.timeout(const Duration(seconds: 5));
+      } on TimeoutException {
+        appLogger.w('swap: playback-restart timeout, proceeding anyway');
+      } finally {
+        await playbackRestartSub.cancel();
+      }
 
       if (!mounted) return;
 
@@ -1336,11 +1358,23 @@ class VideoPlayerScreenState extends State<VideoPlayerScreen> with WidgetsBindin
       _trackManager!.cacheExternalSubtitles(result.externalSubtitles);
 
       if (currentPlayer is! PlayerAndroid && hasExternalSubs) {
-        _trackManager!.waitingForExternalSubsTrackSelection = true;
-        try {
-          await _trackManager!.addExternalSubtitles(result.externalSubtitles);
-        } finally {
-          await _trackManager!.resumeAfterSubtitleLoad();
+        // playback-restart has fired (above), so the new file is loaded
+        // and sub-add commands will be applied to the correct file.
+        await _trackManager!.addExternalSubtitles(result.externalSubtitles);
+        unawaited(currentPlayer.play());
+
+        // Wait for the sub-add commands to register in the track-list.
+        // Polling reads current state at each tick — no event-timing
+        // race that a stream subscription would have.
+        const subTickMs = 100;
+        const subMaxAttempts = 30; // 3 sec
+        for (var i = 0; i < subMaxAttempts; i++) {
+          if (!mounted || !identical(player, currentPlayer)) break;
+          if (currentPlayer.state.tracks.subtitle.isNotEmpty) break;
+          await Future.delayed(const Duration(milliseconds: subTickMs));
+        }
+        if (mounted && identical(player, currentPlayer)) {
+          unawaited(_trackManager!.applyTrackSelection());
         }
       } else {
         _trackManager!.applyTrackSelectionWhenReady();
