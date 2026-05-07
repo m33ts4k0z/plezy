@@ -162,7 +162,7 @@ class PlayerNative extends PlayerBase {
     final requestedStart = media.start ?? Duration.zero;
     final usesServerManagedStart =
         requestedStart > Duration.zero && _isPlexServerManagedStartUri(media.uri);
-    final alignedSeconds = (requestedStart.inSeconds ~/ 2) * 2;
+    final alignedSeconds = (requestedStart.inSeconds ~/ 6) * 6;
     _serverManagedStartOffset =
         usesServerManagedStart ? Duration(seconds: alignedSeconds) : Duration.zero;
 
