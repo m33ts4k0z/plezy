@@ -2532,6 +2532,38 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
         'add-transcode-target(type=videoProfile&context=streaming'
         '&protocol=hls&container=mpegts&videoCodec=h264%2Chevc&audioCodec=aac)',
       );
+      // Subtitle handling: tell Plex we can consume WebVTT segments inside
+      // the HLS manifest as #EXT-X-MEDIA. Without an explicit WebVTT
+      // direct-stream / transcode target Plex falls back to *burning* the
+      // selected sub straight into the video pixels — which is what was
+      // happening before (Plex dashboard literally showed "Burned in").
+      // Burned subs are anchored to the source frame, so in zoom mode
+      // they fall outside the visible screen and no amount of client-side
+      // positioning can rescue them.
+      //
+      // Declare:
+      //   * WebVTT + SRT + ASS + SSA as direct-stream-capable (codec
+      //     only, no container — that matches Plex Web's profile and
+      //     keeps the decision engine permissive).
+      //   * WebVTT as the transcode target for HLS streaming so any
+      //     non-WebVTT source codec gets converted to WebVTT segments
+      //     instead of burned.
+      profileExtraClauses.add(
+        'add-direct-stream-profile(type=subtitleProfile&codec=webvtt)',
+      );
+      profileExtraClauses.add(
+        'add-direct-stream-profile(type=subtitleProfile&codec=srt)',
+      );
+      profileExtraClauses.add(
+        'add-direct-stream-profile(type=subtitleProfile&codec=ass)',
+      );
+      profileExtraClauses.add(
+        'add-direct-stream-profile(type=subtitleProfile&codec=ssa)',
+      );
+      profileExtraClauses.add(
+        'add-transcode-target(type=subtitleProfile&context=streaming'
+        '&protocol=hls&codec=webvtt)',
+      );
       final clientProfileExtra = profileExtraClauses.join('+');
 
       // HLS protocol: seekable via manifest segments. We started with `dash`
@@ -2563,11 +2595,15 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
         'directStreamAudio': '0',
         'mediaBufferSize': '102400',
         'session': transcodeSessionId,
-        // Subtitles are delivered as client-side sidecars (see
-        // [PlaybackInitializationService._buildTranscodeSidecarSubtitles]).
-        // `subtitles=none` makes the server set the subtitle decision to
-        // `ignore`, so nothing is embedded or burned into the video stream.
-        'subtitles': 'none',
+        // `subtitles=auto` lets Plex's decision engine include subs inside
+        // the HLS manifest (as #EXT-X-MEDIA tracks fetched through the same
+        // pipe as the video segments) rather than forcing the client to
+        // side-load them. Without this, embedded SRTs fail with HTTP 501
+        // on `/library/streams/<id>.srt` while the source is locked by the
+        // transcoder. The matching profile-extra clauses above declare
+        // SRT/ASS direct-stream and VTT-over-HLS transcode capability so
+        // the decision engine actually picks an in-manifest path.
+        'subtitles': 'auto',
         // Preserve source timestamps in the transcoded segments. Without it,
         // Plex resets segment PTS to 0 — so mpv shows 0:00 and sidecar
         // subtitles desync even though the server is transcoding from the
@@ -2648,7 +2684,13 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
   /// `Generic` is accepted and comes with no preset transcode targets — we
   /// build the profile ourselves via `X-Plex-Client-Profile-Extra` with
   /// `add-transcode-target`.
-  static String _transcodePlatformName() => 'Generic';
+  // Plex Web identifies as `Chrome`, and Chrome's built-in transcode profile
+  // is the only one whose default subtitle handling reliably picks
+  // direct-stream / transcode (WebVTT-in-HLS) over `burn`. The previous
+  // `Generic` value has no built-in subtitle profile at all, so the decision
+  // engine falls back to burning even when our X-Plex-Client-Profile-Extra
+  // clauses declare WebVTT direct-stream + SRT→WebVTT transcode capability.
+  static String _transcodePlatformName() => 'Chrome';
 
   /// Strict percent-encoder matching Plex Web's URL encoder — escapes the
   /// extra characters `(`, `)`, `*`, `'`, `!` that Dart's [Uri.encodeComponent]
@@ -2938,11 +2980,20 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
         c == 'hdmv';
   }
 
-  /// Build sidecar SubtitleTracks for source subtitle streams (internal +
-  /// external) so the player can hot-swap between them when the main stream
-  /// is transcoded and has no embedded subs. Image-based codecs (PGS, DVD,
-  /// DVB) are filtered out — Plex's SRT endpoint can't convert them and
-  /// they'd just drive the load-error path on every quality change.
+  /// Build sidecar SubtitleTracks for **truly external** source subtitle
+  /// streams (separate `.srt`/`.ass` files alongside the source media).
+  ///
+  /// Internal / embedded subs were previously included here too, but
+  /// Plex's `/library/streams/<id>.srt` endpoint returns persistent HTTP
+  /// 501 for them while the source file is locked by the transcoder.
+  /// Now that the transcode profile asks Plex to deliver the selected sub
+  /// inside the HLS manifest as WebVTT (`subtitleProfile` direct-stream /
+  /// transcode targets above + `subtitles=auto`), embedded subs come
+  /// through the manifest itself — keeping them as sidecars too produced
+  /// duplicate entries in the menu where the sidecar variant always
+  /// failed with 501. External (separate-file) subs still need the
+  /// sidecar path because they're not part of the HLS manifest.
+  /// Image-based codecs (PGS, DVD, DVB) are also filtered out.
   List<SubtitleTrack> _buildTranscodeSidecarSubtitles(MediaSourceInfo? mediaInfo) {
     if (mediaInfo == null) return const [];
     if (config.token == null) {
@@ -2952,9 +3003,14 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
 
     final tracks = <SubtitleTrack>[];
     var skippedImage = 0;
+    var skippedInternal = 0;
     for (final sub in mediaInfo.subtitleTracks) {
       if (_isImageBasedSubtitleCodec(sub.codec)) {
         skippedImage++;
+        continue;
+      }
+      if (!sub.isExternal) {
+        skippedInternal++;
         continue;
       }
       try {
@@ -2971,8 +3027,11 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
         appLogger.w('Failed to build sidecar subtitle for stream ${sub.id}', error: e);
       }
     }
-    if (skippedImage > 0) {
-      appLogger.i('Skipped $skippedImage image-based subtitle track(s) — Plex SRT endpoint cannot serve them');
+    if (skippedImage > 0 || skippedInternal > 0) {
+      appLogger.i(
+        'Sidecar subs: $skippedImage image-based + $skippedInternal internal track(s) skipped '
+        '(internal subs are delivered via the HLS manifest under subtitles=auto)',
+      );
     }
     return tracks;
   }
