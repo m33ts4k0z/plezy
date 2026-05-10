@@ -18,6 +18,8 @@ import 'trackers/tracker_constants.dart';
 
 enum ThemeMode { system, light, dark, oled }
 
+enum ThemeMusicLevel { off, low, medium, high }
+
 /// Library density is now an int 1–5 (1 = most compact, 5 = most comfortable).
 /// Default is 3.
 class LibraryDensity {
@@ -353,6 +355,20 @@ class SettingsService extends BaseSharedPreferencesService {
     values: ThemeMode.values,
     defaultValue: TvDetectionService.isTVSync() ? ThemeMode.oled : ThemeMode.system,
   );
+  static final themeMusicLevel = EnumPref<ThemeMusicLevel>(
+    'theme_music_level',
+    values: ThemeMusicLevel.values,
+    defaultValue: ThemeMusicLevel.off,
+  );
+
+  /// Numeric volume (0.0–1.0) corresponding to the user's chosen
+  /// [themeMusicLevel]. Off → silent; high → ~60% volume.
+  static double themeMusicVolume(ThemeMusicLevel level) => switch (level) {
+    ThemeMusicLevel.off => 0.0,
+    ThemeMusicLevel.low => 0.2,
+    ThemeMusicLevel.medium => 0.4,
+    ThemeMusicLevel.high => 0.6,
+  };
   static final videoPlayerNavigationEnabled = BoolPref(
     'video_player_navigation_enabled',
     defaultValue: TvDetectionService.isTVSync(),
@@ -696,6 +712,7 @@ class SettingsService extends BaseSharedPreferencesService {
     audioPassthrough,
     audioNormalization,
     themeMode,
+    themeMusicLevel,
     keyboardShortcuts,
     keyboardHotkeys,
     libraryDensity,

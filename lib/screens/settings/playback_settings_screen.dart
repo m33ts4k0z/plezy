@@ -123,6 +123,17 @@ class _PlaybackSettingsScreenState extends State<PlaybackSettingsScreen> {
           min: 100,
           max: 300,
         ),
+        SettingSelectionTile<ThemeMusicLevel, ThemeMusicLevel>(
+          pref: SettingsService.themeMusicLevel,
+          icon: Symbols.music_note_rounded,
+          title: 'Theme music',
+          subtitleBuilder: _themeMusicLabel,
+          options: ThemeMusicLevel.values
+              .map((l) => DialogOption(value: l, title: _themeMusicLabel(l), subtitle: _themeMusicDescription(l)))
+              .toList(),
+          decode: (p) => p,
+          encode: (p) => p,
+        ),
 
         SettingsSectionHeader(t.settings.behavior),
         if (DiscordRPCService.isAvailable)
@@ -343,6 +354,20 @@ class _PlaybackSettingsScreenState extends State<PlaybackSettingsScreen> {
     decode: (p) => p,
     encode: (p) => p,
   );
+
+  String _themeMusicLabel(ThemeMusicLevel level) => switch (level) {
+    ThemeMusicLevel.off => 'Off',
+    ThemeMusicLevel.low => 'Low',
+    ThemeMusicLevel.medium => 'Medium',
+    ThemeMusicLevel.high => 'High',
+  };
+
+  String _themeMusicDescription(ThemeMusicLevel level) => switch (level) {
+    ThemeMusicLevel.off => 'Disable TV-show theme music on detail pages',
+    ThemeMusicLevel.low => 'Play theme music quietly on show detail pages',
+    ThemeMusicLevel.medium => 'Play theme music at a balanced volume',
+    ThemeMusicLevel.high => 'Play theme music at the loudest setting',
+  };
 
   Widget _mpvConfigTile() => SettingValueBuilder<bool>(
     pref: SettingsService.useExoPlayer,

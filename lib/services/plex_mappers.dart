@@ -407,6 +407,7 @@ class PlexMetadataDto {
   @JsonKey(fromJson: flexibleInt)
   final int? index;
   final String? grandparentTheme;
+  final String? theme;
   @JsonKey(fromJson: flexibleInt)
   final int? viewOffset;
   @JsonKey(fromJson: flexibleInt)
@@ -497,6 +498,7 @@ class PlexMetadataDto {
     this.parentIndex,
     this.index,
     this.grandparentTheme,
+    this.theme,
     this.viewOffset,
     this.viewCount,
     this.leafCount,
@@ -624,6 +626,7 @@ class PlexMetadataDto {
     int? parentIndex,
     int? index,
     String? grandparentTheme,
+    String? theme,
     int? viewOffset,
     int? viewCount,
     int? leafCount,
@@ -691,6 +694,7 @@ class PlexMetadataDto {
       parentIndex: parentIndex ?? this.parentIndex,
       index: index ?? this.index,
       grandparentTheme: grandparentTheme ?? this.grandparentTheme,
+      theme: theme ?? this.theme,
       viewOffset: viewOffset ?? this.viewOffset,
       viewCount: viewCount ?? this.viewCount,
       leafCount: leafCount ?? this.leafCount,
@@ -827,7 +831,16 @@ class PlexMappers {
       extraType: dto.extraType,
       serverId: dto.serverId,
       serverName: dto.serverName,
-      raw: dto.key != null ? {'key': dto.key} : null,
+      raw: () {
+        // Build the raw map only with fields downstream code actually reads.
+        // Theme paths are needed by [ThemeMusicService] and don't have
+        // dedicated typed getters on [MediaItem] yet.
+        final extras = <String, Object?>{};
+        if (dto.key != null) extras['key'] = dto.key;
+        if (dto.theme != null) extras['theme'] = dto.theme;
+        if (dto.grandparentTheme != null) extras['grandparentTheme'] = dto.grandparentTheme;
+        return extras.isEmpty ? null : extras;
+      }(),
     );
   }
 
