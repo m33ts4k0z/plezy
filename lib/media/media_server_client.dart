@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import '../media/media_source_info.dart';
 import '../media/media_sort.dart';
 import '../services/api_cache.dart';
@@ -345,6 +347,12 @@ abstract class MediaServerClient {
   /// (Jellyfin) should return the URL unchanged. Used for EPG provider art
   /// and other off-server images that benefit from re-encoding.
   String externalImageUrl(String url, {int? width, int? height});
+
+  /// Fetch the raw bytes for a backend-relative thumbnail path. Used when
+  /// downstream code needs an in-memory image (e.g. handing artwork to the
+  /// Android MediaSession, which only accepts a `Bitmap` — not a URL).
+  /// Returns null on failure rather than throwing.
+  Future<Uint8List?> fetchThumbnailBytes(String? path, {int? width, int? height});
 
   /// Headers that must be attached when the player fetches a direct-play
   /// URL from this server. Plex requires `X-Plex-Token` (and identity

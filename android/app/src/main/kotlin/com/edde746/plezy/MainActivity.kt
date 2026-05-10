@@ -18,6 +18,7 @@ import android.view.inputmethod.InputMethodManager
 import android.widget.FrameLayout
 import androidx.core.content.FileProvider
 import com.edde746.plezy.exoplayer.ExoPlayerPlugin
+import com.edde746.plezy.medianotification.MediaNotificationPlugin
 import com.edde746.plezy.mpv.MpvPlayerPlugin
 import com.edde746.plezy.shared.ThemeHelper
 import com.edde746.plezy.watchnext.WatchNextPlugin
@@ -34,6 +35,15 @@ class MainActivity : FlutterActivity() {
   companion object {
     private const val TAG = "MainActivity"
     var usingSkia = false
+
+    /// Currently-attached activity instance. Used by background plugins
+    /// (e.g. MediaNotificationPlugin) that need to launch an activity in
+    /// the EXISTING task — calling `startActivity` from an activity context
+    /// avoids the NEW_TASK / taskAffinity dance that would otherwise spawn
+    /// a fresh task and destroy the live FlutterEngine.
+    @Volatile
+    var current: MainActivity? = null
+      private set
   }
 
   private val PIP_CHANNEL = "com.plezy/pip"
@@ -92,6 +102,8 @@ class MainActivity : FlutterActivity() {
     val savedTheme = prefs.getString("splash_theme", null)
     ThemeHelper.themeColor(savedTheme)?.let { window.decorView.setBackgroundColor(it) }
 
+    current = this
+
     super.onCreate(savedInstanceState)
 
     // Disable the Android splash screen fade-out animation to avoid
@@ -143,12 +155,21 @@ class MainActivity : FlutterActivity() {
 
     // Handle Watch Next deep link from initial launch
     handleWatchNextIntent(intent)
+    // Handle media-notification taps that were the launch trigger
+    MediaNotificationPlugin.dispatchActionFromIntent(intent)
   }
 
   override fun onNewIntent(intent: Intent) {
     super.onNewIntent(intent)
     // Handle Watch Next deep link when app is already running
     handleWatchNextIntent(intent)
+    // Handle media-notification taps when activity is being re-entered
+    MediaNotificationPlugin.dispatchActionFromIntent(intent)
+  }
+
+  override fun onDestroy() {
+    if (current === this) current = null
+    super.onDestroy()
   }
 
   private fun handleWatchNextIntent(intent: Intent?) {
@@ -201,6 +222,7 @@ class MainActivity : FlutterActivity() {
     super.configureFlutterEngine(flutterEngine)
     flutterEngine.plugins.add(MpvPlayerPlugin())
     flutterEngine.plugins.add(ExoPlayerPlugin())
+    flutterEngine.plugins.add(MediaNotificationPlugin())
 
     MethodChannel(flutterEngine.dartExecutor.binaryMessenger, DEVICE_CHANNEL).setMethodCallHandler { call, result ->
       when (call.method) {
@@ -406,6 +428,32 @@ class MainActivity : FlutterActivity() {
         (plugin as? ExoPlayerPlugin)?.onPipModeChanged(isInPictureInPictureMode)
       }
     }
+  }
+
+  override fun onStop() {
+    // Tapping X on the PiP window kicks the activity through onStop while
+    // `isInPictureInPictureMode` is still true (the
+    // onPictureInPictureModeChanged false-callback fires *after* onStop on
+    // this device). Tapping PiP to expand goes through onResume instead,
+    // so reaching onStop while still flagged as in-PiP is a reliable
+    // signal the user dismissed PiP. Treat that as a full stop and tear
+    // down the home-screen tile natively, since the Dart-side dispose path
+    // is racy when the engine is shutting down in parallel.
+    val dismissedFromPip = isInPictureInPictureMode
+    if (dismissedFromPip) {
+      MediaNotificationPlugin.clearFromNative()
+      // Also clear the parallel `os_media_controls` MediaSession. Niagara
+      // and other launchers that read MediaSessionManager directly will
+      // keep showing a tile as long as ANY of plezy's sessions is alive.
+      flutterEngine?.dartExecutor?.binaryMessenger?.let { messenger ->
+        try {
+          MethodChannel(messenger, "com.edde746.os_media_controls/methods").invokeMethod("clear", null)
+        } catch (e: Exception) {
+          Log.w(TAG, "Failed to clear os_media_controls session", e)
+        }
+      }
+    }
+    super.onStop()
   }
 
   override fun onUserLeaveHint() {

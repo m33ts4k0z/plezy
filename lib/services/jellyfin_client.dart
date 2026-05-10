@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:http/http.dart' as http;
@@ -2089,6 +2090,19 @@ class JellyfinClient with MediaServerCacheMixin implements MediaServerClient, Sc
   /// Plex's `/photo/:/transcode?url=...`. External URLs pass through.
   @override
   String externalImageUrl(String url, {int? width, int? height}) => url;
+
+  @override
+  Future<Uint8List?> fetchThumbnailBytes(String? path, {int? width, int? height}) async {
+    final url = thumbnailUrl(path, width: width, height: height);
+    if (url.isEmpty) return null;
+    try {
+      final bytes = await _http.getBytes(url, timeout: const Duration(seconds: 10));
+      return bytes.isEmpty ? null : bytes;
+    } catch (e) {
+      appLogger.d('JellyfinClient.fetchThumbnailBytes failed', error: e);
+      return null;
+    }
+  }
 
   /// Toggle the per-user `IsFavorite` flag for [itemId]. Used by the live-TV
   /// favorite-channel adapter; works on any Jellyfin item.
