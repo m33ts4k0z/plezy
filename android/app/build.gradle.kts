@@ -180,6 +180,7 @@ dependencies {
   // Media3 ExoPlayer for Android
   implementation("androidx.media3:media3-exoplayer:1.9.2")
   implementation("androidx.media3:media3-exoplayer-hls:1.9.2")
+  implementation("androidx.media3:media3-exoplayer-dash:1.9.2")
   implementation("androidx.media3:media3-ui:1.9.2")
   implementation("androidx.media3:media3-common:1.9.2")
 

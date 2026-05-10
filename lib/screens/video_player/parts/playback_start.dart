@@ -301,9 +301,7 @@ extension _VideoPlayerPlaybackStartMethods on VideoPlayerScreenState {
             bgColor: settingsService.read(SettingsService.subtitleBackgroundColor),
             bgOpacity: settingsService.read(SettingsService.subtitleBackgroundOpacity),
             subtitlePosition: settingsService.read(SettingsService.subtitlePosition),
-            bold: settingsService.read(SettingsService.subtitleBold),
-            italic: settingsService.read(SettingsService.subtitleItalic),
-          );
+            );
         }
 
         // Attach player to Watch Together session for sync (if in session)

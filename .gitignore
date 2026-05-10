@@ -71,5 +71,4 @@ duplication-report/
 maestro/**/*.png
 dist/
 setup.iss
-
 server/deploy.sh

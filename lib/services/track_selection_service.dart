@@ -108,9 +108,18 @@ SubtitleTrack? findMpvTrackForPlexSubtitle(
       ? allPlexTracks.where((t) => !t.isExternal).toList().indexOf(plexTrack)
       : -1;
 
+  // When mpv has no internal tracks at all (typical Plex transcode case
+  // where embedded subs get stripped and sidecars take their place), we
+  // skip the internal-vs-external gate and let scoring match the sidecar
+  // by language. Otherwise an internal Plex selection with no surviving
+  // internal mpv track would never match, dropping the user's persisted
+  // subtitle preference on cold-start after a transcoded session.
+  final allowExternalFallback = mpvTracks.every((t) => t.isExternal);
+
   for (final mpvTrack in mpvTracks) {
-    // Skip external tracks when matching internal Plex tracks
-    if (!plexTrack.isExternal && mpvTrack.isExternal) continue;
+    // Skip external tracks when matching internal Plex tracks — unless
+    // we're in the "all-external" case noted above.
+    if (!plexTrack.isExternal && mpvTrack.isExternal && !allowExternalFallback) continue;
 
     final ordinalMatches =
         internalMpvTracks != null && plexOrdinal >= 0 && internalMpvTracks.indexOf(mpvTrack) == plexOrdinal;
@@ -429,10 +438,23 @@ class TrackSelectionService {
       }
     }
 
-    // Try to match: language only
+    // Try to match: language only (strict)
     for (final track in validTracks) {
       if (getLanguage(track) == preferredLanguage) {
         return track;
+      }
+    }
+
+    // Final fallback: fuzzy language match — handles 'el' vs 'ell' (ISO 639-1
+    // vs ISO 639-2) and region suffixes like 'en-US'. Without this, carrying
+    // a track across player reloads (e.g. a quality change that re-loads the
+    // sidecar SRTs) drops the user's selection whenever the two players
+    // report the same language with different code lengths.
+    if (preferredLanguage != null) {
+      for (final track in validTracks) {
+        if (languageMatches(getLanguage(track), preferredLanguage)) {
+          return track;
+        }
       }
     }
 

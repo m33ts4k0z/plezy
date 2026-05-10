@@ -237,7 +237,7 @@ void main() {
         PlaybackInitializationOptions(
           metadata: MediaItem(id: 'item-1', backend: MediaBackend.jellyfin, kind: MediaKind.movie, serverId: 'srv-1'),
           selectedMediaIndex: 0,
-          qualityPreset: TranscodeQualityPreset.p720_2mbps,
+          qualityPreset: TranscodeQualityPreset.p720_4mbps,
         ),
       );
 
@@ -298,7 +298,7 @@ void main() {
         PlaybackInitializationOptions(
           metadata: MediaItem(id: 'item-1', backend: MediaBackend.jellyfin, kind: MediaKind.movie, serverId: 'srv-1'),
           selectedMediaIndex: 0,
-          qualityPreset: TranscodeQualityPreset.p720_2mbps,
+          qualityPreset: TranscodeQualityPreset.p720_4mbps,
         ),
       );
 
@@ -465,7 +465,7 @@ void main() {
         PlaybackInitializationOptions(
           metadata: MediaItem(id: 'item-1', backend: MediaBackend.jellyfin, kind: MediaKind.movie, serverId: 'srv-1'),
           selectedMediaIndex: 0,
-          qualityPreset: TranscodeQualityPreset.p720_2mbps,
+          qualityPreset: TranscodeQualityPreset.p720_4mbps,
         ),
       );
 
@@ -643,7 +643,7 @@ void main() {
         PlaybackInitializationOptions(
           metadata: MediaItem(id: 'item-1', backend: MediaBackend.jellyfin, kind: MediaKind.movie, serverId: 'srv-1'),
           selectedMediaIndex: 0,
-          qualityPreset: TranscodeQualityPreset.p720_2mbps,
+          qualityPreset: TranscodeQualityPreset.p720_4mbps,
         ),
       );
 

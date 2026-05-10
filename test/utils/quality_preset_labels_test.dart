@@ -10,7 +10,7 @@ void main() {
 
     test('integer-mbps preset renders without decimal', () {
       // 2000 kbps -> 2 Mbps (whole number)
-      expect(qualityPresetLabel(TranscodeQualityPreset.p720_2mbps), '720p 2 Mbps');
+      expect(qualityPresetLabel(TranscodeQualityPreset.p720_4mbps), '720p 2 Mbps');
     });
 
     test('fractional-mbps preset renders with one decimal', () {
@@ -27,7 +27,7 @@ void main() {
 
     test('low-resolution presets have correct height', () {
       expect(qualityPresetLabel(TranscodeQualityPreset.p240_320), startsWith('240p '));
-      expect(qualityPresetLabel(TranscodeQualityPreset.p320_720), startsWith('320p '));
+      expect(qualityPresetLabel(TranscodeQualityPreset.p240_320), startsWith('320p '));
     });
 
     test('all 1080p presets render with 1080p prefix', () {
@@ -43,8 +43,8 @@ void main() {
 
     test('all 720p presets render with 720p prefix', () {
       for (final preset in [
-        TranscodeQualityPreset.p720_2mbps,
-        TranscodeQualityPreset.p720_3mbps,
+        TranscodeQualityPreset.p720_4mbps,
+        TranscodeQualityPreset.p720_4mbps,
         TranscodeQualityPreset.p720_4mbps,
       ]) {
         expect(qualityPresetLabel(preset), startsWith('720p '));
@@ -62,7 +62,7 @@ void main() {
     test('returns null when sourceDurationMs is null', () {
       expect(
         qualityPresetSizeEstimate(
-          preset: TranscodeQualityPreset.p720_2mbps,
+          preset: TranscodeQualityPreset.p720_4mbps,
           sourceBitrateKbps: 5000,
           sourceDurationMs: null,
         ),
@@ -73,7 +73,7 @@ void main() {
     test('returns null when sourceDurationMs is 0 or negative', () {
       expect(
         qualityPresetSizeEstimate(
-          preset: TranscodeQualityPreset.p720_2mbps,
+          preset: TranscodeQualityPreset.p720_4mbps,
           sourceBitrateKbps: 5000,
           sourceDurationMs: 0,
         ),
@@ -81,7 +81,7 @@ void main() {
       );
       expect(
         qualityPresetSizeEstimate(
-          preset: TranscodeQualityPreset.p720_2mbps,
+          preset: TranscodeQualityPreset.p720_4mbps,
           sourceBitrateKbps: 5000,
           sourceDurationMs: -100,
         ),
@@ -122,7 +122,7 @@ void main() {
 
     test('non-original preset includes percentage when source bitrate is provided', () {
       final result = qualityPresetSizeEstimate(
-        preset: TranscodeQualityPreset.p720_2mbps,
+        preset: TranscodeQualityPreset.p720_4mbps,
         sourceBitrateKbps: 8000,
         sourceDurationMs: 60 * 1000,
       );
@@ -134,7 +134,7 @@ void main() {
 
     test('non-original preset omits percentage when source bitrate is null', () {
       final result = qualityPresetSizeEstimate(
-        preset: TranscodeQualityPreset.p720_2mbps,
+        preset: TranscodeQualityPreset.p720_4mbps,
         sourceBitrateKbps: null,
         sourceDurationMs: 60 * 1000,
       );
@@ -144,7 +144,7 @@ void main() {
 
     test('non-original preset omits percentage when source bitrate is zero', () {
       final result = qualityPresetSizeEstimate(
-        preset: TranscodeQualityPreset.p720_2mbps,
+        preset: TranscodeQualityPreset.p720_4mbps,
         sourceBitrateKbps: 0,
         sourceDurationMs: 60 * 1000,
       );
@@ -156,7 +156,7 @@ void main() {
       // p720_2mbps -> 2000 video kbps + 192 audio = 2192 kbps total.
       // source = 8000 kbps -> 2192 * 100 / 8000 = 27.4 -> rounds to 27%.
       final result = qualityPresetSizeEstimate(
-        preset: TranscodeQualityPreset.p720_2mbps,
+        preset: TranscodeQualityPreset.p720_4mbps,
         sourceBitrateKbps: 8000,
         sourceDurationMs: 60 * 1000,
       );
@@ -166,12 +166,12 @@ void main() {
 
     test('larger source bitrate produces smaller percentage', () {
       final at4k = qualityPresetSizeEstimate(
-        preset: TranscodeQualityPreset.p720_2mbps,
+        preset: TranscodeQualityPreset.p720_4mbps,
         sourceBitrateKbps: 40000,
         sourceDurationMs: 1000,
       );
       final at8k = qualityPresetSizeEstimate(
-        preset: TranscodeQualityPreset.p720_2mbps,
+        preset: TranscodeQualityPreset.p720_4mbps,
         sourceBitrateKbps: 8000,
         sourceDurationMs: 1000,
       );

@@ -129,7 +129,14 @@ class _FakePlexClient implements PlexClient {
   Object? throwOnNextCall;
 
   @override
-  Future<void> updateProgress(String ratingKey, {required int time, required String state, int? duration}) async {
+  Future<void> updateProgress(
+    String ratingKey, {
+    required int time,
+    required String state,
+    int? duration,
+    int? playbackTime,
+    String? sessionIdentifier,
+  }) async {
     if (throwOnNextCall != null) {
       final err = throwOnNextCall!;
       throwOnNextCall = null;
@@ -870,7 +877,14 @@ class _ScrobblePreciseClient implements PlexClient {
   int markWatchedSuccesses = 0;
 
   @override
-  Future<void> updateProgress(String ratingKey, {required int time, required String state, int? duration}) async {}
+  Future<void> updateProgress(
+    String ratingKey, {
+    required int time,
+    required String state,
+    int? duration,
+    int? playbackTime,
+    String? sessionIdentifier,
+  }) async {}
 
   @override
   Future<void> reportPlaybackStarted({
