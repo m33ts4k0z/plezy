@@ -41,6 +41,7 @@ import '../services/trackers/tracker_coordinator.dart';
 import '../services/trakt/trakt_scrobble_service.dart';
 import '../services/episode_navigation_service.dart';
 import '../services/media_controls_manager.dart';
+import '../services/resume_from_media_controls_service.dart';
 import '../services/playback_initialization_service.dart';
 import '../services/playback_progress_tracker.dart';
 import '../services/offline_watch_sync_service.dart';
@@ -423,6 +424,12 @@ class VideoPlayerScreenState extends State<VideoPlayerScreen> with WidgetsBindin
     _screenFocusNode = FocusNode(debugLabel: 'VideoPlayerScreen');
     _screenFocusNode.addListener(_onScreenFocusChanged);
 
+    // A new player is taking ownership of the OS media controls. Drop any
+    // pending resume armed by a prior session so its listener can't compete
+    // with this player's per-instance controls subscription. Don't clear
+    // the OS notification — this player will refresh its metadata.
+    unawaited(ResumeFromMediaControlsService.instance.disarm(clearOsControls: false));
+
     appLogger.d('VideoPlayerScreen initialized for: ${widget.metadata.title}');
     if (widget.preferredAudioTrack != null) {
       appLogger.d(
@@ -505,8 +512,13 @@ class VideoPlayerScreenState extends State<VideoPlayerScreen> with WidgetsBindin
           _recordLifecycleState('paused', action: 'skipped_for_pip');
           break;
         }
-        // We don't support background playback
-        _mediaControlsManager?.clear();
+        // We don't support background playback. On Android, leave the OS
+        // media notification visible so the user can resume from the lock
+        // screen — the player is still alive here, so the existing
+        // per-instance control subscription handles play/pause taps.
+        if (!Platform.isAndroid) {
+          _mediaControlsManager?.clear();
+        }
         _setWakelock(false);
         _recordLifecycleState('paused', action: 'backgrounded');
         break;
@@ -1019,7 +1031,24 @@ class VideoPlayerScreenState extends State<VideoPlayerScreen> with WidgetsBindin
     _screenFocusNode.removeListener(_onScreenFocusChanged);
     _screenFocusNode.dispose();
 
-    _mediaControlsManager?.clear();
+    // Hand the OS media notification off to the resume service on Android
+    // when this exit looks resumable (mid-progress, has metadata, not
+    // live, not an episode swap, not Watch Together). The service keeps
+    // the paused notification visible and re-opens the player on play tap.
+    final resumePosition = player?.state.position ?? Duration.zero;
+    final canResumeFromControls =
+        !_isReplacingWithVideo &&
+        !widget.isLive &&
+        (_watchTogetherProvider == null || !_watchTogetherProvider!.isInSession) &&
+        ResumeFromMediaControlsService.instance.arm(
+          metadata: _currentMetadata,
+          position: resumePosition,
+          isOffline: _isOfflinePlayback,
+        );
+
+    if (!canResumeFromControls) {
+      _mediaControlsManager?.clear();
+    }
     _mediaControlsManager?.dispose();
 
     DiscordRPCService.instance.stopPlayback();
