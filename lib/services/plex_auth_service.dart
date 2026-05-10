@@ -209,7 +209,10 @@ class PlexAuthService {
 
   /// Get user profile with preferences (audio/subtitle settings)
   Future<PlexUserProfile> getUserProfile(String authToken) async {
-    final response = await _http.get('$_clientsApi/user', headers: _getCommonHeaders(authToken: authToken));
+    final response = await _http.get(
+      '$_clientsApi/user?includeSettings=1&includeSharedSettings=1',
+      headers: _getCommonHeaders(authToken: authToken),
+    );
     _checkStatus(response);
     return PlexUserProfile.fromJson(response.data as Map<String, dynamic>);
   }
