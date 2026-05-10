@@ -383,6 +383,12 @@ class VideoPlayerScreenState extends State<VideoPlayerScreen> with WidgetsBindin
   final ValueNotifier<bool> _isBuffering = ValueNotifier<bool>(false);
   final ValueNotifier<bool> _hasFirstFrame = ValueNotifier<bool>(false);
   final ValueNotifier<bool> _isExiting = ValueNotifier<bool>(false);
+
+  /// Set to `true` by code paths that treat the player exit as a full stop
+  /// (e.g. tapping X on the PiP window). When set, the dispose path skips
+  /// arming the resume coordinator and falls through to clear() instead,
+  /// removing the home-screen / lock-screen media tile entirely.
+  bool _suppressResumeArm = false;
   final ValueNotifier<bool> _controlsVisible = ValueNotifier<bool>(true);
 
   @override
@@ -1035,16 +1041,20 @@ class VideoPlayerScreenState extends State<VideoPlayerScreen> with WidgetsBindin
     // when this exit looks resumable (mid-progress, has metadata, not
     // live, not an episode swap, not Watch Together). The service keeps
     // the paused notification visible and re-opens the player on play tap.
+    // If a sibling code path (e.g. PiP-close handler) already armed the
+    // service, respect that and skip clearing.
     final resumePosition = player?.state.position ?? Duration.zero;
     final canResumeFromControls =
-        !_isReplacingWithVideo &&
-        !widget.isLive &&
-        (_watchTogetherProvider == null || !_watchTogetherProvider!.isInSession) &&
-        ResumeFromMediaControlsService.instance.arm(
-          metadata: _currentMetadata,
-          position: resumePosition,
-          isOffline: _isOfflinePlayback,
-        );
+        !_suppressResumeArm &&
+        (ResumeFromMediaControlsService.instance.isArmed ||
+            (!_isReplacingWithVideo &&
+                !widget.isLive &&
+                (_watchTogetherProvider == null || !_watchTogetherProvider!.isInSession) &&
+                ResumeFromMediaControlsService.instance.arm(
+                  metadata: _currentMetadata,
+                  position: resumePosition,
+                  isOffline: _isOfflinePlayback,
+                )));
 
     if (!canResumeFromControls) {
       _mediaControlsManager?.clear();

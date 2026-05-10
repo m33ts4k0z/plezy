@@ -173,6 +173,10 @@ dependencies {
   // Android TV Watch Next integration
   implementation("androidx.tvprovider:tvprovider:1.0.0")
 
+  // androidx.media for NotificationCompat.MediaStyle (the home-screen widget
+  // bridge — third-party launchers like Niagara only see Notifications).
+  implementation("androidx.media:media:1.7.0")
+
   // Media3 ExoPlayer for Android
   implementation("androidx.media3:media3-exoplayer:1.9.2")
   implementation("androidx.media3:media3-exoplayer-hls:1.9.2")

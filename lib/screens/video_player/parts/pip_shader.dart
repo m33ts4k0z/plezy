@@ -46,6 +46,30 @@ extension _VideoPlayerPipShaderMethods on VideoPlayerScreenState {
         _videoFilterManager!.clearPipAmbientLightingFlag();
         _restoreAmbientLighting();
       }
+
+      // Android: tapping X on the PiP window dismisses PiP while the app is
+      // still backgrounded. The user's intent here is "stop playback" —
+      // not "pause and let me resume from the home-screen widget". So we
+      // mark this exit path as non-resumable and pop the route. The dispose
+      // path sees the flag and falls through to the regular clear() that
+      // tears down both OS media surfaces. Pause mpv first so audio doesn't
+      // keep going while dispose schedules the rest of the teardown.
+      if (Platform.isAndroid && mounted) {
+        final lifecycleState = WidgetsBinding.instance.lifecycleState;
+        final appBackgrounded =
+            lifecycleState == AppLifecycleState.paused || lifecycleState == AppLifecycleState.hidden;
+        if (appBackgrounded) {
+          _suppressResumeArm = true;
+          player?.pause();
+          final navigator = Navigator.of(context);
+          if (navigator.canPop()) {
+            _isExiting.value = true;
+            unawaited(_sendStoppedProgressOnce().then((_) {
+              if (mounted) navigator.pop(true);
+            }));
+          }
+        }
+      }
     }
   }
 

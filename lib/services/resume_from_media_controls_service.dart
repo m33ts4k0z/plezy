@@ -7,6 +7,7 @@ import '../main.dart' show rootNavigatorKey;
 import '../media/media_item.dart';
 import '../utils/app_logger.dart';
 import '../utils/video_player_navigation.dart';
+import 'plezy_media_notification.dart';
 
 /// Keeps the Android lock-screen / media-notification widget alive after the
 /// video player is disposed, so the user can tap play to jump back into the
@@ -25,6 +26,7 @@ class ResumeFromMediaControlsService {
 
   _PendingResume? _pending;
   StreamSubscription<dynamic>? _subscription;
+  StreamSubscription<PlezyMediaNotificationEvent>? _plezyNotifSubscription;
   bool _navigating = false;
 
   /// True while a paused notification is being held for resume. Useful for
@@ -54,6 +56,26 @@ class ResumeFromMediaControlsService {
 
     _pending = _PendingResume(metadata: metadata, position: position, isOffline: isOffline);
     _attachListener();
+    // Force both surfaces into the paused state. The player disposal
+    // cancels its own per-instance playback-state listener before the
+    // final pause/stop is reflected, so without this the lock-screen
+    // widget and home-screen launcher tile can keep showing a "pause"
+    // icon (= OS thinks playback is ongoing) even though the player is
+    // gone.
+    unawaited(
+      OsMediaControls.setPlaybackState(
+        MediaPlaybackState(state: PlaybackState.paused, position: position, speed: 0.0),
+      ).catchError((Object e) {
+        appLogger.w('ResumeFromMediaControlsService: failed to set paused state', error: e);
+      }),
+    );
+    unawaited(
+      PlezyMediaNotification.instance.setPlaybackState(
+        isPlaying: false,
+        position: position,
+        speed: 0.0,
+      ),
+    );
     appLogger.d('ResumeFromMediaControlsService armed for ${metadata.title} at $position');
     return true;
   }
@@ -67,18 +89,44 @@ class ResumeFromMediaControlsService {
     _pending = null;
     await _subscription?.cancel();
     _subscription = null;
+    await _plezyNotifSubscription?.cancel();
+    _plezyNotifSubscription = null;
     if (wasArmed && clearOsControls) {
       try {
         await OsMediaControls.clear();
       } catch (e) {
         appLogger.w('ResumeFromMediaControlsService: failed to clear OS controls', error: e);
       }
+      try {
+        await PlezyMediaNotification.instance.clear();
+      } catch (e) {
+        appLogger.w('ResumeFromMediaControlsService: failed to clear plezy notification', error: e);
+      }
     }
   }
 
   void _attachListener() {
-    if (_subscription != null) return;
-    _subscription = OsMediaControls.controlEvents.listen(_onEvent);
+    _subscription ??= OsMediaControls.controlEvents.listen(_onEvent);
+    // Also subscribe to the in-tree home-screen notification's events.
+    // Niagara / launcher button taps come through this channel — they
+    // don't hit os_media_controls' MediaSession at all.
+    _plezyNotifSubscription ??= PlezyMediaNotification.instance.events.listen(_onPlezyEvent);
+  }
+
+  Future<void> _onPlezyEvent(PlezyMediaNotificationEvent event) async {
+    final pending = _pending;
+    if (pending == null) return;
+    if (event is PlezyMediaPlay || event is PlezyMediaTogglePlayPause) {
+      if (_navigating) return;
+      _navigating = true;
+      try {
+        await _resume(pending);
+      } finally {
+        _navigating = false;
+      }
+    } else if (event is PlezyMediaStop) {
+      await disarm();
+    }
   }
 
   Future<void> _onEvent(dynamic event) async {
@@ -110,6 +158,8 @@ class ResumeFromMediaControlsService {
     _pending = null;
     await _subscription?.cancel();
     _subscription = null;
+    await _plezyNotifSubscription?.cancel();
+    _plezyNotifSubscription = null;
 
     final navigator = rootNavigatorKey.currentState;
     final context = navigator?.context;
@@ -127,6 +177,9 @@ class ResumeFromMediaControlsService {
       // dead widget that can't be resumed.
       try {
         await OsMediaControls.clear();
+      } catch (_) {}
+      try {
+        await PlezyMediaNotification.instance.clear();
       } catch (_) {}
     }
   }

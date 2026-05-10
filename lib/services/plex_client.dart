@@ -3254,6 +3254,19 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
   }
 
   @override
+  Future<Uint8List?> fetchThumbnailBytes(String? path, {int? width, int? height}) async {
+    final url = thumbnailUrl(path, width: width, height: height);
+    if (url.isEmpty) return null;
+    try {
+      final bytes = await _http.getBytes(url, timeout: const Duration(seconds: 10));
+      return bytes.isEmpty ? null : bytes;
+    } catch (e) {
+      appLogger.d('PlexClient.fetchThumbnailBytes failed', error: e);
+      return null;
+    }
+  }
+
+  @override
   double get watchedThreshold => watchedThresholdPercent / 100.0;
 
   @override
