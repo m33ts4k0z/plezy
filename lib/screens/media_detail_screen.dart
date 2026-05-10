@@ -11,6 +11,8 @@ import 'package:plezy/utils/platform_detector.dart';
 import 'package:plezy/widgets/app_icon.dart';
 import 'package:material_symbols_icons/symbols.dart';
 import 'package:provider/provider.dart';
+import '../main.dart' show routeObserver;
+import '../services/theme_music_service.dart';
 import '../widgets/collapsible_text.dart';
 import '../widgets/rating_bottom_sheet.dart';
 
@@ -89,7 +91,13 @@ class MediaDetailScreen extends StatefulWidget {
 }
 
 class _MediaDetailScreenState extends State<MediaDetailScreen>
-    with WatchStateAware, DeletionAware, MountedSetStateMixin, ServerBoundMediaMixin {
+    with
+        WatchStateAware,
+        DeletionAware,
+        MountedSetStateMixin,
+        ServerBoundMediaMixin,
+        RouteAware,
+        WidgetsBindingObserver {
   /// Public input alias — used as the live source of truth until the detail
   /// fetch returns. Holds backend-neutral [MediaItem] data.
   MediaItem get _metadata => _fullMetadata ?? widget.metadata;
@@ -422,9 +430,20 @@ class _MediaDetailScreenState extends State<MediaDetailScreen>
     }
   }
 
+  // Theme-music lifecycle state. Tracks "is this route the visible top
+  // route" and "is the app in the foreground" so we can suspend the
+  // theme audio whenever neither is true. The owner id namespaces the
+  // currently-playing theme inside the singleton service so two open
+  // detail screens (e.g. tablet split-view) don't fight each other.
+  late final String _themeMusicOwnerId = 'media_detail_${identityHashCode(this)}';
+  bool _isRouteVisible = true;
+  bool _isAppActive = true;
+  bool _isRouteObserverSubscribed = false;
+
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _scrollController = ScrollController();
     _scrollController.addListener(_onScroll);
     _extrasFocusNode = FocusNode(debugLabel: 'extras_row');
@@ -436,12 +455,59 @@ class _MediaDetailScreenState extends State<MediaDetailScreen>
     _loadFullMetadata();
   }
 
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_isRouteObserverSubscribed) return;
+    final route = ModalRoute.of(context);
+    if (route is PageRoute) {
+      routeObserver.subscribe(this, route);
+      _isRouteObserverSubscribed = true;
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _isAppActive = state == AppLifecycleState.resumed;
+    _syncThemeMusic();
+  }
+
+  @override
+  void didPush() {
+    _isRouteVisible = true;
+    _syncThemeMusic();
+  }
+
+  @override
+  void didPopNext() {
+    _isRouteVisible = true;
+    _syncThemeMusic();
+  }
+
+  @override
+  void didPushNext() {
+    _isRouteVisible = false;
+    _syncThemeMusic();
+  }
+
+  @override
+  void didPop() {
+    _isRouteVisible = false;
+    unawaited(ThemeMusicService.instance.stop(ownerId: _themeMusicOwnerId));
+  }
+
   void _onScroll() {
     _scrollOffset.value = _scrollController.offset;
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    if (_isRouteObserverSubscribed) {
+      routeObserver.unsubscribe(this);
+      _isRouteObserverSubscribed = false;
+    }
+    unawaited(ThemeMusicService.instance.stop(ownerId: _themeMusicOwnerId));
     _scrollController.dispose();
     _scrollOffset.dispose();
     _extrasScrollController.dispose();
@@ -935,6 +1001,38 @@ class _MediaDetailScreenState extends State<MediaDetailScreen>
     }
   }
 
+  /// Drive [ThemeMusicService] to match the current screen state. Called
+  /// whenever the visibility flags or loaded metadata change. The service
+  /// itself decides whether to actually start (only Plex shows expose a
+  /// theme path; non-Plex / non-show items are a no-op).
+  void _syncThemeMusic() {
+    if (!mounted) return;
+    final metadata = _fullMetadata ?? widget.metadata;
+    final settings = SettingsService.instanceOrNull;
+    final level = settings == null ? ThemeMusicLevel.off : settings.read(SettingsService.themeMusicLevel);
+
+    final shouldPlay = !widget.isOffline && _isRouteVisible && _isAppActive && level != ThemeMusicLevel.off;
+    if (!shouldPlay) {
+      unawaited(ThemeMusicService.instance.stop(ownerId: _themeMusicOwnerId));
+      return;
+    }
+
+    final client = getServerBoundPlexClient(context);
+    if (client == null) {
+      unawaited(ThemeMusicService.instance.stop(ownerId: _themeMusicOwnerId));
+      return;
+    }
+
+    unawaited(
+      ThemeMusicService.instance.playForMetadata(
+        ownerId: _themeMusicOwnerId,
+        metadata: metadata,
+        client: client,
+        volume: SettingsService.themeMusicVolume(level),
+      ),
+    );
+  }
+
   Future<void> _loadFullMetadata() async {
     setState(() {
       _isLoadingMetadata = true;
@@ -951,6 +1049,7 @@ class _MediaDetailScreenState extends State<MediaDetailScreen>
         _fullMetadata = _applyLocalProgress(cachedMetadata ?? _metadata);
         _isLoadingMetadata = false;
       });
+      _syncThemeMusic();
 
       if (_metadata.isShow) {
         _loadSeasonsFromDownloads();
@@ -999,6 +1098,7 @@ class _MediaDetailScreenState extends State<MediaDetailScreen>
         _onDeckEpisode = onDeckWithServerId;
         _isLoadingMetadata = false;
       });
+      _syncThemeMusic();
 
       if (base.isShow) {
         unawaited(_loadSeasons());
