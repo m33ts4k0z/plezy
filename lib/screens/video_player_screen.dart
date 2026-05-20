@@ -609,9 +609,11 @@ class VideoPlayerScreenState extends State<VideoPlayerScreen> with WidgetsBindin
         _streamHeaders = genericClient.streamHeaders;
         // Single source of truth — `capabilities.videoTranscoding` reflects
         // the per-Plex-server probe (false on Plex installs without a working
-        // transcoder) and is hard-false on Jellyfin. The long-press context
-        // menu's quality picker reads the same flag. Alternate-version
-        // selection still works regardless because it's gated on
+        // transcoder), and is `true` on Jellyfin, which negotiates a
+        // `TranscodingUrl` via `POST /Items/{id}/PlaybackInfo` when a
+        // non-original preset is selected. The long-press context menu's
+        // quality picker reads the same flag. Alternate-version selection
+        // still works regardless because it's gated on
         // `availableVersions.length`, not transcoding capability.
         _serverSupportsTranscoding = genericClient.capabilities.videoTranscoding;
         if (widget.selectedQualityPreset == null) {
