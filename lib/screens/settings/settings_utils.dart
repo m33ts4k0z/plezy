@@ -32,7 +32,7 @@ void _showSettingsInputDialog({
   required BuildContext context,
   required String title,
   required _SettingsDialogContentBuilder contentBuilder,
-  required Future<bool> Function(BuildContext dialogContext) onSave,
+  required Future<bool> Function() onSave,
   _SettingsDialogActionsBuilder? leadingActionsBuilder,
   VoidCallback? onDispose,
 }) {
@@ -43,21 +43,29 @@ void _showSettingsInputDialog({
     builder: (BuildContext dialogContext) {
       return StatefulBuilder(
         builder: (context, setDialogState) {
+          final navigator = Navigator.of(dialogContext);
           return AlertDialog(
             title: Text(title),
             content: contentBuilder(dialogContext, context, setDialogState, saveFocusNode),
             actions: [
               ...?leadingActionsBuilder?.call(dialogContext, setDialogState),
-              DialogActionButton(onPressed: () => Navigator.pop(dialogContext), label: t.common.cancel),
-              DialogActionButton(
-                focusNode: saveFocusNode,
-                onPressed: () async {
-                  final shouldClose = await onSave(dialogContext);
-                  if (shouldClose && dialogContext.mounted) {
-                    Navigator.pop(dialogContext);
+              TextButton(
+                onPressed: () {
+                  if (navigator.mounted && navigator.canPop()) {
+                    navigator.pop();
                   }
                 },
-                label: t.common.save,
+                child: Text(t.common.cancel),
+              ),
+              TextButton(
+                focusNode: saveFocusNode,
+                onPressed: () async {
+                  final shouldClose = await onSave();
+                  if (shouldClose && navigator.mounted && navigator.canPop()) {
+                    navigator.pop();
+                  }
+                },
+                child: Text(t.common.save),
               ),
             ],
           );
@@ -81,6 +89,7 @@ Future<T?> showSelectionDialog<T>({
   final focusFirstItem = InputModeTracker.isKeyboardMode(context);
   return showDialog<T>(
     context: context,
+    useRootNavigator: true,
     builder: (dialogContext) => AlertDialog(
       title: Text(title),
       contentPadding: const EdgeInsets.only(top: 12, bottom: 24),
@@ -99,7 +108,7 @@ Future<T?> showSelectionDialog<T>({
               subtitle: option.subtitle != null ? Text(option.subtitle!) : null,
               selected: selected,
               autofocus: focusFirstItem && selected,
-              onTap: () => Navigator.pop(dialogContext, option.value),
+              onTap: () => Navigator.of(dialogContext, rootNavigator: true).pop(option.value),
             );
           }).toList(),
         ),
@@ -189,7 +198,7 @@ void _showNumericInputDialogTV({
         ],
       );
     },
-    onSave: (_) async {
+    onSave: () async {
       await onSave(spinnerValue);
       return true;
     },
@@ -206,49 +215,118 @@ void _showNumericInputDialogStandard({
   required int currentValue,
   required Future<void> Function(int value) onSave,
 }) {
-  final controller = TextEditingController(text: currentValue.toString());
-  String? errorText;
-
-  _showSettingsInputDialog(
+  showDialog<void>(
     context: context,
-    title: title,
-    contentBuilder: (_, _, setDialogState, saveFocusNode) {
-      return FocusableTextField(
-        controller: controller,
+    builder: (dialogContext) => _NumericInputDialog(
+      title: title,
+      labelText: labelText,
+      suffixText: suffixText,
+      min: min,
+      max: max,
+      currentValue: currentValue,
+      onSave: onSave,
+    ),
+  );
+}
+
+class _NumericInputDialog extends StatefulWidget {
+  final String title;
+  final String labelText;
+  final String suffixText;
+  final int min;
+  final int max;
+  final int currentValue;
+  final Future<void> Function(int value) onSave;
+
+  const _NumericInputDialog({
+    required this.title,
+    required this.labelText,
+    required this.suffixText,
+    required this.min,
+    required this.max,
+    required this.currentValue,
+    required this.onSave,
+  });
+
+  @override
+  State<_NumericInputDialog> createState() => _NumericInputDialogState();
+}
+
+class _NumericInputDialogState extends State<_NumericInputDialog> {
+  late final TextEditingController _controller;
+  String? _errorText;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController(text: widget.currentValue.toString());
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _onChanged(String value) {
+    final parsed = int.tryParse(value);
+    setState(() {
+      if (parsed == null) {
+        _errorText = t.settings.validationErrorEnterNumber;
+      } else if (parsed < widget.min || parsed > widget.max) {
+        _errorText = t.settings.validationErrorDuration(
+          min: widget.min,
+          max: widget.max,
+          unit: widget.labelText.toLowerCase(),
+        );
+      } else {
+        _errorText = null;
+      }
+    });
+  }
+
+  Future<void> _save() async {
+    final parsed = int.tryParse(_controller.text);
+    if (parsed == null || parsed < widget.min || parsed > widget.max) return;
+    final navigator = Navigator.of(context);
+    await widget.onSave(parsed);
+    if (navigator.mounted && navigator.canPop()) {
+      navigator.pop();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text(widget.title),
+      content: TextField(
+        controller: _controller,
         keyboardType: TextInputType.number,
         decoration: InputDecoration(
-          labelText: labelText,
-          hintText: t.settings.durationHint(min: min, max: max),
-          errorText: errorText,
-          suffixText: suffixText,
+          labelText: widget.labelText,
+          hintText: t.settings.durationHint(min: widget.min, max: widget.max),
+          errorText: _errorText,
+          suffixText: widget.suffixText,
         ),
         autofocus: true,
         textInputAction: TextInputAction.done,
-        onEditingComplete: () {
-          saveFocusNode.requestFocus();
-        },
-        onChanged: (value) {
-          final parsed = int.tryParse(value);
-          setDialogState(() {
-            if (parsed == null) {
-              errorText = t.settings.validationErrorEnterNumber;
-            } else if (parsed < min || parsed > max) {
-              errorText = t.settings.validationErrorDuration(min: min, max: max, unit: labelText.toLowerCase());
-            } else {
-              errorText = null;
+        onChanged: _onChanged,
+        onSubmitted: (_) => _save(),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () {
+            final navigator = Navigator.of(context);
+            if (navigator.mounted && navigator.canPop()) {
+              navigator.pop();
             }
-          });
-        },
-      );
-    },
-    onSave: (_) async {
-      final parsed = int.tryParse(controller.text);
-      if (parsed == null || parsed < min || parsed > max) return false;
-      await onSave(parsed);
-      return true;
-    },
-    onDispose: controller.dispose,
-  );
+          },
+          child: Text(t.common.cancel),
+        ),
+        TextButton(onPressed: _save, child: Text(t.common.save)),
+      ],
+    );
+  }
 }
 
 /// Convert `#RRGGBB` (or `#AARRGGBB`) hex to [Color]. Defaults to black on parse error.
@@ -286,31 +364,44 @@ Future<void> _showColorInputDialogStandard({
   required String currentHex,
   required Future<void> Function(String hex) onSave,
 }) async {
-  final initial = hexToColor(currentHex);
-  final selected = await showColorPickerDialog(
-    context,
-    initial,
-    title: Text(title),
-    barrierColor: Colors.black54,
-    width: 40,
-    height: 40,
-    spacing: 0,
-    runSpacing: 0,
-    borderRadius: 4,
-    wheelDiameter: 165,
-    enableOpacity: false,
-    showColorCode: true,
-    colorCodeHasColor: true,
-    pickersEnabled: const <ColorPickerType, bool>{
-      ColorPickerType.both: false,
-      ColorPickerType.primary: true,
-      ColorPickerType.accent: false,
-      ColorPickerType.wheel: true,
-      ColorPickerType.custom: false,
+  Color selected = hexToColor(currentHex);
+  _showSettingsInputDialog(
+    context: context,
+    title: title,
+    contentBuilder: (_, context, setDialogState, saveFocusNode) {
+      return SingleChildScrollView(
+        child: ColorPicker(
+          color: selected,
+          onColorChanged: (color) {
+            setDialogState(() => selected = color);
+          },
+          enableOpacity: false,
+          showColorCode: true,
+          colorCodeHasColor: true,
+          width: 40,
+          height: 40,
+          spacing: 0,
+          runSpacing: 0,
+          borderRadius: 4,
+          wheelDiameter: 165,
+          pickersEnabled: const <ColorPickerType, bool>{
+            ColorPickerType.both: false,
+            ColorPickerType.primary: true,
+            ColorPickerType.accent: false,
+            ColorPickerType.wheel: true,
+            ColorPickerType.custom: false,
+          },
+        ),
+      );
     },
-    actionButtons: const ColorPickerActionButtons(okButton: true, closeButton: true, dialogActionButtons: false),
+    onSave: () async {
+      final nextHex = colorToHex(selected);
+      if (nextHex != currentHex) {
+        await onSave(nextHex);
+      }
+      return true;
+    },
   );
-  if (selected != initial) await onSave(colorToHex(selected));
 }
 
 void _showColorInputDialogTV({
@@ -330,7 +421,7 @@ void _showColorInputDialogTV({
         onConfirm: () => saveFocusNode.requestFocus(),
       );
     },
-    onSave: (_) async {
+    onSave: () async {
       await onSave(colorToHex(picked));
       return true;
     },
@@ -379,7 +470,7 @@ void showRegexInputDialog({
         label: t.settings.resetToDefault,
       ),
     ],
-    onSave: (_) async {
+    onSave: () async {
       if (errorText != null) return false;
       await onSave(controller.text);
       return true;

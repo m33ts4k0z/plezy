@@ -1578,6 +1578,8 @@ class PlexClient
     required int time,
     required String state, // 'playing', 'paused', 'stopped', 'buffering'
     int? duration,
+    String? sessionIdentifier,
+    int? playbackTime,
   }) async {
     final response = await _http.post(
       '/:/timeline',
@@ -1587,6 +1589,12 @@ class PlexClient
         'time': time,
         'state': state,
         'duration': ?duration,
+        // When a session id is present we are tied to a transcode session;
+        // pass hasMDE + playbackTime + the session header so the server
+        // surfaces the Transcoding label and decision on the dashboard.
+        if (sessionIdentifier != null) 'hasMDE': 1,
+        if (sessionIdentifier != null) 'playbackTime': playbackTime ?? time,
+        if (sessionIdentifier != null) 'X-Plex-Session-Identifier': sessionIdentifier,
       },
     );
     // Surface non-2xx instead of swallowing — progress is the cornerstone
@@ -2827,6 +2835,38 @@ class PlexClient
     }
   }
 
+  /// Tell Plex to terminate a server-side transcode session.
+  ///
+  /// Without this, repeated quality/version/audio swaps within one playback
+  /// pile up zombie transcode sessions on the server (each new
+  /// `start.m3u8` mints a new session — the prior one is *not* reaped just
+  /// because a fresh manifest is fetched). On constrained servers the
+  /// accumulated work starves the new session of CPU/disk and the new
+  /// stream stalls in buffering after a frame or two.
+  ///
+  /// Best-effort: failures are logged and swallowed.
+  Future<void> stopTranscodeSession({required String transcodeSessionId}) async {
+    try {
+      final params = <String, String>{
+        'session': transcodeSessionId,
+        'X-Plex-Client-Identifier': config.clientIdentifier,
+        'X-Plex-Product': config.product,
+        'X-Plex-Version': config.version,
+        if (config.token != null) 'X-Plex-Token': config.token!,
+      };
+      final query = params.entries.map((e) => '${_plexEncode(e.key)}=${_plexEncode(e.value)}').join('&');
+      final url = '${config.baseUrl}/video/:/transcode/universal/stop?$query';
+      final stopClient = MediaServerHttpClient(
+        connectTimeout: MediaServerTimeouts.connect,
+        receiveTimeout: MediaServerTimeouts.receive,
+      );
+      final response = await stopClient.get(url);
+      appLogger.d('Transcode stop [${response.statusCode}] for session $transcodeSessionId');
+    } catch (e) {
+      appLogger.d('Transcode stop failed (best-effort)', error: e);
+    }
+  }
+
   /// Build a VOD transcode stream URL (decision + start path).
   ///
   /// Mirrors [buildLiveStreamPath] but for on-demand video with a quality
@@ -2863,9 +2903,16 @@ class PlexClient
       // See openapi.md §"Profile Augmentations" for the DSL reference.
       final profileExtraClauses = <String>[];
       if (!isOriginal && preset.videoBitrateKbps != null) {
+        // Profile limitations describe *decoder capability*, not the user's
+        // bitrate selection. Baking the preset's bitrate (e.g. 1500) here
+        // tells Plex "this client cannot decode above 1.5 Mbps" and the
+        // decision engine then refuses to transcode (or downgrades), which
+        // also drops the sidecar subtitles we need. Plex Web pins this to
+        // a high static cap and lets `maxVideoBitrate` (URL param) do the
+        // user's actual cap. 80000 mirrors Plex Web's h264 limit.
         profileExtraClauses.add(
           'add-limitation(scope=videoCodec&scopeName=*&type=upperBound'
-          '&name=video.bitrate&value=${preset.videoBitrateKbps}&replace=true)',
+          '&name=video.bitrate&value=80000&replace=true)',
         );
       }
       // Declare both h264 and hevc as allowed transcode targets. In practice
@@ -2876,6 +2923,38 @@ class PlexClient
       profileExtraClauses.add(
         'add-transcode-target(type=videoProfile&context=streaming'
         '&protocol=hls&container=mpegts&videoCodec=h264%2Chevc&audioCodec=aac)',
+      );
+      // Subtitle handling: tell Plex we can consume WebVTT segments inside
+      // the HLS manifest as #EXT-X-MEDIA. Without an explicit WebVTT
+      // direct-stream / transcode target Plex falls back to *burning* the
+      // selected sub straight into the video pixels — which is what was
+      // happening before (Plex dashboard literally showed "Burned in").
+      // Burned subs are anchored to the source frame, so in zoom mode
+      // they fall outside the visible screen and no amount of client-side
+      // positioning can rescue them.
+      //
+      // Declare:
+      //   * WebVTT + SRT + ASS + SSA as direct-stream-capable (codec
+      //     only, no container — that matches Plex Web's profile and
+      //     keeps the decision engine permissive).
+      //   * WebVTT as the transcode target for HLS streaming so any
+      //     non-WebVTT source codec gets converted to WebVTT segments
+      //     instead of burned.
+      profileExtraClauses.add(
+        'add-direct-stream-profile(type=subtitleProfile&codec=webvtt)',
+      );
+      profileExtraClauses.add(
+        'add-direct-stream-profile(type=subtitleProfile&codec=srt)',
+      );
+      profileExtraClauses.add(
+        'add-direct-stream-profile(type=subtitleProfile&codec=ass)',
+      );
+      profileExtraClauses.add(
+        'add-direct-stream-profile(type=subtitleProfile&codec=ssa)',
+      );
+      profileExtraClauses.add(
+        'add-transcode-target(type=subtitleProfile&context=streaming'
+        '&protocol=hls&codec=webvtt)',
       );
       final clientProfileExtra = profileExtraClauses.join('+');
 
@@ -2896,17 +2975,27 @@ class PlexClient
         'subtitleSize': '100',
         'audioBoost': '100',
         'location': 'lan',
+        // Plex Web only sends `maxVideoBitrate`. Stacking `videoBitrate`
+        // and `peakBitrate` at the same value (target == cap == peak)
+        // makes the encoder over-conservative and downgrades resolution
+        // (e.g. 720p@2Mbps falls back to 480p@1.5Mbps). One cap is enough.
         if (!isOriginal && preset.videoBitrateKbps != null) 'maxVideoBitrate': preset.videoBitrateKbps.toString(),
+        if (!isOriginal && preset.videoResolution != null) 'videoResolution': preset.videoResolution!,
+        if (!isOriginal && preset.videoQuality != null) 'videoQuality': preset.videoQuality.toString(),
         'addDebugOverlay': '0',
         'autoAdjustQuality': '0',
         'directStreamAudio': '0',
         'mediaBufferSize': '102400',
         'session': transcodeSessionId,
-        // Subtitles are delivered as client-side sidecars (see
-        // [PlaybackInitializationService._buildTranscodeSidecarSubtitles]).
-        // `subtitles=none` makes the server set the subtitle decision to
-        // `ignore`, so nothing is embedded or burned into the video stream.
-        'subtitles': 'none',
+        // `subtitles=auto` lets Plex's decision engine include subs inside
+        // the HLS manifest (as #EXT-X-MEDIA tracks fetched through the same
+        // pipe as the video segments) rather than forcing the client to
+        // side-load them. Without this, embedded SRTs fail with HTTP 501
+        // on `/library/streams/<id>.srt` while the source is locked by the
+        // transcoder. The matching profile-extra clauses above declare
+        // SRT/ASS direct-stream and VTT-over-HLS transcode capability so
+        // the decision engine actually picks an in-manifest path.
+        'subtitles': 'auto',
         // Preserve source timestamps in the transcoded segments. Without it,
         // Plex resets segment PTS to 0 — so mpv shows 0:00 and sidecar
         // subtitles desync even though the server is transcoding from the
@@ -2931,7 +3020,16 @@ class PlexClient
         // [_transcodePlatformName] for the mapping.
         'X-Plex-Platform': _transcodePlatformName(),
         if (config.device != null) 'X-Plex-Device': config.device!,
-        if (offsetMs != null) 'offset': (offsetMs ~/ 1000).toString(),
+        // Align the offset to Plex's HLS segment boundary (default 6 sec)
+        // so the server doesn't round our request down to a different
+        // value. Each HLS segment is required to begin with a keyframe,
+        // so segment boundaries are guaranteed-keyframe positions —
+        // unlike a tighter 2-sec rounding which may not land on a real
+        // keyframe in content with non-2-sec GOPs and would still get
+        // rounded down by Plex (causing the well-known ~2-sec sidecar
+        // subtitle drift). The mpv wrapper applies the same alignment to
+        // `_serverManagedStartOffset` to keep them in sync.
+        if (offsetMs != null) 'offset': (((offsetMs ~/ 1000) ~/ 6) * 6).toString(),
         if (config.token != null) 'X-Plex-Token': config.token!,
       };
 
@@ -2982,7 +3080,13 @@ class PlexClient
   /// `Generic` is accepted and comes with no preset transcode targets — we
   /// build the profile ourselves via `X-Plex-Client-Profile-Extra` with
   /// `add-transcode-target`.
-  static String _transcodePlatformName() => 'Generic';
+  // Plex Web identifies as `Chrome`, and Chrome's built-in transcode profile
+  // is the only one whose default subtitle handling reliably picks
+  // direct-stream / transcode (WebVTT-in-HLS) over `burn`. The previous
+  // `Generic` value has no built-in subtitle profile at all, so the decision
+  // engine falls back to burning even when our X-Plex-Client-Profile-Extra
+  // clauses declare WebVTT direct-stream + SRT→WebVTT transcode capability.
+  static String _transcodePlatformName() => 'Chrome';
 
   /// Strict percent-encoder matching Plex Web's URL encoder — escapes the
   /// extra characters `(`, `)`, `*`, `'`, `!` that Dart's [Uri.encodeComponent]
@@ -3162,11 +3266,15 @@ class PlexClient
       final wantTranscode = !options.qualityPreset.isOriginal;
       if (wantTranscode && options.sessionIdentifier != null && options.transcodeSessionId != null) {
         final resolvedAudioId = _resolveAudioStreamId(options.selectedAudioStreamId, data.mediaInfo);
-        // Note: no `offsetMs` — seeking is handled by the player via the HLS
-        // manifest, matching Plex Web's behavior. Baking `offset=` into the URL
-        // makes the server pre-position the transcoder, but the resulting
-        // segments and mpv's native HLS positioning fight each other, leaving
-        // the player clock at 0 and desyncing sidecar subtitles.
+        // Don't pass `offsetMs` here. The server-side transcode starts at
+        // source 0 and the resulting HLS manifest covers the entire
+        // duration, so mpv can seek anywhere — both forward and backward
+        // — via the manifest. Baking offset= into the URL pins the
+        // server's transcode to that offset and produces a manifest
+        // covering only [offset, end], breaking backward seeks. mpv's
+        // local `start:` (set on the [Media] passed to `player.open`)
+        // handles resume-to-position via the manifest, matching how
+        // Plex Web uses MSE for the same job.
         final result = await buildTranscodeStartPath(
           ratingKey: options.metadata.id,
           mediaIndex: options.selectedMediaIndex,
@@ -3187,6 +3295,12 @@ class PlexClient
             isOffline: false,
             isTranscoding: true,
             activeAudioStreamId: resolvedAudioId,
+            // Echo the Plex transcode session id back so timeline pings can
+            // tag themselves with X-Plex-Session-Identifier — without this,
+            // /:/timeline cannot be linked to the active transcode session
+            // and the dashboard hides the Transcoding label, showing
+            // "Direct Play" instead.
+            playSessionId: options.sessionIdentifier,
             playMethod: 'Transcode',
           );
         }
@@ -3262,9 +3376,37 @@ class PlexClient
     return '${config.baseUrl}$path.$ext?encoding=utf-8&X-Plex-Token=$token';
   }
 
-  /// Build sidecar SubtitleTracks for ALL source subtitle streams (internal +
-  /// external) so the player can hot-swap between them when the main stream
-  /// is transcoded and has no embedded subs.
+  /// Image-based subtitle codecs Plex's `/library/streams/<id>.srt` endpoint
+  /// can't reliably serve. They're either bitmap (DVD / DVB / Blu-ray) or
+  /// require OCR (PGS) — in practice Plex returns persistent HTTP 501 for
+  /// them, so we skip them rather than letting the player burn time
+  /// retrying URLs that will never succeed. Users who need bitmap subs
+  /// would need a transcode that burns them in (separate code path).
+  static bool _isImageBasedSubtitleCodec(String? codec) {
+    if (codec == null || codec.isEmpty) return false;
+    final c = codec.toLowerCase();
+    return c.contains('pgs') ||
+        c.contains('dvd') ||
+        c.contains('dvb') ||
+        c.contains('vobsub') ||
+        c.contains('bluray') ||
+        c == 'hdmv';
+  }
+
+  /// Build sidecar SubtitleTracks for **truly external** source subtitle
+  /// streams (separate `.srt`/`.ass` files alongside the source media).
+  ///
+  /// Internal / embedded subs were previously included here too, but
+  /// Plex's `/library/streams/<id>.srt` endpoint returns persistent HTTP
+  /// 501 for them while the source file is locked by the transcoder.
+  /// Now that the transcode profile asks Plex to deliver the selected sub
+  /// inside the HLS manifest as WebVTT (`subtitleProfile` direct-stream /
+  /// transcode targets above + `subtitles=auto`), embedded subs come
+  /// through the manifest itself — keeping them as sidecars too produced
+  /// duplicate entries in the menu where the sidecar variant always
+  /// failed with 501. External (separate-file) subs still need the
+  /// sidecar path because they're not part of the HLS manifest.
+  /// Image-based codecs (PGS, DVD, DVB) are also filtered out.
   List<SubtitleTrack> _buildTranscodeSidecarSubtitles(MediaSourceInfo? mediaInfo) {
     if (mediaInfo == null) return const [];
     if (config.token == null) {
@@ -3273,7 +3415,17 @@ class PlexClient
     }
 
     final tracks = <SubtitleTrack>[];
+    var skippedImage = 0;
+    var skippedInternal = 0;
     for (final sub in mediaInfo.subtitleTracks) {
+      if (_isImageBasedSubtitleCodec(sub.codec)) {
+        skippedImage++;
+        continue;
+      }
+      if (!sub.isExternal) {
+        skippedInternal++;
+        continue;
+      }
       try {
         final url = _buildSidecarSubtitleUrl(sub);
         if (url == null) continue;
@@ -3287,6 +3439,12 @@ class PlexClient
       } catch (e) {
         appLogger.w('Failed to build sidecar subtitle for stream ${sub.id}', error: e);
       }
+    }
+    if (skippedImage > 0 || skippedInternal > 0) {
+      appLogger.i(
+        'Sidecar subs: $skippedImage image-based + $skippedInternal internal track(s) skipped '
+        '(internal subs are delivered via the HLS manifest under subtitles=auto)',
+      );
     }
     return tracks;
   }
@@ -3781,7 +3939,13 @@ class PlexClient
     String? mediaSourceId,
     int? audioStreamIndex,
     int? subtitleStreamIndex,
-  }) => updateProgress(itemId, time: position.inMilliseconds, state: 'playing', duration: duration?.inMilliseconds);
+  }) => updateProgress(
+    itemId,
+    time: position.inMilliseconds,
+    state: 'playing',
+    duration: duration?.inMilliseconds,
+    sessionIdentifier: playSessionId,
+  );
 
   @override
   Future<void> reportPlaybackProgress({
@@ -3799,6 +3963,7 @@ class PlexClient
     time: position.inMilliseconds,
     state: isPaused ? 'paused' : 'playing',
     duration: duration.inMilliseconds,
+    sessionIdentifier: playSessionId,
   );
 
   @override
@@ -3808,7 +3973,13 @@ class PlexClient
     Duration? duration,
     String? playSessionId,
     String? mediaSourceId,
-  }) => updateProgress(itemId, time: position.inMilliseconds, state: 'stopped', duration: duration?.inMilliseconds);
+  }) => updateProgress(
+    itemId,
+    time: position.inMilliseconds,
+    state: 'stopped',
+    duration: duration?.inMilliseconds,
+    sessionIdentifier: playSessionId,
+  );
 
   // ── Downloads ────────────────────────────────────────────────────
 

@@ -110,7 +110,7 @@ class PlaybackStateProvider with ChangeNotifier, DisposableChangeNotifierMixin {
     // Use size or items length as fallback if totalCount is null
     _playQueueTotalCount = playQueue.playQueueTotalCount ?? playQueue.size ?? (playQueue.items?.length ?? 0);
     _playQueueShuffled = playQueue.playQueueShuffled;
-    _currentPlayQueueItemID = playQueue.playQueueSelectedItemID;
+    _currentPlayQueueItemID = playQueue.playQueueSelectedItemID ?? _deriveSelectedQueueItemId(playQueue);
 
     // Items arrive pre-tagged with server info by the producing mapper.
     _loadedItems = playQueue.items ?? [];
@@ -144,6 +144,29 @@ class PlaybackStateProvider with ChangeNotifier, DisposableChangeNotifierMixin {
     _isQueueMode = true;
     _windowFetcher = null; // disable server-side window extension
     safeNotifyListeners();
+  }
+
+  int? _deriveSelectedQueueItemId(PlayQueueResponse playQueue) {
+    final items = playQueue.items;
+    if (items == null || items.isEmpty) return null;
+
+    final selectedMetadataId = playQueue.playQueueSelectedMetadataItemID;
+    if (selectedMetadataId != null && selectedMetadataId.isNotEmpty) {
+      final normalizedMetadataId = selectedMetadataId.split('/').last;
+      final matched = items.whereType<PlexMediaItem>().cast<PlexMediaItem?>().firstWhere(
+        (item) => item?.id == normalizedMetadataId,
+        orElse: () => null,
+      );
+      if (matched?.playQueueItemId != null) {
+        return matched!.playQueueItemId;
+      }
+    }
+
+    final firstWithQueueId = items.whereType<PlexMediaItem>().cast<PlexMediaItem?>().firstWhere(
+      (item) => item?.playQueueItemId != null,
+      orElse: () => null,
+    );
+    return firstWithQueueId?.playQueueItemId;
   }
 
   /// Load more items from the play queue if needed
