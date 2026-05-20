@@ -5,6 +5,9 @@ String buildJellyfinDirectStreamUrl({
   required String itemId,
   String? container,
   String? mediaSourceId,
+  String? playSessionId,
+  String? liveStreamId,
+  int? audioStreamIndex,
 }) {
   final params = <String, String>{
     'Static': 'true',
@@ -12,6 +15,9 @@ String buildJellyfinDirectStreamUrl({
     'DeviceId': deviceId,
     'Container': ?container,
     'MediaSourceId': ?mediaSourceId,
+    'PlaySessionId': ?playSessionId,
+    'LiveStreamId': ?liveStreamId,
+    'AudioStreamIndex': ?audioStreamIndex?.toString(),
   };
   final encodedItem = Uri.encodeComponent(itemId);
   return '$baseUrl/Videos/$encodedItem/stream?${_encodeQuery(params)}';

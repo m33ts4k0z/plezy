@@ -69,6 +69,11 @@ class TimelineSlider extends StatefulWidget {
 class _TimelineSliderState extends State<TimelineSlider> {
   double? _mousePosition;
   double? _dragValue;
+  int? _hoverTimeMs;
+  int? _hoverLabelSecond;
+  int? _hoverPixelBucket;
+  ScrubFrame? _hoverFrame;
+  Object? _hoverFrameKey;
   bool _isFocused = false;
 
   // Must match the slider track inset: max(overlayRadius, thumbRadius)
@@ -76,12 +81,92 @@ class _TimelineSliderState extends State<TimelineSlider> {
 
   static const _thumbWidth = 160.0;
 
-  Widget _buildTooltip(double sliderWidth, double pixelX, Duration time) {
-    final frame = widget.thumbnailDataBuilder?.call(time);
-    final hasThumbnail = frame != null;
+  Object? _scrubFrameKey(ScrubFrame? frame) {
+    return switch (frame) {
+      null => null,
+      BytesScrubFrame(:final bytes) => bytes,
+      SheetScrubFrame(:final sheet, :final tileColumn, :final tileRow, :final sheetColumns, :final sheetRows) =>
+        Object.hash(sheet, tileColumn, tileRow, sheetColumns, sheetRows),
+    };
+  }
+
+  void _clearHoverPosition() {
+    if (_mousePosition == null && _hoverTimeMs == null && _hoverFrame == null) return;
+    setState(() {
+      _mousePosition = null;
+      _hoverTimeMs = null;
+      _hoverLabelSecond = null;
+      _hoverPixelBucket = null;
+      _hoverFrame = null;
+      _hoverFrameKey = null;
+    });
+  }
+
+  void _updateHoverPosition(double pixelX, double trackWidth, int durationMs) {
+    if (durationMs <= 0 || trackWidth <= 0) {
+      _clearHoverPosition();
+      return;
+    }
+
+    final fraction = ((pixelX - _sliderPadding) / trackWidth).clamp(0.0, 1.0);
+    final timeMs = (fraction * durationMs).round();
+    final frame = widget.thumbnailDataBuilder?.call(Duration(milliseconds: timeMs));
+    final frameKey = _scrubFrameKey(frame);
+    final labelSecond = timeMs ~/ 1000;
+    final pixelBucket = (pixelX / 4).round();
+
+    if (_mousePosition != null &&
+        _hoverLabelSecond == labelSecond &&
+        _hoverPixelBucket == pixelBucket &&
+        _hoverFrameKey == frameKey) {
+      return;
+    }
+
+    setState(() {
+      _mousePosition = pixelX;
+      _hoverTimeMs = timeMs;
+      _hoverLabelSecond = labelSecond;
+      _hoverPixelBucket = pixelBucket;
+      _hoverFrame = frame;
+      _hoverFrameKey = frameKey;
+    });
+  }
+
+  double _sliderWidthOf(BuildContext context) {
+    final renderObject = context.findRenderObject();
+    return renderObject is RenderBox ? renderObject.size.width : 0.0;
+  }
+
+  Widget? _buildActiveTooltip(double sliderWidth, int durationMs, double displayValue, Duration displayPosition) {
+    if (durationMs <= 0 || sliderWidth <= 0) return null;
+
+    final trackWidth = sliderWidth - 2 * _sliderPadding;
+    if (_dragValue != null) {
+      final fraction = (displayValue / durationMs).clamp(0.0, 1.0);
+      final px = _sliderPadding + fraction * trackWidth;
+      return _buildTooltip(sliderWidth, px, displayPosition);
+    }
+
+    if (_mousePosition != null) {
+      final time = Duration(milliseconds: _hoverTimeMs ?? 0);
+      return _buildTooltip(sliderWidth, _mousePosition!, time, frame: _hoverFrame);
+    }
+
+    if (widget.showKeyRepeatThumbnail && widget.thumbnailDataBuilder != null) {
+      final fraction = (displayValue / durationMs).clamp(0.0, 1.0);
+      final px = _sliderPadding + fraction * trackWidth;
+      return _buildTooltip(sliderWidth, px, displayPosition);
+    }
+
+    return null;
+  }
+
+  Widget _buildTooltip(double sliderWidth, double pixelX, Duration time, {ScrubFrame? frame}) {
+    final resolvedFrame = frame ?? widget.thumbnailDataBuilder?.call(time);
+    final hasThumbnail = resolvedFrame != null;
 
     final tooltipWidth = hasThumbnail ? _thumbWidth : 64.0;
-    final tooltipHeight = hasThumbnail ? _thumbWidth / frame.aspectRatio : 26.0;
+    final tooltipHeight = hasThumbnail ? _thumbWidth / resolvedFrame.aspectRatio : 26.0;
     final tooltipTop = -(tooltipHeight + 2.0);
 
     // Center tooltip on cursor, clamped so it stays within the slider bounds
@@ -121,7 +206,7 @@ class _TimelineSliderState extends State<TimelineSlider> {
                 child: Stack(
                   fit: StackFit.expand,
                   children: [
-                    _ScrubFrameView(frame: frame),
+                    _ScrubFrameView(frame: resolvedFrame),
                     Positioned(bottom: 4, left: 0, right: 0, child: Center(child: timeLabel)),
                   ],
                 ),
@@ -133,125 +218,116 @@ class _TimelineSliderState extends State<TimelineSlider> {
 
   @override
   Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final sliderWidth = constraints.maxWidth;
-        // Calculate the actual track width by subtracting the thumb padding on each side
-        final trackWidth = sliderWidth - 2 * _sliderPadding;
-        final durationMs = widget.duration.inMilliseconds;
+    final durationMs = widget.duration.inMilliseconds;
+    final max = durationMs > 0 ? durationMs.toDouble() : 0.0;
+    final displayValue = max > 0
+        ? (_dragValue ?? widget.position.inMilliseconds.toDouble()).clamp(0.0, max).toDouble()
+        : 0.0;
+    final displayPosition = Duration(milliseconds: displayValue.toInt());
+    final hasTooltip =
+        durationMs > 0 &&
+        (_dragValue != null ||
+            _mousePosition != null ||
+            (widget.showKeyRepeatThumbnail && widget.thumbnailDataBuilder != null));
 
-        // Resolve tooltip position (drag takes priority over hover)
-        Widget? tooltip;
-        if (durationMs > 0) {
-          if (_dragValue != null) {
-            // Convert drag value (ms) to a 0..1 fraction, then map to pixel
-            // position on the track (offset by padding to align with the slider)
-            final fraction = (_dragValue! / durationMs).clamp(0.0, 1.0);
-            final px = _sliderPadding + fraction * trackWidth;
-            tooltip = _buildTooltip(sliderWidth, px, Duration(milliseconds: _dragValue!.toInt()));
-          } else if (_mousePosition != null) {
-            // Convert mouse pixel position to a 0..1 fraction of the track
-            // (subtract padding to get position relative to track start),
-            // then map that fraction to a time in milliseconds
-            final fraction = ((_mousePosition! - _sliderPadding) / trackWidth).clamp(0.0, 1.0);
-            final time = Duration(milliseconds: (fraction * durationMs).round());
-            tooltip = _buildTooltip(sliderWidth, _mousePosition!, time);
-          } else if (widget.showKeyRepeatThumbnail && widget.thumbnailDataBuilder != null) {
-            // Preview thumbnail at the current playback position while the
-            // user holds a dpad/keyboard direction. The decoder lags behind
-            // rapid seeks, so the BIF thumbnail is the only live feedback.
-            final fraction = (widget.position.inMilliseconds / durationMs).clamp(0.0, 1.0);
-            final px = _sliderPadding + fraction * trackWidth;
-            tooltip = _buildTooltip(sliderWidth, px, widget.position);
-          }
-        }
-
-        Widget slider = Stack(
-          clipBehavior: Clip.none,
-          alignment: Alignment.center,
-          children: [
-            // Buffer range + segmented background track (with chapter gaps)
-            Positioned.fill(
-              child: IgnorePointer(
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: _sliderPadding),
-                  child: CustomPaint(
-                    painter: BufferRangePainter(
-                      ranges: widget.bufferRanges,
-                      duration: widget.duration,
-                      chapters: widget.chaptersLoaded && widget.showChapterMarkersOnTimeline
-                          ? widget.chapters
-                          : const [],
-                    ),
+    Widget buildSlider(Widget? tooltip) {
+      return Stack(
+        clipBehavior: Clip.none,
+        alignment: Alignment.center,
+        children: [
+          // Buffer range + segmented background track (with chapter gaps)
+          Positioned.fill(
+            child: IgnorePointer(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: _sliderPadding),
+                child: CustomPaint(
+                  painter: BufferRangePainter(
+                    ranges: widget.bufferRanges,
+                    duration: widget.duration,
+                    chapters: widget.chaptersLoaded && widget.showChapterMarkersOnTimeline ? widget.chapters : const [],
                   ),
                 ),
               ),
             ),
-            // Slider - use IgnorePointer to block interaction while preserving visual style
-            IgnorePointer(
-              ignoring: !widget.enabled,
-              child: SliderTheme(
-                data: SliderTheme.of(context).copyWith(
-                  trackHeight: 8,
-                  trackGap: 0,
-                  padding: EdgeInsets.zero,
-                  overlayShape: const RoundSliderOverlayShape(overlayRadius: 0),
-                  tickMarkShape: SliderTickMarkShape.noTickMark,
-                  thumbSize: WidgetStatePropertyAll(
-                    (!InputModeTracker.isKeyboardMode(context) || _isFocused) ? const Size(4, 20) : Size.zero,
-                  ),
+          ),
+          // Slider - use IgnorePointer to block interaction while preserving visual style
+          IgnorePointer(
+            ignoring: !widget.enabled,
+            child: SliderTheme(
+              data: SliderTheme.of(context).copyWith(
+                trackHeight: 8,
+                trackGap: 0,
+                padding: EdgeInsets.zero,
+                overlayShape: const RoundSliderOverlayShape(overlayRadius: 0),
+                tickMarkShape: SliderTickMarkShape.noTickMark,
+                thumbSize: WidgetStatePropertyAll(
+                  (!InputModeTracker.isKeyboardMode(context) || _isFocused) ? const Size(4, 20) : Size.zero,
                 ),
-                child: Semantics(
-                  label: t.videoControls.timelineSlider,
-                  slider: true,
-                  child: Slider(
-                    value: widget.duration.inMilliseconds > 0 ? widget.position.inMilliseconds.toDouble() : 0.0,
-                    min: 0.0,
-                    max: widget.duration.inMilliseconds.toDouble(),
-                    onChanged: (value) {
-                      setState(() => _dragValue = value);
-                      widget.onSeek(Duration(milliseconds: value.toInt()));
-                    },
-                    onChangeEnd: (value) {
-                      setState(() => _dragValue = null);
-                      widget.onSeekEnd(Duration(milliseconds: value.toInt()));
-                    },
-                    activeColor: Colors.white,
-                    inactiveColor: Colors.transparent,
-                  ),
+              ),
+              child: Semantics(
+                label: t.videoControls.timelineSlider,
+                slider: true,
+                child: Slider(
+                  value: displayValue,
+                  min: 0.0,
+                  max: max,
+                  onChanged: (value) {
+                    setState(() => _dragValue = value);
+                    widget.onSeek(Duration(milliseconds: value.toInt()));
+                  },
+                  onChangeEnd: (value) {
+                    setState(() => _dragValue = null);
+                    widget.onSeekEnd(Duration(milliseconds: value.toInt()));
+                  },
+                  activeColor: Colors.white,
+                  inactiveColor: Colors.transparent,
                 ),
               ),
             ),
-            ?tooltip,
-          ],
-        );
+          ),
+          ?tooltip,
+        ],
+      );
+    }
 
-        // Wrap with FocusableWrapper when focusNode is provided
-        if (widget.focusNode != null) {
-          slider = FocusableWrapper(
-            focusNode: widget.focusNode,
-            onKeyEvent: widget.enabled ? widget.onKeyEvent : null,
-            onFocusChange: (hasFocus) {
-              setState(() => _isFocused = hasFocus);
-              widget.onFocusChange?.call(hasFocus);
+    Widget slider = hasTooltip
+        ? LayoutBuilder(
+            builder: (context, constraints) {
+              final tooltip = _buildActiveTooltip(constraints.maxWidth, durationMs, displayValue, displayPosition);
+              return buildSlider(tooltip);
             },
-            borderRadius: 8,
-            autoScroll: false,
-            disableScale: true,
-            focusColor: Colors.transparent,
-            semanticLabel: t.videoControls.timelineSlider,
-            descendantsAreFocusable: false,
-            child: slider,
-          );
-        }
+          )
+        : buildSlider(null);
 
-        return MouseRegion(
-          // Handle mouse hover events
-          onHover: (event) => setState(() => _mousePosition = event.localPosition.dx),
-          onExit: (_) => setState(() => _mousePosition = null),
-          child: slider,
-        );
-      },
+    // Wrap with FocusableWrapper when focusNode is provided
+    if (widget.focusNode != null) {
+      slider = FocusableWrapper(
+        focusNode: widget.focusNode,
+        onKeyEvent: widget.enabled ? widget.onKeyEvent : null,
+        onFocusChange: (hasFocus) {
+          setState(() => _isFocused = hasFocus);
+          widget.onFocusChange?.call(hasFocus);
+        },
+        borderRadius: 8,
+        autoScroll: false,
+        disableScale: true,
+        focusColor: Colors.transparent,
+        semanticLabel: t.videoControls.timelineSlider,
+        descendantsAreFocusable: false,
+        child: slider,
+      );
+    }
+
+    return Builder(
+      builder: (context) => MouseRegion(
+        cursor: widget.enabled ? SystemMouseCursors.click : MouseCursor.defer,
+        onHover: (event) {
+          final trackWidth = _sliderWidthOf(context) - 2 * _sliderPadding;
+          _updateHoverPosition(event.localPosition.dx, trackWidth, durationMs);
+        },
+        onExit: (_) => _clearHoverPosition(),
+        child: slider,
+      ),
     );
   }
 }
@@ -260,16 +336,28 @@ class _ScrubFrameView extends StatelessWidget {
   final ScrubFrame frame;
   const _ScrubFrameView({required this.frame});
 
+  int? _cacheDimension(double logicalSize, double devicePixelRatio) {
+    if (!logicalSize.isFinite || logicalSize <= 0) return null;
+    return (logicalSize * devicePixelRatio).round().clamp(1, 8192).toInt();
+  }
+
   @override
   Widget build(BuildContext context) {
     final f = frame;
     switch (f) {
       case BytesScrubFrame():
-        return Image.memory(
-          f.bytes,
-          fit: BoxFit.cover,
-          gaplessPlayback: true,
-          errorBuilder: (_, _, _) => const SizedBox.shrink(),
+        return LayoutBuilder(
+          builder: (context, constraints) {
+            final devicePixelRatio = MediaQuery.devicePixelRatioOf(context);
+            return Image.memory(
+              f.bytes,
+              fit: BoxFit.cover,
+              gaplessPlayback: true,
+              cacheWidth: _cacheDimension(constraints.maxWidth, devicePixelRatio),
+              cacheHeight: _cacheDimension(constraints.maxHeight, devicePixelRatio),
+              errorBuilder: (_, _, _) => const SizedBox.shrink(),
+            );
+          },
         );
       case SheetScrubFrame():
         // The parent tooltip box matches the source tile aspect (see
@@ -281,6 +369,12 @@ class _ScrubFrameView extends StatelessWidget {
             final tileH = constraints.maxHeight;
             final sheetW = tileW * f.sheetColumns;
             final sheetH = tileH * f.sheetRows;
+            final devicePixelRatio = MediaQuery.devicePixelRatioOf(context);
+            final sheet = ResizeImage.resizeIfNeeded(
+              _cacheDimension(sheetW, devicePixelRatio),
+              _cacheDimension(sheetH, devicePixelRatio),
+              f.sheet,
+            );
             return ClipRect(
               child: OverflowBox(
                 maxWidth: sheetW,
@@ -289,7 +383,7 @@ class _ScrubFrameView extends StatelessWidget {
                 child: Transform.translate(
                   offset: Offset(-f.tileColumn * tileW, -f.tileRow * tileH),
                   child: Image(
-                    image: f.sheet,
+                    image: sheet,
                     width: sheetW,
                     height: sheetH,
                     fit: BoxFit.fill,

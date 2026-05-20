@@ -2,6 +2,7 @@ import 'dart:async';
 
 import '../mpv/mpv.dart';
 
+import '../media/media_backend.dart';
 import '../media/media_item.dart';
 import '../media/media_server_client.dart';
 import '../media/media_source_info.dart';
@@ -68,6 +69,10 @@ class PlaybackProgressTracker {
 
   /// Whether the final stopped progress event was already emitted locally.
   bool _stopProgressNotified = false;
+
+  Duration? _lastProgressNotifiedPosition;
+
+  static const Duration _progressNotifyDelta = Duration(seconds: 30);
 
   final PlaybackReportSession? _reportSession;
 
@@ -165,16 +170,23 @@ class PlaybackProgressTracker {
       if (isOffline) {
         // Queue progress update for later sync
         await _sendOfflineProgress(position, duration);
+        _notifyProgressIfNeeded(position, duration, force: state == 'stopped');
       } else if (state == 'stopped') {
         // Stopped must complete before disposal
-        await _sendOnlineProgress(state, position, duration);
+        final accepted = await _sendOnlineProgress(state, position, duration);
         _resetBackoff();
+        if (accepted) {
+          _notifyProgressIfNeeded(position, duration, force: true);
+        }
       } else {
         // Fire-and-forget for playing/paused — avoid blocking the Dart event loop
         unawaited(
           _sendOnlineProgress(state, position, duration)
-              .then((_) {
+              .then((accepted) {
                 _resetBackoff();
+                if (accepted) {
+                  _notifyProgressIfNeeded(position, duration);
+                }
               })
               .catchError((Object e) {
                 _consecutiveFailures++;
@@ -186,18 +198,6 @@ class PlaybackProgressTracker {
                   error: e,
                 );
               }),
-        );
-      }
-
-      // Emit watch state event on stop for UI updates across screens.
-      // Skip if already scrobbled — markWatched already emitted a watched event.
-      if (state == 'stopped' && position.inMilliseconds > 0 && !_scrobbled && !_stopProgressNotified) {
-        _stopProgressNotified = true;
-        WatchStateNotifier().notifyProgress(
-          item: metadata,
-          viewOffset: position.inMilliseconds,
-          duration: duration.inMilliseconds,
-          watchedThreshold: client?.watchedThreshold ?? 0.9,
         );
       }
     } catch (e) {
@@ -222,12 +222,32 @@ class PlaybackProgressTracker {
     }
   }
 
+  void _notifyProgressIfNeeded(Duration position, Duration duration, {bool force = false}) {
+    if (_scrobbled) return;
+    if (position.inMilliseconds <= 0 || duration.inMilliseconds <= 0) return;
+    if (force) {
+      if (_stopProgressNotified) return;
+      _stopProgressNotified = true;
+    } else {
+      final last = _lastProgressNotifiedPosition;
+      if (last != null && (position - last).abs() < _progressNotifyDelta) return;
+    }
+
+    _lastProgressNotifiedPosition = position;
+    WatchStateNotifier().notifyProgress(
+      item: metadata,
+      viewOffset: position.inMilliseconds,
+      duration: duration.inMilliseconds,
+      watchedThreshold: client?.watchedThreshold ?? 0.9,
+    );
+  }
+
   /// Send progress update to the active server through the unified
   /// [MediaServerClient.reportPlayback*] surface.
-  Future<void> _sendOnlineProgress(String state, Duration position, Duration duration) async {
+  Future<bool> _sendOnlineProgress(String state, Duration position, Duration duration) async {
     final c = client;
     final session = _reportSession;
-    if (c == null || session == null) return;
+    if (c == null || session == null) return false;
 
     final accepted = await session.report(
       PlaybackReportSnapshot(
@@ -243,6 +263,7 @@ class PlaybackProgressTracker {
     if (accepted) {
       await _maybeScrobble(c, position, duration);
     }
+    return accepted;
   }
 
   PlaybackStreamSelection _currentStreamSelectionForStopped() {
@@ -302,10 +323,17 @@ class PlaybackProgressTracker {
   }
 
   int? _currentAudioStreamIndex(MediaSourceInfo info) {
+    final playerAudioTracks = player.state.tracks.audio.where((t) => t.id != 'auto' && t.id != 'no').toList();
+    if (metadata.backend == MediaBackend.jellyfin &&
+        (info.audioTracks.any((track) => track.isExternal) || playerAudioTracks.length <= 1)) {
+      final selectedSourceTrack = _selectedSourceAudioTrack(info);
+      if (selectedSourceTrack != null) return selectedSourceTrack.id;
+    }
+
     final track = player.state.track.audio;
     if (track == null) return null;
 
-    final ordinal = player.state.tracks.audio.where((t) => t.id != 'auto' && t.id != 'no').toList().indexOf(track);
+    final ordinal = playerAudioTracks.indexOf(track);
     if (ordinal >= 0 && ordinal < info.audioTracks.length) return info.audioTracks[ordinal].id;
 
     final matched = findPlexTrackForMpvAudio(track, info.audioTracks, allMpvTracks: player.state.tracks.audio);
@@ -314,6 +342,18 @@ class PlaybackProgressTracker {
     final parsedId = int.tryParse(track.id);
     if (parsedId != null && info.audioTracks.any((t) => t.id == parsedId)) return parsedId;
 
+    return null;
+  }
+
+  MediaAudioTrack? _selectedSourceAudioTrack(MediaSourceInfo info) {
+    for (final track in info.audioTracks) {
+      if (track.selected) return track;
+    }
+    final defaultIndex = info.defaultAudioStreamIndex;
+    if (defaultIndex == null) return null;
+    for (final track in info.audioTracks) {
+      if (track.id == defaultIndex) return track;
+    }
     return null;
   }
 

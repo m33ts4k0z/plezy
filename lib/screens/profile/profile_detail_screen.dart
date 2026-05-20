@@ -78,20 +78,27 @@ class _ProfileDetailScreenState extends State<ProfileDetailScreen> with Controll
     await context.read<ProfileRegistry>().upsert(updated);
     if (!mounted) return;
     setState(() => _profile = updated);
-    showSuccessSnackBar(context, 'Profile renamed.');
+    showSuccessSnackBar(context, t.profiles.profileRenamed);
   }
 
   Future<void> _setPin() async {
-    final pin = await captureAndConfirmPin(context, onMismatch: (ctx) => showErrorSnackBar(ctx, "PINs don't match"));
+    final pin = await captureAndConfirmPin(
+      context,
+      onMismatch: (ctx) => showErrorSnackBar(ctx, t.profiles.pinsDontMatch),
+    );
     if (pin == null || !mounted) return;
-    final updated = _profile.copyWith(pinHash: computePinHash(pin));
+    final profile = _profile;
+    if (profile is! LocalProfile) return;
+    final updated = profile.copyWith(pinHash: computePinHash(pin));
     await context.read<ProfileRegistry>().upsert(updated);
     if (!mounted) return;
     setState(() => _profile = updated);
   }
 
   Future<void> _clearPin() async {
-    final updated = _profile.copyWith(clearPin: true);
+    final profile = _profile;
+    if (profile is! LocalProfile) return;
+    final updated = profile.copyWith(pinHash: null);
     await context.read<ProfileRegistry>().upsert(updated);
     if (!mounted) return;
     setState(() => _profile = updated);
@@ -350,7 +357,7 @@ class _ConnectionSubtitle {
       final users = homeCache[conn.id];
       if (users != null) {
         final user = users.where((u) => u.uuid == pc.userIdentifier).firstOrNull;
-        if (user != null) parts.add('as ${user.displayName}');
+        if (user != null) parts.add(t.profiles.connectionAs(displayName: user.displayName));
       }
     }
     if (pc.isDefault) parts.add(t.profiles.connectionDefault);

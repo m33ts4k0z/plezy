@@ -2,6 +2,7 @@ import 'dart:io' show Platform;
 
 import 'package:flutter/services.dart';
 
+import '../../media/media_display_criteria.dart';
 import '../models.dart';
 import '../../utils/app_logger.dart';
 import 'player_base.dart';
@@ -135,6 +136,9 @@ class PlayerNative extends PlayerBase {
   Future<void> open(Media media, {bool play = true, bool isLive = false, List<SubtitleTrack>? externalSubtitles}) async {
     if (disposed) return;
     await _ensureInitialized();
+    final startPosition = media.start ?? Duration.zero;
+    clearTracks();
+    resetPlaybackProgress(startPosition);
     setSeekable(false);
 
     // Show the video layer
@@ -153,10 +157,11 @@ class PlayerNative extends PlayerBase {
     // adds an offset to time-pos and shifts sub-delay) is no longer
     // needed: with mpv doing the seek locally, time-pos already reflects
     // source-time and sidecar SRT timestamps line up naturally.
-    final requestedStart = media.start ?? Duration.zero;
     _serverManagedStartOffset = Duration.zero;
-    if (requestedStart > Duration.zero) {
-      await setProperty('start', requestedStart.inSeconds.toString());
+
+    // 'start' must be set before loadfile.
+    if (startPosition.inMilliseconds > 0) {
+      await setProperty('start', (startPosition.inMilliseconds / 1000.0).toString());
     } else {
       await setProperty('start', 'none');
     }
@@ -199,16 +204,10 @@ class PlayerNative extends PlayerBase {
 
   @override
   Future<void> seek(Duration position) async {
-    try {
+    await runSeek(position, () {
       final nativePosition = _toNativePosition(position);
-      await command(['seek', (nativePosition.inMilliseconds / 1000.0).toString(), 'absolute']);
-    } on PlatformException catch (e) {
-      if (e.code == 'COMMAND_FAILED' || e.code == 'NOT_INITIALIZED') {
-        appLogger.w('Seek failed (${e.code}), player not ready');
-        return;
-      }
-      rethrow;
-    }
+      return command(['seek', (nativePosition.inMilliseconds / 1000.0).toString(), 'absolute']);
+    });
   }
 
   // ============================================
@@ -245,6 +244,7 @@ class PlayerNative extends PlayerBase {
   @override
   Future<void> setVolume(double volume) async {
     await setProperty('volume', volume.toString());
+    if (!disposed) setVolumeState(volume);
   }
 
   @override
@@ -285,6 +285,13 @@ class PlayerNative extends PlayerBase {
   // ============================================
   // Log Level
   // ============================================
+
+  @override
+  Future<void> setDisplayCriteria(MediaDisplayCriteria? criteria) async {
+    if (disposed || !Platform.isIOS) return;
+    await _ensureInitialized();
+    await invoke('setDisplayCriteria', {'criteria': criteria?.toJson()});
+  }
 
   @override
   Future<void> setLogLevel(String level) async {

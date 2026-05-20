@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:io' show Platform, ProcessInfo;
+import 'dart:io' show Directory, Platform, ProcessInfo;
 import 'dart:ui' show AppExitResponse;
 import 'package:flutter/foundation.dart';
 // ignore: depend_on_referenced_packages
@@ -33,6 +33,8 @@ import 'services/settings_service.dart';
 import 'utils/platform_detector.dart';
 import 'services/apple_tv_remote_touch_service.dart';
 import 'services/discord_rpc_service.dart';
+import 'package:path_provider/path_provider.dart';
+import 'services/image_cache_service.dart';
 import 'services/gamepad_service.dart';
 import 'services/trakt/trakt_scrobble_service.dart';
 import 'services/trakt/trakt_sync_service.dart';
@@ -48,6 +50,7 @@ import 'providers/playback_state_provider.dart';
 import 'providers/download_provider.dart';
 import 'providers/offline_mode_provider.dart';
 import 'providers/offline_watch_provider.dart';
+import 'providers/watch_state_overlay_provider.dart';
 import 'providers/companion_remote_provider.dart';
 import 'providers/shader_provider.dart';
 import 'utils/snackbar_helper.dart';
@@ -55,7 +58,6 @@ import 'watch_together/providers/watch_together_provider.dart';
 import 'services/multi_server_manager.dart';
 import 'services/offline_watch_sync_service.dart';
 import 'services/data_aggregation_service.dart';
-import 'services/in_app_review_service.dart';
 import 'services/server_registry.dart';
 import 'services/download_manager_service.dart';
 import 'services/pip_service.dart';
@@ -66,7 +68,8 @@ import 'services/plex_api_cache.dart';
 import 'database/app_database.dart';
 import 'screens/video_player_screen.dart';
 import 'utils/app_logger.dart';
-import 'utils/media_server_http_client.dart' show httpClient;
+import 'utils/managed_http_client.dart';
+import 'utils/media_server_http_client.dart';
 import 'utils/orientation_helper.dart';
 import 'utils/watch_state_notifier.dart';
 import 'i18n/strings.g.dart';
@@ -80,6 +83,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 const bool _enableSentry = bool.fromEnvironment('ENABLE_SENTRY', defaultValue: false);
 const String gitCommit = String.fromEnvironment('GIT_COMMIT');
 const String _sentryEnvironment = String.fromEnvironment('SENTRY_ENVIRONMENT');
+const String _sentryDist = String.fromEnvironment('SENTRY_DIST');
 
 // Workaround for Flutter bug #177992: iPadOS 26.1+ misinterprets fake touch events
 // at (0,0) as barrier taps, causing modals to dismiss immediately.
@@ -130,6 +134,7 @@ Future<void> main() async {
           ? 'plezy@${gitCommit.substring(0, 7)}'
           : 'plezy@${packageInfo.version}+${packageInfo.buildNumber}';
       if (_sentryEnvironment.isNotEmpty) options.environment = _sentryEnvironment;
+      if (_sentryDist.isNotEmpty) options.dist = _sentryDist;
       options.tracesSampleRate = 0;
       options.attachStacktrace = true;
       options.enableAutoSessionTracking = false;
@@ -154,6 +159,21 @@ Future<void> _bootstrapApp() async {
 
   await initializeDateFormatting(savedLocale.languageCode, null);
 
+  // One-time cleanup of the old flutter_cache_manager image cache directory
+  // (replaced by cached_network_image_ce in a prior refactor).
+  if (!settings.read(SettingsService.cleanedOldImageCache)) {
+    try {
+      final tempDir = await getTemporaryDirectory();
+      final oldCacheDir = Directory('${tempDir.path}/plexImageCache');
+      if (await oldCacheDir.exists()) {
+        await oldCacheDir.delete(recursive: true);
+      }
+    } catch (_) {
+      // Best-effort; the directory may be locked or already partial.
+    }
+    await settings.write(SettingsService.cleanedOldImageCache, true);
+  }
+
   // Configure image cache — keep budget modest to leave headroom for Skia decode buffers
   if (PlatformDetector.isDesktopOS()) {
     PaintingBinding.instance.imageCache.maximumSize = 1000;
@@ -166,7 +186,11 @@ Future<void> _bootstrapApp() async {
   final futures = <Future<void>>[];
 
   if (PlatformDetector.isDesktopOS()) {
-    futures.add(windowManager.ensureInitialized());
+    if (Platform.isMacOS) {
+      futures.add(windowManager.ensureInitialized().then((_) => MacOSWindowService.setupCustomTitlebar()));
+    } else {
+      futures.add(windowManager.ensureInitialized());
+    }
   }
 
   // Initialize TV detection (Android leanback or Apple TV) and PiP on Android.
@@ -176,8 +200,6 @@ Future<void> _bootstrapApp() async {
   if (Platform.isAndroid) {
     PipService();
   }
-
-  futures.add(MacOSWindowService.setupCustomTitlebar());
 
   // Hook Windows native fullscreen callback (no-op elsewhere).
   NativeWindowService.initialize();
@@ -383,6 +405,11 @@ void _registerShaderLicenses() {
 final RouteObserver<PageRoute> routeObserver = RouteObserver<PageRoute>();
 final rootNavigatorKey = GlobalKey<NavigatorState>();
 
+@visibleForTesting
+bool shouldEnterOfflineModeAfterStartupBind({required bool bindingSucceeded, required bool hasOnlineServers}) {
+  return !bindingSucceeded && !hasOnlineServers;
+}
+
 /// Top-level PIN prompt used by [ActiveProfileBinder] when it runs above the
 /// per-screen widget tree. Routes through [rootNavigatorKey] so the dialog
 /// renders correctly whether the binder fires from the splash, MainScreen,
@@ -414,6 +441,7 @@ class _MainAppState extends State<MainApp> with WidgetsBindingObserver {
   final Set<String> _pendingSyncKeys = <String>{};
   bool _isAutoDeleteRunning = false;
   bool _lastConnectivityWasWifi = false;
+  bool _shutdownStarted = false;
 
   /// Last time server health probes ran from a resume event (cooldown for desktop)
   DateTime _lastResumeProbe = DateTime(0);
@@ -461,14 +489,33 @@ class _MainAppState extends State<MainApp> with WidgetsBindingObserver {
 
     _appLifecycleListener = AppLifecycleListener(
       onExitRequested: () async {
-        httpClient.close();
-        await _appDatabase.close();
+        await _shutdownForExit();
         return AppExitResponse.exit;
       },
     );
+  }
 
-    // Start in-app review session tracking
-    InAppReviewService.instance.startSession();
+  Future<void> _shutdownForExit() async {
+    if (_shutdownStarted) return;
+    _shutdownStarted = true;
+
+    _syncDebounce?.cancel();
+    await _watchStateSubscription?.cancel();
+    await _connectivitySubscription?.cancel();
+    _memoryCheckTimer?.cancel();
+
+    _downloadManager.dispose();
+    TrackerCoordinator.instance.cancelInFlight();
+    TraktScrobbleService.instance.cancelInFlight();
+    await TraktSyncService.instance.dispose();
+
+    await _serverManager.disconnectAllGracefully();
+    await Future.wait([
+      httpClient.closeGracefully(drainTimeout: const Duration(seconds: 5)),
+      closeArtworkHttpClientGracefully(),
+    ], eagerError: false);
+    await ManagedHttpClient.closeAllGracefully();
+    await _appDatabase.close();
   }
 
   @override
@@ -478,7 +525,10 @@ class _MainAppState extends State<MainApp> with WidgetsBindingObserver {
     _connectivitySubscription?.cancel();
     _memoryCheckTimer?.cancel();
     _appLifecycleListener.dispose();
-    _downloadManager.dispose();
+    if (!_shutdownStarted) {
+      _downloadManager.dispose();
+      _serverManager.dispose();
+    }
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -581,10 +631,9 @@ class _MainAppState extends State<MainApp> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     switch (state) {
       case AppLifecycleState.resumed:
-        // App came back to foreground - trigger sync check and start new session
+        // App came back to foreground - trigger sync check
         _offlineWatchSyncService.onAppResumed();
         TraktSyncService.instance.flushQueue();
-        InAppReviewService.instance.startSession();
         // Re-probe servers — mobile OS may have dropped TCP connections during doze/sleep.
         // On desktop, resumed fires on every window focus (alt-tab), so apply a cooldown
         // to avoid piling up network probes from rapid alt-tabbing.
@@ -607,7 +656,6 @@ class _MainAppState extends State<MainApp> with WidgetsBindingObserver {
         // Closing here would kill the Drift isolate channel while services
         // (sync, downloads, cache) still hold references to the executor.
         // SQLite WAL mode handles process death; desktop uses onExitRequested.
-        InAppReviewService.instance.endSession();
         if (PlatformDetector.isDesktopOS()) {
           if (ProcessInfo.currentRss > 1024 * 1024 * 1024) {
             // 1GB
@@ -705,6 +753,14 @@ class _MainAppState extends State<MainApp> with WidgetsBindingObserver {
           create: (context) => DownloadProvider(downloadManager: _downloadManager, database: _appDatabase),
           update: (context, activeProfile, previous) {
             final provider = previous ?? DownloadProvider(downloadManager: _downloadManager, database: _appDatabase);
+            provider.setActiveProfileId(activeProfile.activeId);
+            return provider;
+          },
+        ),
+        ChangeNotifierProxyProvider<ActiveProfileProvider, WatchStateOverlayProvider>(
+          create: (_) => WatchStateOverlayProvider(),
+          update: (_, activeProfile, previous) {
+            final provider = previous ?? WatchStateOverlayProvider();
             provider.setActiveProfileId(activeProfile.activeId);
             return provider;
           },
@@ -1070,7 +1126,21 @@ class _SetupScreenState extends State<SetupScreen> with MountedSetStateMixin {
     // through `context` after async gaps trip the use_build_context_synchronously
     // lint, and reading early is safe because the registry is a singleton.
     final connectionRegistry = context.read<ConnectionRegistry>();
-    final allConnections = await connectionRegistry.list();
+    final List<Connection> allConnections;
+    try {
+      allConnections = await connectionRegistry.list();
+    } catch (e, st) {
+      // Defence-in-depth: a DB-open failure here used to propagate
+      // uncaught and strand the splash forever (#1022). Route to auth so
+      // the user is never trapped, and surface to Sentry so an unknown
+      // regression doesn't go silent.
+      appLogger.e('Setup: failed to load connections; returning to auth', error: e, stackTrace: st);
+      unawaited(Sentry.captureException(e, stackTrace: st));
+      if (mounted) {
+        unawaited(Navigator.pushReplacement(context, fadeRoute(const AuthScreen())));
+      }
+      return;
+    }
 
     if (allConnections.isEmpty) {
       if (mounted) {
@@ -1121,7 +1191,7 @@ class _SetupScreenState extends State<SetupScreen> with MountedSetStateMixin {
     // Reading the binder here is enough — the Provider is `lazy: false` so
     // it has already constructed the binder and called `start()` during
     // MultiProvider build. We just need to wait for it.
-    context.read<ActiveProfileBinder>();
+    final binder = context.read<ActiveProfileBinder>();
     final downloadProvider = context.read<DownloadProvider>();
 
     // Wait for the active profile to load from disk so the binder has a
@@ -1154,19 +1224,38 @@ class _SetupScreenState extends State<SetupScreen> with MountedSetStateMixin {
         settings.read(SettingsService.requireProfileSelectionOnOpen) && activeProfile.hasMultipleProfiles;
     final shouldPrompt = hasNoActive || requireOnOpen;
 
+    var bindingSucceeded = activeProfile.lastBindingSucceeded;
     if (shouldPrompt) {
       await Navigator.of(
         context,
       ).push(MaterialPageRoute(builder: (_) => const ProfileSwitchScreen(requireSelection: true)));
       if (!mounted) return;
+      bindingSucceeded = activeProfile.active != null && activeProfile.lastBindingSucceeded;
     } else {
       // Now wait for the binder to settle. This is the Plex/Jellyfin server
       // race: per-server status flips on the splash list as each client comes
       // online, and we don't push MainScreen until they're all done (success
       // or fail). Eliminates the "Failed to load discover content: No servers
       // available" race the old eager-navigate flow caused.
-      await activeProfile.awaitBindingSettle();
+      bindingSucceeded = await activeProfile.awaitBindingSettle();
       if (!mounted) return;
+      if (!bindingSucceeded) {
+        appLogger.w('Setup: initial profile bind failed; retrying once before entering main screen');
+        await binder.rebindActive();
+        if (!mounted) return;
+        bindingSucceeded = activeProfile.lastBindingSucceeded;
+      }
+    }
+
+    if (shouldEnterOfflineModeAfterStartupBind(
+      bindingSucceeded: bindingSucceeded,
+      hasOnlineServers: _serverManagerFromContext().onlineServerIds.isNotEmpty,
+    )) {
+      appLogger.w('Setup: no servers online after startup bind; starting offline mode');
+      await downloadProvider.ensureInitialized();
+      if (!mounted) return;
+      unawaited(Navigator.pushReplacement(context, fadeRoute(const MainScreen(isOfflineMode: true))));
+      return;
     }
 
     // Repopulate metadata for downloaded items now that per-backend caches

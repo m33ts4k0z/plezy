@@ -55,6 +55,7 @@ import '../utils/media_server_retry.dart';
 import '../utils/media_server_timeouts.dart';
 import '../utils/log_redaction_manager.dart';
 import '../utils/plex_cache_parser.dart';
+import '../utils/plex_library_section_utils.dart';
 import '../utils/plex_url_helper.dart';
 import '../utils/session_identifier.dart' as session_id;
 import '../utils/watch_state_notifier.dart';
@@ -81,16 +82,27 @@ List<PlexHubDto> _processHubResponse(
   Map<String, dynamic> decoded,
   String serverId,
   String? serverName, {
+  int? librarySectionID,
+  String? librarySectionTitle,
   bool Function(PlexMetadataDto)? filter,
 }) {
   final container = decoded['MediaContainer'] as Map<String, dynamic>?;
   if (container == null || container['Hub'] == null) return [];
 
+  final containerSectionID = _librarySectionIdFromJson(container) ?? librarySectionID;
+  final containerSectionTitle = _librarySectionTitleFromJson(container) ?? librarySectionTitle;
   final itemFilter = filter ?? (PlexMetadataDto item) => ContentTypes.videoTypes.contains(item.type?.toLowerCase());
   final hubs = <PlexHubDto>[];
   for (final hubJson in container['Hub'] as List) {
     try {
-      final hub = PlexHubDto.fromJson(hubJson as Map<String, dynamic>, serverId: serverId, serverName: serverName);
+      final hubMap = hubJson as Map<String, dynamic>;
+      final hubSectionID = _librarySectionIdFromJson(hubMap) ?? containerSectionID;
+      final hubSectionTitle = _librarySectionTitleFromJson(hubMap) ?? containerSectionTitle;
+      final hub = _plexHubWithLibrarySection(
+        PlexHubDto.fromJson(hubMap, serverId: serverId, serverName: serverName),
+        librarySectionID: hubSectionID,
+        librarySectionTitle: hubSectionTitle,
+      );
       if (hub.items.isEmpty) continue;
 
       final filteredItems = hub.items.where(itemFilter).toList();
@@ -117,6 +129,48 @@ List<PlexHubDto> _processHubResponse(
   return hubs;
 }
 
+int? _librarySectionIdFromJson(Map<String, dynamic>? json) => plexLibrarySectionIdFromJson(json);
+
+int? _librarySectionIdFromString(String? sectionId) => plexLibrarySectionIdFromString(sectionId);
+
+String? _librarySectionTitleFromJson(Map<String, dynamic>? json) => plexLibrarySectionTitleFromJson(json);
+
+PlexMetadataDto _plexMetadataWithLibrarySection(
+  PlexMetadataDto metadata, {
+  int? librarySectionID,
+  String? librarySectionTitle,
+}) {
+  final nextSectionID = metadata.librarySectionID ?? librarySectionID;
+  final nextSectionTitle = metadata.librarySectionTitle ?? librarySectionTitle;
+  if (nextSectionID == metadata.librarySectionID && nextSectionTitle == metadata.librarySectionTitle) {
+    return metadata;
+  }
+  return metadata.copyWith(librarySectionID: nextSectionID, librarySectionTitle: nextSectionTitle);
+}
+
+PlexHubDto _plexHubWithLibrarySection(PlexHubDto hub, {int? librarySectionID, String? librarySectionTitle}) {
+  if (librarySectionID == null && librarySectionTitle == null) return hub;
+  return PlexHubDto(
+    hubKey: hub.hubKey,
+    title: hub.title,
+    type: hub.type,
+    hubIdentifier: hub.hubIdentifier,
+    size: hub.size,
+    more: hub.more,
+    items: hub.items
+        .map(
+          (item) => _plexMetadataWithLibrarySection(
+            item,
+            librarySectionID: librarySectionID,
+            librarySectionTitle: librarySectionTitle,
+          ),
+        )
+        .toList(),
+    serverId: hub.serverId,
+    serverName: hub.serverName,
+  );
+}
+
 // PlexStreamType moved to plex_constants.dart to break a would-be circular
 // import once plex_mappers.dart started referencing the same names.
 
@@ -134,7 +188,9 @@ class ConnectionTestResult {
   ConnectionTestResult({required this.success, required this.latencyMs, this.error, this.transcoderVideo});
 }
 
-class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements MediaServerClient {
+class PlexClient
+    with MediaServerCacheMixin, _PlexLiveTvClientMethods
+    implements MediaServerClient, GracefullyCloseable {
   @override
   PlexConfig config;
 
@@ -175,6 +231,12 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
   /// Libraries parsed from /media/providers (includes individually shared items)
   List<PlexLibraryDto> _providerLibraries = const [];
 
+  /// Home hub endpoint advertised by /media/providers (usually /hubs).
+  String? _providerHomeHubKey;
+
+  /// Promoted home hub endpoint advertised by /media/providers (usually /hubs/promoted).
+  String? _providerPromotedHubKey;
+
   /// EPG providers parsed from /media/providers
   @override
   List<({String identifier, String gridEndpoint})> _providerEpg = const [];
@@ -213,6 +275,7 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
     Future<void> Function(String newBaseUrl)? onEndpointChanged,
     VoidCallback? onAllEndpointsExhausted,
     bool? seedTranscoderVideoSupport,
+    http.Client? httpClient,
   }) async {
     final client = PlexClient._(
       config,
@@ -221,6 +284,7 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
       prioritizedEndpoints: prioritizedEndpoints,
       onEndpointChanged: onEndpointChanged,
       onAllEndpointsExhausted: onAllEndpointsExhausted,
+      httpClient: httpClient,
     );
     if (seedTranscoderVideoSupport != null) {
       client._serverTranscoderCached = seedTranscoderVideoSupport;
@@ -273,6 +337,8 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
     required http.Client httpClient,
     List<String>? prioritizedEndpoints,
     List<({String identifier, String gridEndpoint})> epgProviders = const [],
+    String? homeHubKey,
+    String? promotedHubKey,
   }) {
     final client = PlexClient._(
       config,
@@ -283,12 +349,19 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
     );
     client._providerLibraries = const [];
     client._providerEpg = epgProviders;
+    client._providerHomeHubKey = homeHubKey;
+    client._providerPromotedHubKey = promotedHubKey;
     return client;
   }
 
   @override
   void close() {
     _http.close();
+  }
+
+  @override
+  Future<void> closeGracefully({Duration drainTimeout = const Duration(seconds: 2)}) {
+    return _http.closeGracefully(drainTimeout: drainTimeout);
   }
 
   bool _failoverSwitching = false;
@@ -375,6 +448,8 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
       if (container == null) {
         _providerLibraries = [];
         _providerEpg = [];
+        _providerHomeHubKey = null;
+        _providerPromotedHubKey = null;
         return;
       }
 
@@ -382,11 +457,15 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
       if (providers == null) {
         _providerLibraries = [];
         _providerEpg = [];
+        _providerHomeHubKey = null;
+        _providerPromotedHubKey = null;
         return;
       }
 
       final libraries = <PlexLibraryDto>[];
       final epg = <({String identifier, String gridEndpoint})>[];
+      String? homeHubKey;
+      String? promotedHubKey;
 
       for (final provider in providers) {
         if (provider is! Map) continue;
@@ -400,6 +479,11 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
         if (identifier == 'com.plexapp.plugins.library') {
           for (final feature in features) {
             if (feature is! Map) continue;
+
+            if (feature['type'] == 'promoted') {
+              promotedHubKey ??= feature['key'] as String?;
+            }
+
             if (feature['type'] != 'content') continue;
 
             final directories = feature['Directory'] as List?;
@@ -411,7 +495,10 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
 
                 // Skip entries without id (Home hub) and playlists
                 final id = dir['id']?.toString();
-                if (id == null) continue;
+                if (id == null) {
+                  homeHubKey ??= dir['hubKey'] as String?;
+                  continue;
+                }
                 if (dir['type'] == 'playlist') continue;
 
                 final isNumericId = int.tryParse(id) != null;
@@ -454,11 +541,15 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
 
       _providerLibraries = libraries;
       _providerEpg = epg;
+      _providerHomeHubKey = homeHubKey;
+      _providerPromotedHubKey = promotedHubKey;
       appLogger.d('Media providers: ${libraries.length} libraries, ${epg.length} EPG provider(s)');
     } catch (e) {
       appLogger.w('Failed to fetch /media/providers, will fall back to /library/sections', error: e);
       _providerLibraries = [];
       _providerEpg = [];
+      _providerHomeHubKey = null;
+      _providerPromotedHubKey = null;
     }
   }
 
@@ -577,14 +668,54 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
   PlexMetadataDto _tagMetadata(PlexMetadataDto metadata) =>
       metadata.copyWith(serverId: serverId, serverName: serverName);
 
+  PlexMetadataDto _tagMetadataWithLibrary(
+    PlexMetadataDto metadata, {
+    int? librarySectionID,
+    String? librarySectionTitle,
+  }) {
+    return _plexMetadataWithLibrarySection(
+      _tagMetadata(metadata),
+      librarySectionID: librarySectionID,
+      librarySectionTitle: librarySectionTitle,
+    );
+  }
+
   @override
   PlexMetadataDto _createTaggedMetadata(Map<String, dynamic> json) => _tagMetadata(PlexMetadataDto.fromJson(json));
 
+  PlexMetadataDto _createTaggedMetadataWithLibrary(
+    Map<String, dynamic> json, {
+    int? librarySectionID,
+    String? librarySectionTitle,
+  }) {
+    return _tagMetadataWithLibrary(
+      PlexMetadataDto.fromJson(json),
+      librarySectionID: _librarySectionIdFromJson(json) ?? librarySectionID,
+      librarySectionTitle: _librarySectionTitleFromJson(json) ?? librarySectionTitle,
+    );
+  }
+
   @override
-  List<PlexMetadataDto> _extractMetadataList(MediaServerResponse response) {
+  List<PlexMetadataDto> _extractMetadataList(MediaServerResponse response) => _extractMetadataListWithLibrary(response);
+
+  List<PlexMetadataDto> _extractMetadataListWithLibrary(
+    MediaServerResponse response, {
+    int? librarySectionID,
+    String? librarySectionTitle,
+  }) {
     final container = _getMediaContainer(response);
     if (container != null && container['Metadata'] != null) {
-      return (container['Metadata'] as List).map((json) => _createTaggedMetadata(json)).toList();
+      final containerSectionID = _librarySectionIdFromJson(container) ?? librarySectionID;
+      final containerSectionTitle = _librarySectionTitleFromJson(container) ?? librarySectionTitle;
+      return (container['Metadata'] as List)
+          .map(
+            (json) => _createTaggedMetadataWithLibrary(
+              json as Map<String, dynamic>,
+              librarySectionID: containerSectionID,
+              librarySectionTitle: containerSectionTitle,
+            ),
+          )
+          .toList();
     }
     return [];
   }
@@ -631,6 +762,47 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
           .toList();
     }
     return [];
+  }
+
+  int? _responseHeaderInt(MediaServerResponse response, String name) {
+    final lowerName = name.toLowerCase();
+    for (final entry in response.headers.entries) {
+      if (entry.key.toLowerCase() == lowerName) return flexibleInt(entry.value);
+    }
+    return null;
+  }
+
+  int _fallbackPageTotal({required int offset, required int itemCount, int? requestedSize}) {
+    final fullPage = requestedSize != null && requestedSize > 0 && itemCount >= requestedSize;
+    return offset + itemCount + (fullPage ? 1 : 0);
+  }
+
+  int _responseTotalSize(MediaServerResponse response, {required int itemCount, int? start, int? requestedSize}) {
+    final headerTotal = _responseHeaderInt(response, 'X-Plex-Container-Total-Size');
+    if (headerTotal != null) return headerTotal;
+
+    final container = _getMediaContainer(response);
+    final bodyTotal = flexibleInt(container?['totalSize']);
+    if (bodyTotal != null) return bodyTotal;
+
+    final offset = start ?? flexibleInt(container?['offset']) ?? 0;
+    if (start == null && requestedSize == null) {
+      return flexibleInt(container?['size']) ?? itemCount;
+    }
+
+    return _fallbackPageTotal(offset: offset, itemCount: itemCount, requestedSize: requestedSize);
+  }
+
+  ({List<PlexPlaylistDto> items, int totalSize}) _extractPlaylistListResult(
+    MediaServerResponse response, {
+    int? start,
+    int? size,
+  }) {
+    final items = _extractPlaylistList(response);
+    return (
+      items: items,
+      totalSize: _responseTotalSize(response, itemCount: items.length, start: start, requestedSize: size),
+    );
   }
 
   Future<Map<String, dynamic>> getServerIdentity() async {
@@ -708,7 +880,12 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
     if (filters != null) queryParams.addAll(filters);
     final endpoint = sectionId == 'shared' ? '/library/shared/all' : '/library/sections/$sectionId/all';
     final response = await _getWithFailover(endpoint, queryParameters: queryParams, abort: abort);
-    return _extractLibraryContentResult(response);
+    return _extractLibraryContentResult(
+      response,
+      librarySectionID: _librarySectionIdFromString(sectionId),
+      start: start,
+      requestedSize: size,
+    );
   }
 
   Map<String, dynamic> _buildPaginationParams(int? start, int? size) {
@@ -718,10 +895,19 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
     return params;
   }
 
-  _LibraryContentResult _extractLibraryContentResult(MediaServerResponse response) {
-    final items = _extractMetadataList(response);
-    final container = _getMediaContainer(response);
-    final totalSize = container?['totalSize'] as int? ?? container?['size'] as int? ?? items.length;
+  _LibraryContentResult _extractLibraryContentResult(
+    MediaServerResponse response, {
+    int? librarySectionID,
+    String? librarySectionTitle,
+    int? start,
+    int? requestedSize,
+  }) {
+    final items = _extractMetadataListWithLibrary(
+      response,
+      librarySectionID: librarySectionID,
+      librarySectionTitle: librarySectionTitle,
+    );
+    final totalSize = _responseTotalSize(response, itemCount: items.length, start: start, requestedSize: requestedSize);
     return _LibraryContentResult(items: items, totalSize: totalSize);
   }
 
@@ -730,16 +916,37 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
     int? start,
     int? size,
     AbortController? abort,
+    int? librarySectionID,
+    String? librarySectionTitle,
   }) async {
     final response = await _getWithFailover(path, queryParameters: _buildPaginationParams(start, size), abort: abort);
-    return _extractLibraryContentResult(response);
+    return _extractLibraryContentResult(
+      response,
+      librarySectionID: librarySectionID,
+      librarySectionTitle: librarySectionTitle,
+      start: start,
+      requestedSize: size,
+    );
   }
 
   /// Parse list of PlexMetadataDto from a cached response
   List<PlexMetadataDto> _parseMetadataListFromCachedResponse(Map<String, dynamic> cached) {
+    final container = cached['MediaContainer'] is Map<String, dynamic>
+        ? cached['MediaContainer'] as Map<String, dynamic>
+        : null;
+    final containerSectionID = _librarySectionIdFromJson(container);
+    final containerSectionTitle = _librarySectionTitleFromJson(container);
     final metadataList = PlexCacheParser.extractMetadataList(cached);
     if (metadataList != null) {
-      return metadataList.map((json) => _createTaggedMetadata(json)).toList();
+      return metadataList
+          .map(
+            (json) => _createTaggedMetadataWithLibrary(
+              json as Map<String, dynamic>,
+              librarySectionID: containerSectionID,
+              librarySectionTitle: containerSectionTitle,
+            ),
+          )
+          .toList();
     }
     return [];
   }
@@ -803,10 +1010,17 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
             PlexMetadataDto? metadata;
             PlexMetadataDto? onDeckEpisode;
 
+            final container = _getMediaContainer(response);
+            final containerSectionID = _librarySectionIdFromJson(container);
+            final containerSectionTitle = _librarySectionTitleFromJson(container);
             final metadataJson = _getFirstMetadataJson(response);
 
             if (metadataJson != null) {
-              metadata = _tagMetadata(PlexMetadataDto.fromJsonWithImages(metadataJson));
+              metadata = _tagMetadataWithLibrary(
+                PlexMetadataDto.fromJsonWithImages(metadataJson),
+                librarySectionID: _librarySectionIdFromJson(metadataJson) ?? containerSectionID,
+                librarySectionTitle: _librarySectionTitleFromJson(metadataJson) ?? containerSectionTitle,
+              );
 
               // Check if OnDeck is nested inside Metadata
               if (metadataJson.containsKey('OnDeck') && metadataJson['OnDeck'] != null) {
@@ -816,7 +1030,11 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
                 if (onDeckData is Map && onDeckData.containsKey('Metadata')) {
                   final onDeckMetadata = onDeckData['Metadata'];
                   if (onDeckMetadata != null) {
-                    onDeckEpisode = _createTaggedMetadata(onDeckMetadata);
+                    onDeckEpisode = _createTaggedMetadataWithLibrary(
+                      onDeckMetadata as Map<String, dynamic>,
+                      librarySectionID: metadata.librarySectionID ?? containerSectionID,
+                      librarySectionTitle: metadata.librarySectionTitle ?? containerSectionTitle,
+                    );
                   }
                 }
               }
@@ -841,17 +1059,32 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
           _http.get('/library/metadata/$ratingKey', queryParameters: {'includeChapters': 1, 'includeMarkers': 1}),
       parseCache: (cachedData) => _parseMetadataWithImagesFromCachedResponse(cachedData),
       parseResponse: (response) {
+        final container = _getMediaContainer(response);
         final metadataJson = _getFirstMetadataJson(response);
-        return metadataJson != null ? _tagMetadata(PlexMetadataDto.fromJsonWithImages(metadataJson)) : null;
+        return metadataJson != null
+            ? _tagMetadataWithLibrary(
+                PlexMetadataDto.fromJsonWithImages(metadataJson),
+                librarySectionID: _librarySectionIdFromJson(metadataJson) ?? _librarySectionIdFromJson(container),
+                librarySectionTitle:
+                    _librarySectionTitleFromJson(metadataJson) ?? _librarySectionTitleFromJson(container),
+              )
+            : null;
       },
     );
   }
 
   /// Parse PlexMetadataDto with images from a cached response
   PlexMetadataDto? _parseMetadataWithImagesFromCachedResponse(Map<String, dynamic> cached) {
+    final container = cached['MediaContainer'] is Map<String, dynamic>
+        ? cached['MediaContainer'] as Map<String, dynamic>
+        : null;
     final firstMetadata = PlexCacheParser.extractFirstMetadata(cached);
     if (firstMetadata != null) {
-      return _tagMetadata(PlexMetadataDto.fromJsonWithImages(firstMetadata));
+      return _tagMetadataWithLibrary(
+        PlexMetadataDto.fromJsonWithImages(firstMetadata),
+        librarySectionID: _librarySectionIdFromJson(firstMetadata) ?? _librarySectionIdFromJson(container),
+        librarySectionTitle: _librarySectionTitleFromJson(firstMetadata) ?? _librarySectionTitleFromJson(container),
+      );
     }
     return null;
   }
@@ -898,9 +1131,7 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
     }
   }
 
-  /// Page size for iterating all items via [_fetchAllPages]. Also the cap
-  /// for endpoints that send `X-Plex-Container-Size` but aren't truly paginated
-  /// (collections listing, playlists listing, search).
+  /// Default cap for list-style endpoints when a caller doesn't pass a size.
   static const int _defaultListContainerSize = 1000;
 
   /// Page size used when walking all pages of a paginated endpoint.
@@ -1032,7 +1263,7 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
   /// Search across all libraries including individually shared items.
   /// Uses /library/search (same endpoint as Plex Web) which finds shared content.
   /// Only returns movies and shows, filtering out other types.
-  Future<List<PlexMetadataDto>> _search(String query, {int limit = 30}) async {
+  Future<List<PlexMetadataDto>> _search(String query, {int limit = 100}) async {
     final response = await _getWithFailover(
       '/library/search',
       queryParameters: {
@@ -1086,13 +1317,13 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
   /// Get continue watching items via the hubs system.
   /// Uses /hubs?identifier=home.continue,home.ondeck which respects the
   /// server's OnDeckWindow preference (unlike /library/onDeck).
-  Future<List<PlexMetadataDto>> _getContinueWatching({int count = 20}) async {
+  Future<List<PlexMetadataDto>> _getContinueWatching({int? count = 20}) async {
     final response = await retryTransientMediaServerCall(
       operation: 'Plex continue watching hubs',
       attemptTimeouts: MediaServerTimeouts.homeHubAttemptTimeouts,
       call: (timeout, abort) => _getWithFailover(
         '/hubs',
-        queryParameters: {'identifier': 'home.continue,home.ondeck', 'count': count, 'includeGuids': 1},
+        queryParameters: {'identifier': 'home.continue,home.ondeck', 'count': ?count, 'includeGuids': 1},
         timeout: timeout,
         abort: abort,
         allowEndpointFailover: false,
@@ -1138,27 +1369,15 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
         [];
   }
 
-  /// Get every episode beneath a show or season in one call — for a show
-  /// this returns episodes across every season (no per-season walk), for a
-  /// season the episodes directly. Mirrors [_getChildren]'s cache-fallback
-  /// behaviour.
-  ///
-  /// Uses `/grandchildren` rather than `/allLeaves` because the live server
-  /// returns 0 items for `/allLeaves` on a season — `/grandchildren` is the
-  /// only endpoint Plex serves that one-shots both levels (and is also the
-  /// recommended path for mini-series shows that set `skipChildren=true`,
-  /// per the API docs).
-  Future<List<PlexMetadataDto>> _getGrandchildren(String ratingKey) async {
-    final endpoint = '/library/metadata/$ratingKey/grandchildren';
-
-    return await fetchWithCacheFallback<List<PlexMetadataDto>>(
-          cacheKey: endpoint,
-          networkCall: () => _http.get(endpoint),
-          parseCache: (cachedData) => _parseMetadataListFromCachedResponse(cachedData),
-          parseResponse: (response) => _extractMetadataList(response),
-        ) ??
-        [];
-  }
+  /// Page through playable episodes beneath a show or season. Uses
+  /// `/grandchildren` rather than `/allLeaves` because the live server returns
+  /// 0 items for `/allLeaves` on a season.
+  Future<_LibraryContentResult> _getGrandchildrenPage(
+    String ratingKey, {
+    int? start,
+    int? size,
+    AbortController? abort,
+  }) => _fetchPaginatedList('/library/metadata/$ratingKey/grandchildren', start: start, size: size, abort: abort);
 
   /// Get extras for a metadata item (trailers, behind-the-scenes, etc.)
   /// Uses cache when offline or as fallback on network error
@@ -1488,10 +1707,7 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
       ];
     }
     try {
-      // Use the dedicated sorts endpoint
       final response = await _getWithFailover('/library/sections/$sectionId/sorts');
-
-      // Parse the Directory array (not Sort array) per the API spec
       final sorts = _extractDirectoryList(response, MediaSort.fromJson);
 
       if (sorts.isNotEmpty) {
@@ -1548,7 +1764,7 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
 
   /// Get library hubs (recommendations for a specific library section)
   /// Returns a list of recommendation hubs like "Trending Movies", "Top in Genre", etc.
-  Future<List<PlexHubDto>> _getLibraryHubs(String sectionId, {int limit = 10}) async {
+  Future<List<PlexHubDto>> _getLibraryHubs(String sectionId, {int limit = 10, String? libraryName}) async {
     try {
       final response = await retryTransientMediaServerCall(
         operation: 'Plex library hubs',
@@ -1564,7 +1780,15 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
       final sid = serverId;
       final sname = serverName;
       final data = response.data as Map<String, dynamic>;
-      return await tryIsolateRun(() => _processHubResponse(data, sid, sname));
+      return await tryIsolateRun(
+        () => _processHubResponse(
+          data,
+          sid,
+          sname,
+          librarySectionID: _librarySectionIdFromString(sectionId),
+          librarySectionTitle: libraryName,
+        ),
+      );
     } catch (e) {
       appLogger.e('Failed to get library hubs: $e');
     }
@@ -1576,11 +1800,12 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
   /// This matches the official Plex client's home page layout.
   Future<List<PlexHubDto>> _getGlobalHubs({int limit = 10}) async {
     try {
+      final hubKey = _providerPromotedHubKey ?? _providerHomeHubKey ?? '/hubs';
       final response = await retryTransientMediaServerCall(
         operation: 'Plex global hubs',
         attemptTimeouts: MediaServerTimeouts.homeHubAttemptTimeouts,
         call: (timeout, abort) => _getWithFailover(
-          '/hubs',
+          hubKey,
           queryParameters: {'count': limit, 'includeGuids': 1},
           timeout: timeout,
           abort: abort,
@@ -1628,13 +1853,62 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
   /// Get full content from a hub using its hub key
   /// Returns the complete list of metadata items in the hub
   Future<List<PlexMetadataDto>> _getHubContent(String hubKey) async {
-    return _wrapListApiCall<PlexMetadataDto>(() => _http.get(hubKey), (response) {
-      final allItems = _extractMetadataList(response);
-      // Filter to only video content (movies, shows, seasons, episodes)
-      return allItems.where((item) {
-        return ContentTypes.videoTypes.contains(item.type?.toLowerCase());
-      }).toList();
-    }, 'Failed to get hub content');
+    try {
+      final hubSectionID = _librarySectionIdFromString(hubKey);
+      final items = await _fetchAllPages(
+        (start, size, abort) =>
+            _fetchPaginatedList(hubKey, start: start, size: size, abort: abort, librarySectionID: hubSectionID),
+      );
+      return items.where(_isVideoMetadata).toList();
+    } catch (e, st) {
+      appLogger.e('Failed to get hub content', error: e, stackTrace: st);
+      return [];
+    }
+  }
+
+  bool _isVideoMetadata(PlexMetadataDto item) => ContentTypes.videoTypes.contains(item.type?.toLowerCase());
+
+  Future<_LibraryContentResult> _getHubContentPage(
+    String hubKey, {
+    int? start,
+    int? size,
+    AbortController? abort,
+  }) async {
+    final filteredOffset = start ?? 0;
+    final pageSize = size ?? _fetchAllPageSize;
+    final rawPageSize = pageSize > _fetchAllPageSize ? pageSize : _fetchAllPageSize;
+    final hubSectionID = _librarySectionIdFromString(hubKey);
+    final pageItems = <PlexMetadataDto>[];
+    var rawOffset = 0;
+    var filteredSeen = 0;
+    var rawTotal = 0;
+    var rawFinished = false;
+
+    while (pageItems.length < pageSize && !rawFinished) {
+      final result = await _fetchPaginatedList(
+        hubKey,
+        start: rawOffset,
+        size: rawPageSize,
+        abort: abort,
+        librarySectionID: hubSectionID,
+      );
+      rawTotal = result.totalSize;
+      final rawItems = result.items;
+      rawOffset += rawItems.length;
+
+      for (final item in rawItems) {
+        if (!_isVideoMetadata(item)) continue;
+        if (filteredSeen >= filteredOffset && pageItems.length < pageSize) {
+          pageItems.add(item);
+        }
+        filteredSeen++;
+      }
+
+      rawFinished = rawItems.isEmpty || rawOffset >= rawTotal;
+    }
+
+    final totalSize = rawFinished ? filteredSeen : filteredOffset + pageItems.length + 1;
+    return _LibraryContentResult(items: pageItems, totalSize: totalSize);
   }
 
   /// Get playlist content by playlist ID, paginated.
@@ -1646,23 +1920,50 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
   Future<List<PlexMetadataDto>> _fetchAllPlaylistItemsDto(String playlistId) =>
       _fetchAllPages((start, size, abort) => _getPlaylist(playlistId, start: start, size: size, abort: abort));
 
-  /// Get all playlists
-  /// Filters by playlistType=video by default
-  /// Set smart to true/false to filter smart playlists, or null for all
-  Future<List<PlexPlaylistDto>> _getPlaylists({String playlistType = 'video', bool? smart}) {
+  /// Get all playlists.
+  /// Filters by playlistType=video by default.
+  /// Set smart to true/false to filter smart playlists, or null for all.
+  Future<List<PlexPlaylistDto>> _getPlaylists({String playlistType = 'video', bool? smart}) async {
+    try {
+      final all = <PlexPlaylistDto>[];
+      var start = 0;
+      while (true) {
+        final page = await _getPlaylistsPage(
+          playlistType: playlistType,
+          smart: smart,
+          start: start,
+          size: _fetchAllPageSize,
+        );
+        if (page.items.isEmpty) break;
+        all.addAll(page.items);
+        start += page.items.length;
+        if (start >= page.totalSize) break;
+      }
+      return all;
+    } catch (e, st) {
+      appLogger.e('Failed to get playlists', error: e, stackTrace: st);
+      return [];
+    }
+  }
+
+  Future<({List<PlexPlaylistDto> items, int totalSize})> _getPlaylistsPage({
+    String playlistType = 'video',
+    bool? smart,
+    int? start,
+    int? size,
+    AbortController? abort,
+  }) async {
+    final pageSize = size ?? _defaultListContainerSize;
     final queryParams = <String, dynamic>{
-      'playlistType': playlistType,
-      'X-Plex-Container-Size': _defaultListContainerSize,
+      if (playlistType.isNotEmpty) 'playlistType': playlistType,
+      ..._buildPaginationParams(start, pageSize),
     };
     if (smart != null) {
       queryParams['smart'] = smart ? '1' : '0';
     }
 
-    return _wrapListApiCall<PlexPlaylistDto>(
-      () => _http.get('/playlists', queryParameters: queryParams),
-      _extractPlaylistList,
-      'Failed to get playlists',
-    );
+    final response = await _getWithFailover('/playlists', queryParameters: queryParams, abort: abort);
+    return _extractPlaylistListResult(response, start: start, size: pageSize);
   }
 
   /// Get playlist metadata by playlist ID
@@ -1960,23 +2261,38 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
     );
   }
 
-  /// Get all collections for a library section
-  /// Returns collections as PlexMetadataDto objects with type="collection"
-  Future<List<PlexMetadataDto>> _getLibraryCollections(String sectionId) async {
-    return _wrapListApiCall<PlexMetadataDto>(
-      () => _http.get(
-        '/library/sections/$sectionId/collections',
-        queryParameters: {'includeGuids': 1, 'X-Plex-Container-Size': _defaultListContainerSize},
-      ),
-      (response) {
-        final allItems = _extractMetadataList(response);
-        // Collections should have type="collection"
-        return allItems.where((item) {
-          return item.type?.toLowerCase() == ContentTypes.collection;
-        }).toList();
-      },
-      'Failed to get library collections',
+  /// Get one page of collections for a library section.
+  Future<_LibraryContentResult> _getLibraryCollectionsPage(
+    String sectionId, {
+    int? start,
+    int? size,
+    AbortController? abort,
+  }) async {
+    final queryParameters = _buildPaginationParams(start, size)..['includeGuids'] = 1;
+    final response = await _getWithFailover(
+      '/library/sections/$sectionId/collections',
+      queryParameters: queryParameters,
+      abort: abort,
     );
+    final result = _extractLibraryContentResult(
+      response,
+      librarySectionID: _librarySectionIdFromString(sectionId),
+      start: start,
+      requestedSize: size,
+    );
+    return result;
+  }
+
+  /// Get all collections for a library section.
+  Future<List<PlexMetadataDto>> _getLibraryCollections(String sectionId) async {
+    try {
+      return _fetchAllPages((start, size, abort) {
+        return _getLibraryCollectionsPage(sectionId, start: start, size: size, abort: abort);
+      });
+    } catch (e, st) {
+      appLogger.e('Failed to get library collections', error: e, stackTrace: st);
+      return [];
+    }
   }
 
   /// Get items in a collection, paginated.
@@ -1985,11 +2301,32 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
     int? start,
     int? size,
     AbortController? abort,
-  }) => _fetchPaginatedList('/library/collections/$collectionId/children', start: start, size: size, abort: abort);
+    String? librarySectionID,
+    String? librarySectionTitle,
+  }) => _fetchPaginatedList(
+    '/library/collections/$collectionId/children',
+    start: start,
+    size: size,
+    abort: abort,
+    librarySectionID: _librarySectionIdFromString(librarySectionID),
+    librarySectionTitle: librarySectionTitle,
+  );
 
   /// Fetch every item in a collection (downloads, sync rules, context-menu shuffle).
-  Future<List<PlexMetadataDto>> _fetchAllCollectionItemsDto(String collectionId) =>
-      _fetchAllPages((start, size, abort) => _getCollectionItems(collectionId, start: start, size: size, abort: abort));
+  Future<List<PlexMetadataDto>> _fetchAllCollectionItemsDto(
+    String collectionId, {
+    String? librarySectionID,
+    String? librarySectionTitle,
+  }) => _fetchAllPages(
+    (start, size, abort) => _getCollectionItems(
+      collectionId,
+      start: start,
+      size: size,
+      abort: abort,
+      librarySectionID: librarySectionID,
+      librarySectionTitle: librarySectionTitle,
+    ),
+  );
 
   /// Get media featuring a specific person (actor/director), paginated.
   Future<_LibraryContentResult> _getPersonMedia(String personId, {int? start, int? size, AbortController? abort}) =>
@@ -2114,16 +2451,25 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
 
   /// Parse a `/playQueues/{id}` response into a [PlayQueueResponse] with
   /// MediaItem-typed entries.
-  PlayQueueResponse _parsePlayQueueResponse(dynamic data) {
+  PlayQueueResponse _parsePlayQueueResponse(dynamic data, {int? librarySectionID, String? librarySectionTitle}) {
     final container = data is Map && data['MediaContainer'] is Map
         ? data['MediaContainer'] as Map<String, dynamic>
         : data as Map<String, dynamic>;
+    final containerSectionID = _librarySectionIdFromJson(container) ?? librarySectionID;
+    final containerSectionTitle = _librarySectionTitleFromJson(container) ?? librarySectionTitle;
     final metadata = container['Metadata'];
     List<MediaItem>? items;
     if (metadata is List) {
       items = [
         for (final e in metadata)
-          if (e is Map<String, dynamic>) PlexMappers.mediaItem(_createTaggedMetadata(e)),
+          if (e is Map<String, dynamic>)
+            PlexMappers.mediaItem(
+              _createTaggedMetadataWithLibrary(
+                e,
+                librarySectionID: containerSectionID,
+                librarySectionTitle: containerSectionTitle,
+              ),
+            ),
       ];
     }
     return PlayQueueResponse(
@@ -2150,6 +2496,8 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
     int shuffle = 0,
     int repeat = 0,
     int continuous = 0,
+    String? librarySectionID,
+    String? librarySectionTitle,
   }) async {
     try {
       final queryParams = <String, dynamic>{
@@ -2171,7 +2519,11 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
 
       final response = await _http.post('/playQueues', queryParameters: queryParams);
 
-      return _parsePlayQueueResponse(response.data);
+      return _parsePlayQueueResponse(
+        response.data,
+        librarySectionID: _librarySectionIdFromString(librarySectionID),
+        librarySectionTitle: librarySectionTitle,
+      );
     } catch (e) {
       appLogger.e('Failed to create play queue', error: e);
       return null;
@@ -2186,6 +2538,8 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
     int window = 50,
     int includeBefore = 1,
     int includeAfter = 1,
+    String? librarySectionID,
+    String? librarySectionTitle,
   }) async {
     try {
       final queryParams = <String, dynamic>{
@@ -2200,7 +2554,11 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
 
       final response = await _getWithFailover('/playQueues/$playQueueId', queryParameters: queryParams);
 
-      return _parsePlayQueueResponse(response.data);
+      return _parsePlayQueueResponse(
+        response.data,
+        librarySectionID: _librarySectionIdFromString(librarySectionID),
+        librarySectionTitle: librarySectionTitle,
+      );
     } catch (e) {
       appLogger.e('Failed to get play queue: $e');
       return null;
@@ -2222,6 +2580,8 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
     required String showRatingKey,
     int shuffle = 0,
     String? startingEpisodeKey,
+    String? librarySectionID,
+    String? librarySectionTitle,
   }) async {
     try {
       final machineId = config.machineIdentifier ?? await getMachineIdentifier();
@@ -2236,6 +2596,8 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
         shuffle: shuffle,
         key: startingEpisodeKey != null ? '/library/metadata/$startingEpisodeKey' : null,
         continuous: startingEpisodeKey != null && shuffle == 0 ? 1 : 0,
+        librarySectionID: librarySectionID,
+        librarySectionTitle: librarySectionTitle,
       );
     } catch (e) {
       appLogger.e('Failed to create show play queue', error: e);
@@ -2246,17 +2608,29 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
   /// Extract both Metadata and Directory entries from response
   /// Folders can come back as either type
   /// Automatically tags all items with this client's serverId and serverName
-  List<PlexMetadataDto> _extractMetadataAndDirectories(MediaServerResponse response) {
+  List<PlexMetadataDto> _extractMetadataAndDirectories(
+    MediaServerResponse response, {
+    int? librarySectionID,
+    String? librarySectionTitle,
+  }) {
     final List<PlexMetadataDto> items = [];
     final container = _getMediaContainer(response);
 
     if (container != null) {
+      final containerSectionID = _librarySectionIdFromJson(container) ?? librarySectionID;
+      final containerSectionTitle = _librarySectionTitleFromJson(container) ?? librarySectionTitle;
       // Extract Metadata entries - try full parsing first
       if (container['Metadata'] != null) {
         for (final json in container['Metadata'] as List) {
           try {
             // Try to parse with full PlexMetadataDto.fromJson first
-            items.add(_createTaggedMetadata(json));
+            items.add(
+              _createTaggedMetadataWithLibrary(
+                json as Map<String, dynamic>,
+                librarySectionID: containerSectionID,
+                librarySectionTitle: containerSectionTitle,
+              ),
+            );
           } catch (e) {
             // If full parsing fails, use minimal safe parsing
             appLogger.d('Using minimal parsing for metadata item: $e');
@@ -2270,6 +2644,8 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
                   thumb: json['thumb'],
                   art: json['art'],
                   year: json['year'],
+                  librarySectionID: _librarySectionIdFromJson(json) ?? containerSectionID,
+                  librarySectionTitle: _librarySectionTitleFromJson(json) ?? containerSectionTitle,
                   serverId: serverId,
                   serverName: serverName,
                 ),
@@ -2286,7 +2662,13 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
         for (final json in container['Directory'] as List) {
           try {
             // Try to parse as PlexMetadataDto first
-            items.add(_createTaggedMetadata(json));
+            items.add(
+              _createTaggedMetadataWithLibrary(
+                json as Map<String, dynamic>,
+                librarySectionID: containerSectionID,
+                librarySectionTitle: containerSectionTitle,
+              ),
+            );
           } catch (e) {
             // If that fails, use minimal folder representation
             try {
@@ -2298,6 +2680,8 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
                   title: json['title'] ?? 'Untitled',
                   thumb: json['thumb'],
                   art: json['art'],
+                  librarySectionID: _librarySectionIdFromJson(json) ?? containerSectionID,
+                  librarySectionTitle: _librarySectionTitleFromJson(json) ?? containerSectionTitle,
                   serverId: serverId,
                   serverName: serverName,
                 ),
@@ -2321,7 +2705,7 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
         '/library/sections/$sectionId/folder',
         queryParameters: {'includeCollections': 0},
       );
-      return _extractMetadataAndDirectories(response);
+      return _extractMetadataAndDirectories(response, librarySectionID: _librarySectionIdFromString(sectionId));
     } catch (e) {
       appLogger.e('Failed to get library folders: $e');
       return [];
@@ -2330,10 +2714,18 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
 
   /// Get children of a specific folder
   /// Returns files and subfolders within the given folder
-  Future<List<PlexMetadataDto>> _getFolderChildren(String folderKey) async {
+  Future<List<PlexMetadataDto>> _getFolderChildren(
+    String folderKey, {
+    String? librarySectionID,
+    String? librarySectionTitle,
+  }) async {
     try {
       final response = await _getWithFailover(folderKey);
-      return _extractMetadataAndDirectories(response);
+      return _extractMetadataAndDirectories(
+        response,
+        librarySectionID: _librarySectionIdFromString(folderKey) ?? _librarySectionIdFromString(librarySectionID),
+        librarySectionTitle: librarySectionTitle,
+      );
     } catch (e) {
       appLogger.e('Failed to get folder children: $e');
       return [];
@@ -2648,30 +3040,34 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
         receiveTimeout: MediaServerTimeouts.receive,
         defaultHeaders: const {'Accept-Language': 'en', 'Accept': 'application/json'},
       );
-      final decisionUrl = '${config.baseUrl}/video/:/transcode/universal/decision?$queryString';
-      final decisionResponse = await decisionClient.get(decisionUrl);
+      try {
+        final decisionUrl = '${config.baseUrl}/video/:/transcode/universal/decision?$queryString';
+        final decisionResponse = await decisionClient.get(decisionUrl);
 
-      final decisionBody = decisionResponse.data?.toString() ?? '<empty>';
-      appLogger.i(
-        'Transcode decision [${decisionResponse.statusCode}] body: '
-        '${decisionBody.length > 2000 ? '${decisionBody.substring(0, 2000)}…' : decisionBody}',
-      );
+        final decisionBody = decisionResponse.data?.toString() ?? '<empty>';
+        appLogger.i(
+          'Transcode decision [${decisionResponse.statusCode}] body: '
+          '${decisionBody.length > 2000 ? '${decisionBody.substring(0, 2000)}…' : decisionBody}',
+        );
 
-      if (decisionResponse.statusCode != 200) {
-        appLogger.w('Transcode decision returned ${decisionResponse.statusCode}');
-        return (startPath: null, outcome: TranscodeDecisionOutcome.failed);
+        if (decisionResponse.statusCode != 200) {
+          appLogger.w('Transcode decision returned ${decisionResponse.statusCode}');
+          return (startPath: null, outcome: TranscodeDecisionOutcome.failed);
+        }
+
+        final outcome = _parseTranscodeDecisionOutcome(decisionResponse.data, isOriginal: isOriginal);
+        if (outcome == TranscodeDecisionOutcome.failed) {
+          return (startPath: null, outcome: outcome);
+        }
+
+        final startParams = Map<String, String>.from(allParams)..remove('X-Plex-Token');
+        final startQuery = startParams.entries.map((e) => '${_plexEncode(e.key)}=${_plexEncode(e.value)}').join('&');
+
+        // `.m3u8` tells the server to return an HLS manifest.
+        return (startPath: '/video/:/transcode/universal/start.m3u8?$startQuery', outcome: outcome);
+      } finally {
+        decisionClient.close();
       }
-
-      final outcome = _parseTranscodeDecisionOutcome(decisionResponse.data, isOriginal: isOriginal);
-      if (outcome == TranscodeDecisionOutcome.failed) {
-        return (startPath: null, outcome: outcome);
-      }
-
-      final startParams = Map<String, String>.from(allParams)..remove('X-Plex-Token');
-      final startQuery = startParams.entries.map((e) => '${_plexEncode(e.key)}=${_plexEncode(e.value)}').join('&');
-
-      // `.m3u8` tells the server to return an HLS manifest.
-      return (startPath: '/video/:/transcode/universal/start.m3u8?$startQuery', outcome: outcome);
     } catch (e, st) {
       appLogger.e('Failed to build transcode start path', error: e, stackTrace: st);
       return (startPath: null, outcome: TranscodeDecisionOutcome.failed);
@@ -2826,8 +3222,25 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
 
   @override
   Future<List<MediaItem>> fetchPlayableDescendants(String parentId) async {
-    final leaves = await _getGrandchildren(parentId);
+    final leaves = await _fetchAllPages(
+      (start, size, abort) => _getGrandchildrenPage(parentId, start: start, size: size, abort: abort),
+    );
     return leaves.map((m) => PlexMappers.mediaItem(m)).toList();
+  }
+
+  @override
+  Future<LibraryPage<MediaItem>> fetchPlayableDescendantsPage(
+    String parentId, {
+    int? start,
+    int? size,
+    AbortController? abort,
+  }) async {
+    final result = await _getGrandchildrenPage(parentId, start: start, size: size, abort: abort);
+    return LibraryPage<MediaItem>(
+      items: result.items.map((m) => PlexMappers.mediaItem(m)).toList(),
+      totalCount: result.totalSize,
+      offset: start ?? 0,
+    );
   }
 
   /// Plex maintains episode queues server-side via `/playQueues`, so the
@@ -3177,7 +3590,7 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
   }
 
   @override
-  Future<List<MediaItem>> searchItems(String query, {int limit = 30}) async {
+  Future<List<MediaItem>> searchItems(String query, {int limit = 100}) async {
     final results = await _search(query, limit: limit);
     return results.map((m) => PlexMappers.mediaItem(m)).toList();
   }
@@ -3189,22 +3602,28 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
   }
 
   @override
-  Future<List<MediaItem>> fetchContinueWatching({int count = 20}) async {
+  Future<List<MediaItem>> fetchContinueWatching({int? count = 20}) async {
     final items = await _getContinueWatching(count: count);
     return items.map((m) => PlexMappers.mediaItem(m)).toList();
   }
 
   @override
-  Future<List<MediaHub>> fetchGlobalHubs({int limit = 10}) async {
+  Future<List<MediaHub>> fetchGlobalHubs({int limit = 10, bool includePlaybackHubs = true}) async {
     final hubs = await _getGlobalHubs(limit: limit);
     return hubs.map((h) => PlexMappers.mediaHub(h)).toList();
   }
 
   @override
-  Future<List<MediaHub>> fetchLibraryHubs(String libraryId, {required String libraryName, int limit = 10}) async {
+  Future<List<MediaHub>> fetchLibraryHubs(
+    String libraryId, {
+    required String libraryName,
+    int limit = 10,
+    bool includePlaybackHubs = true,
+    MediaKind? libraryKind,
+  }) async {
     // libraryName is unused: Plex's /hubs/sections/{id} returns hubs already
     // titled per-library (e.g. "Recently Added in Movies").
-    final hubs = await _getLibraryHubs(libraryId, limit: limit);
+    final hubs = await _getLibraryHubs(libraryId, limit: limit, libraryName: libraryName);
     return hubs.map((h) => PlexMappers.mediaHub(h)).toList();
   }
 
@@ -3221,7 +3640,10 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
   Future<void> markUnwatched(MediaItem item) => markAsUnwatched(item.id, item: item);
 
   @override
-  Future<void> removeFromContinueWatching(MediaItem item) => removeFromOnDeck(item.id);
+  Future<void> removeFromContinueWatching(MediaItem item) async {
+    await removeFromOnDeck(item.id);
+    WatchStateNotifier().notifyRemovedFromContinueWatching(item: item);
+  }
 
   /// Rate a media item (0.0-10.0 scale, where each integer = half a star).
   /// Pass `-1` to clear an existing rating. Throws [MediaServerHttpException]
@@ -3242,6 +3664,28 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
   }
 
   @override
+  Future<LibraryPage<MediaPlaylist>> fetchPlaylistsPage({
+    String playlistType = 'video',
+    bool? smart,
+    int? start,
+    int? size,
+    AbortController? abort,
+  }) async {
+    final result = await _getPlaylistsPage(
+      playlistType: playlistType,
+      smart: smart,
+      start: start,
+      size: size,
+      abort: abort,
+    );
+    return LibraryPage<MediaPlaylist>(
+      items: result.items.map((p) => PlexMappers.mediaPlaylist(p)).toList(),
+      totalCount: result.totalSize,
+      offset: start ?? 0,
+    );
+  }
+
+  @override
   Future<MediaPlaylist?> fetchPlaylistMetadata(String id) async {
     final p = await _getPlaylistMetadata(id);
     return p == null ? null : PlexMappers.mediaPlaylist(p);
@@ -3249,21 +3693,23 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
 
   @override
   Future<List<MediaItem>> fetchPlaylistItems(String id, {int offset = 0, int limit = 100}) async {
-    final result = await _getPlaylist(id, start: offset, size: limit);
-    return result.items.map((m) => PlexMappers.mediaItem(m)).toList();
+    final page = await fetchPlaylistPage(id, start: offset, size: limit);
+    return page.items;
   }
 
-  /// Plex-specific: paginated playlist content. Returns neutral [MediaItem]s.
-  /// The total size from the server is needed for paginated UI; tests in
-  /// `playlist_detail_screen.dart` rely on this.
-  Future<({List<MediaItem> items, int totalSize})> fetchPlaylistPage(
+  @override
+  Future<LibraryPage<MediaItem>> fetchPlaylistPage(
     String playlistId, {
     int? start,
     int? size,
     AbortController? abort,
   }) async {
     final result = await _getPlaylist(playlistId, start: start, size: size, abort: abort);
-    return (items: result.items.map((m) => PlexMappers.mediaItem(m)).toList(), totalSize: result.totalSize);
+    return LibraryPage<MediaItem>(
+      items: result.items.map((m) => PlexMappers.mediaItem(m)).toList(),
+      totalCount: result.totalSize,
+      offset: start ?? 0,
+    );
   }
 
   @override
@@ -3273,13 +3719,37 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
   }
 
   @override
+  Future<LibraryPage<MediaItem>> fetchCollectionsPage(
+    String libraryId, {
+    int? start,
+    int? size,
+    AbortController? abort,
+  }) async {
+    final result = await _getLibraryCollectionsPage(libraryId, start: start, size: size, abort: abort);
+    return LibraryPage<MediaItem>(
+      items: result.items.map((m) => PlexMappers.mediaItem(m)).toList(),
+      totalCount: result.totalSize,
+      offset: start ?? 0,
+    );
+  }
+
+  @override
   Future<LibraryPage<MediaItem>> fetchCollectionPage(
     String collectionId, {
     int? start,
     int? size,
     AbortController? abort,
+    String? libraryId,
+    String? libraryTitle,
   }) async {
-    final result = await _getCollectionItems(collectionId, start: start, size: size, abort: abort);
+    final result = await _getCollectionItems(
+      collectionId,
+      start: start,
+      size: size,
+      abort: abort,
+      librarySectionID: libraryId,
+      librarySectionTitle: libraryTitle,
+    );
     return LibraryPage<MediaItem>(
       items: result.items.map((m) => PlexMappers.mediaItem(m)).toList(),
       totalCount: result.totalSize,
@@ -3288,8 +3758,16 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
   }
 
   /// Plex-specific: full collection contents across pages.
-  Future<List<MediaItem>> fetchAllCollectionItemsAsMediaItems(String collectionId) async {
-    final raw = await _fetchAllCollectionItemsDto(collectionId);
+  Future<List<MediaItem>> fetchAllCollectionItemsAsMediaItems(
+    String collectionId, {
+    String? libraryId,
+    String? libraryTitle,
+  }) async {
+    final raw = await _fetchAllCollectionItemsDto(
+      collectionId,
+      librarySectionID: libraryId,
+      librarySectionTitle: libraryTitle,
+    );
     return raw.map((m) => PlexMappers.mediaItem(m)).toList();
   }
 
@@ -3299,16 +3777,23 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
     return raw.map((m) => PlexMappers.mediaItem(m)).toList();
   }
 
-  /// Plex-specific: paginated person-media listing.
-  Future<({List<MediaItem> items, int totalSize})> fetchPersonMediaPage(
+  @override
+  Future<LibraryPage<MediaItem>> fetchPersonMediaPage(
     String personId, {
     int? start,
     int? size,
     AbortController? abort,
   }) async {
     final result = await _getPersonMedia(personId, start: start, size: size, abort: abort);
-    return (items: result.items.map((m) => PlexMappers.mediaItem(m)).toList(), totalSize: result.totalSize);
+    return LibraryPage<MediaItem>(
+      items: result.items.map((m) => PlexMappers.mediaItem(m)).toList(),
+      totalCount: result.totalSize,
+      offset: start ?? 0,
+    );
   }
+
+  @override
+  Future<List<MediaItem>> fetchPersonMedia(String personId) => fetchAllPersonMediaAsMediaItems(personId);
 
   /// Plex-specific: full person-media listing across pages.
   Future<List<MediaItem>> fetchAllPersonMediaAsMediaItems(String personId) async {
@@ -3325,6 +3810,21 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
   @override
   Future<List<MediaItem>> fetchMoreHubItems(String hubId, {int? limit}) => fetchHubContent(hubId);
 
+  @override
+  Future<LibraryPage<MediaItem>> fetchMoreHubItemsPage(
+    String hubId, {
+    int? start,
+    int? size,
+    AbortController? abort,
+  }) async {
+    final result = await _getHubContentPage(hubId, start: start, size: size, abort: abort);
+    return LibraryPage<MediaItem>(
+      items: result.items.map((m) => PlexMappers.mediaItem(m)).toList(),
+      totalCount: result.totalSize,
+      offset: start ?? 0,
+    );
+  }
+
   /// Plex-specific: top-level folders in a library.
   Future<List<MediaItem>> fetchLibraryFolders(String sectionId) async {
     final raw = await _getLibraryFolders(sectionId);
@@ -3332,8 +3832,8 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
   }
 
   /// Plex-specific: contents of a folder (files and subfolders).
-  Future<List<MediaItem>> fetchFolderChildren(String folderKey) async {
-    final raw = await _getFolderChildren(folderKey);
+  Future<List<MediaItem>> fetchFolderChildren(String folderKey, {String? libraryId, String? libraryTitle}) async {
+    final raw = await _getFolderChildren(folderKey, librarySectionID: libraryId, librarySectionTitle: libraryTitle);
     return raw.map((m) => PlexMappers.mediaItem(m)).toList();
   }
 
@@ -3484,7 +3984,7 @@ class PlexClient with MediaServerCacheMixin, _PlexLiveTvClientMethods implements
   // ── Downloads ────────────────────────────────────────────────────
 
   @override
-  Future<String?> resolveExternalPlaybackUrl(MediaItem item, {int mediaIndex = 0}) async {
+  Future<String?> resolveExternalPlaybackUrl(MediaItem item, {int mediaIndex = 0, String? mediaSourceId}) async {
     final playbackData = await getVideoPlaybackData(item.id, mediaIndex: mediaIndex);
     return playbackData.hasValidVideoUrl ? playbackData.videoUrl : null;
   }

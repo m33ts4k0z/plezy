@@ -14,7 +14,7 @@ class MpvPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, MpvPluginS
 
   // MpvPluginShared conformance
   var coreBase: MpvPlayerCoreBase? { playerCore }
-  func setPlayerVisible(_ visible: Bool) { playerCore?.setVisible(visible) }
+  func setPlayerVisible(_ visible: Bool, restoreOnWindowVisible _: Bool) { playerCore?.setVisible(visible) }
   func updatePlayerFrame() { playerCore?.updateFrame() }
 
   // PiP
@@ -81,6 +81,8 @@ class MpvPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, MpvPluginS
       handleObserveProperty(call: call, result: result)
     case "command":
       handleCommand(call: call, result: result)
+    case "setDisplayCriteria":
+      handleSetDisplayCriteria(call: call, result: result)
     case "setVisible":
       handleSetVisible(call: call, result: result)
     case "isInitialized":
@@ -96,9 +98,10 @@ class MpvPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, MpvPluginS
 
   // MARK: - PiP
 
-  private func ensurePipController() -> MpvPipController {
+  private func ensurePipController() -> MpvPipController? {
     if let existing = pipController { return existing }
-    let controller = MpvPipController()
+    guard let layer = playerCore?.sampleBufferDisplayLayer else { return nil }
+    let controller = MpvPipController(sampleBufferDisplayLayer: layer)
     controller.delegate = self
     pipController = controller
     return controller
@@ -158,7 +161,10 @@ class MpvPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, MpvPluginS
         if let args = call.arguments as? [String: Any], let ready = args["ready"] as? Bool {
           self.autoPipEnabled = ready
           if ready {
-            let pip = self.ensurePipController()
+            guard let pip = self.ensurePipController() else {
+              result(nil)
+              return
+            }
             pip.setAutoStart(true)
             // Warm the layer so the system considers PiP possible
             if let pc = self.playerCore {
@@ -175,16 +181,14 @@ class MpvPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, MpvPluginS
     }
   }
 
-  /// Switch to PiP VO and prepare the sample buffer layer for PiP display.
+  /// Prepare the shared AVFoundation display layer for PiP display.
   /// Returns the MpvPipController on success, nil on failure.
   @discardableResult
-  private func switchToPipAndPrepare() -> MpvPipController? {
+  private func preparePip() -> MpvPipController? {
     guard let playerCore = playerCore else { return nil }
-    let pip = ensurePipController()
-    guard playerCore.switchToPipVO(layerPtr: pip.layerPointer) else { return nil }
+    guard let pip = ensurePipController() else { return nil }
     pendingInlineRestoreAfterPip = false
     playerCore.isPipStarting = true
-    pip.pushBlankFrame()
     pip.syncTimebase(currentTime: playerCore.timePos, isPlaying: !playerCore.isPaused)
     pip.invalidatePlaybackState()
     return pip
@@ -205,10 +209,10 @@ class MpvPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, MpvPluginS
       ])
       return
     }
-    guard let pip = switchToPipAndPrepare() else {
+    guard let pip = preparePip() else {
       result?([
-        "success": false, "errorCode": "vo_switch_failed",
-        "errorMessage": "Failed to switch VO",
+        "success": false, "errorCode": "pip_prepare_failed",
+        "errorMessage": "Failed to prepare PiP",
       ])
       return
     }
@@ -232,15 +236,13 @@ class MpvPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, MpvPluginS
     playerCore?.isPipActive = false
     isManualPipRequest = false
     stopPipTimebaseSync()
-    pipController?.flushLayer()
-    let restoredInlineVO = playerCore?.switchToGpuNextVO() ?? false
     if pause {
       playerCore?.setPropertyAsync("pause", value: "yes") { [weak self] _ in
         self?.pipController?.invalidatePlaybackState()
         self?.syncPipTimebase()
       }
     }
-    pendingInlineRestoreAfterPip = restoredInlineVO
+    pendingInlineRestoreAfterPip = true
     if pendingInlineRestoreAfterPip {
       if isSceneActive {
         restoreInlinePlayerAfterPip()
@@ -363,6 +365,76 @@ class MpvPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, MpvPluginS
     }
   }
 
+  private func handleSetDisplayCriteria(call: FlutterMethodCall, result: @escaping FlutterResult) {
+    guard let args = call.arguments as? [String: Any] else {
+      result(FlutterError(code: "INVALID_ARGS", message: "Missing arguments", details: nil))
+      return
+    }
+
+    guard let core = playerCore else {
+      result(nil)
+      return
+    }
+
+    guard let raw = args["criteria"] as? [String: Any] else {
+      DispatchQueue.main.async {
+        core.setServerDisplayCriteria(nil)
+        result(nil)
+      }
+      return
+    }
+
+    let criteria = ServerDisplayCriteria(
+      doviProfile: int64Value(raw["doviProfile"]) ?? 0,
+      doviLevel: int64Value(raw["doviLevel"]) ?? 0,
+      doviCompatibilityId: int64Value(raw["doviCompatibilityId"]),
+      fps: doubleValue(raw["fps"]) ?? 0,
+      width: Int32(truncatingIfNeeded: int64Value(raw["width"]) ?? 0),
+      height: Int32(truncatingIfNeeded: int64Value(raw["height"]) ?? 0),
+      gamma: stringValue(raw["transfer"]),
+      primaries: stringValue(raw["primaries"]),
+      colorMatrix: stringValue(raw["matrix"])
+    )
+    DispatchQueue.main.async {
+      core.setServerDisplayCriteria(criteria)
+      result(nil)
+    }
+  }
+
+  private func int64Value(_ value: Any?) -> Int64? {
+    switch value {
+    case let value as Int64:
+      return value
+    case let value as Int:
+      return Int64(value)
+    case let value as NSNumber:
+      return value.int64Value
+    case let value as String:
+      return Int64(value)
+    default:
+      return nil
+    }
+  }
+
+  private func doubleValue(_ value: Any?) -> Double? {
+    switch value {
+    case let value as Double:
+      return value
+    case let value as NSNumber:
+      return value.doubleValue
+    case let value as String:
+      return Double(value)
+    default:
+      return nil
+    }
+  }
+
+  private func stringValue(_ value: Any?) -> String? {
+    guard let value else { return nil }
+    let string = String(describing: value).trimmingCharacters(in: .whitespacesAndNewlines)
+    return string.isEmpty ? nil : string
+  }
+
   // MARK: - Helpers
 
   private func findKeyWindow() -> UIWindow? {
@@ -393,11 +465,11 @@ class MpvPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, MpvPluginS
 extension MpvPlayerPlugin: MpvPipDelegate {
 
   func pipWillStart() {
-    // If PiP was system-initiated (not via our enterPip), switch VO now
+    // If PiP was system-initiated (not via our enterPip), prepare the shared layer now.
     guard let playerCore = playerCore, !playerCore.isPipStarting else { return }
-    print("[MpvPlayerPlugin] System-initiated PiP detected, switching VO")
-    if switchToPipAndPrepare() == nil {
-      print("[MpvPlayerPlugin] VO switch failed for system-initiated PiP")
+    print("[MpvPlayerPlugin] System-initiated PiP detected, preparing shared layer")
+    if preparePip() == nil {
+      print("[MpvPlayerPlugin] PiP preparation failed for system-initiated PiP")
       pipController?.stopPip()
     }
   }
@@ -432,13 +504,17 @@ extension MpvPlayerPlugin: MpvPipDelegate {
     }
   }
 
-  func pipSkip(byInterval seconds: Double) {
-    guard let playerCore = playerCore else { return }
+  func pipSkip(byInterval seconds: Double, completion: @escaping () -> Void) {
+    guard let playerCore = playerCore else {
+      completion()
+      return
+    }
     let newTime = max(0, playerCore.timePos + seconds)
-    playerCore.command(["seek", String(newTime), "absolute"])
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { [weak self] in
-      self?.syncPipTimebase()
-      self?.pipController?.invalidatePlaybackState()
+    playerCore.commandAsync(["seek", String(newTime), "absolute"]) { [weak self] _ in
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+        self?.pipController?.invalidatePlaybackState()
+        completion()
+      }
     }
   }
 

@@ -7,6 +7,7 @@ import '../../i18n/strings.g.dart';
 import '../../models/transcode_quality_preset.dart';
 import '../../mpv/player/platform/player_android.dart';
 import '../../utils/quality_preset_labels.dart';
+import '../../services/companion_remote/companion_remote_host_controller.dart';
 import '../../services/discord_rpc_service.dart';
 import '../../services/keyboard_shortcuts_service.dart';
 import '../../services/settings_service.dart';
@@ -58,6 +59,7 @@ class _PlaybackSettingsScreenState extends State<PlaybackSettingsScreen> {
         if (Platform.isWindows) _matchDynamicRangeTile(),
         _displaySwitchDelayTile(),
         _tunneledPlaybackTile(),
+        _dvConversionModeTile(),
         _bufferSizeTile(),
         _defaultQualityTile(),
 
@@ -139,6 +141,7 @@ class _PlaybackSettingsScreenState extends State<PlaybackSettingsScreen> {
             icon: Symbols.phone_android_rounded,
             title: t.settings.companionRemoteServer,
             subtitle: t.settings.companionRemoteServerDescription,
+            onAfterWrite: (v) => applyCompanionRemoteServerSetting(context, v),
           ),
         SettingSwitchTile(
           pref: SettingsService.rememberTrackSelections,
@@ -308,6 +311,31 @@ class _PlaybackSettingsScreenState extends State<PlaybackSettingsScreen> {
       );
     },
   );
+
+  Widget _dvConversionModeTile() => SettingValueBuilder<bool>(
+    pref: SettingsService.useExoPlayer,
+    builder: (_, useExo, _) {
+      if (!Platform.isAndroid || !useExo) return const SizedBox.shrink();
+      return SettingSelectionTile<DvConversionModePreference, DvConversionModePreference>(
+        pref: SettingsService.dvConversionMode,
+        icon: Symbols.hdr_strong_rounded,
+        title: t.settings.dvConversionMode,
+        subtitleBuilder: (mode) => '${_dvConversionModeLabel(mode)} · ${t.settings.dvConversionModeDescription}',
+        options: DvConversionModePreference.values
+            .map((m) => DialogOption(value: m, title: _dvConversionModeLabel(m)))
+            .toList(),
+        decode: (m) => m,
+        encode: (m) => m,
+      );
+    },
+  );
+
+  String _dvConversionModeLabel(DvConversionModePreference mode) => switch (mode) {
+    DvConversionModePreference.auto => t.settings.dvConversionAuto,
+    DvConversionModePreference.disabled => t.settings.dvConversionNative,
+    DvConversionModePreference.dv81 => t.settings.dvConversionDv81,
+    DvConversionModePreference.hevcStrip => t.settings.dvConversionHevcStrip,
+  };
 
   Widget _bufferSizeTile() {
     final bufferOptions = const [0, 64, 128, 256, 512, 1024];

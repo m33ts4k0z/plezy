@@ -2,6 +2,7 @@ part of '../../video_player_screen.dart';
 
 extension _VideoPlayerEpisodeNavigationMethods on VideoPlayerScreenState {
   Future<void> _playNext() async {
+    if (!mounted) return;
     if (_nextEpisode == null || _isLoadingNext) return;
 
     _autoPlayTimer?.cancel();
@@ -191,9 +192,7 @@ extension _VideoPlayerEpisodeNavigationMethods on VideoPlayerScreenState {
       _effectiveIsOffline = result.isOffline;
       _playbackPlaySessionId = result.playSessionId;
       _playbackPlayMethod = result.playMethod;
-      if (result.activeAudioStreamId != null) {
-        _selectedAudioStreamId = result.activeAudioStreamId;
-      }
+      _selectedAudioStreamId = result.activeAudioStreamId;
       if (result.fallbackReason != null && !_selectedQualityPreset.isOriginal) {
         if (mounted) {
           showErrorSnackBar(context, t.videoControls.transcodeUnavailableFallback);
@@ -213,6 +212,10 @@ extension _VideoPlayerEpisodeNavigationMethods on VideoPlayerScreenState {
 
       final hasExternalSubs = result.externalSubtitles.isNotEmpty;
       final isExoPlayer = player is PlayerAndroid;
+      final displayCriteria = result.mediaInfo?.displayCriteria;
+      await currentPlayer.setDisplayCriteria(
+        !result.isTranscoding && displayCriteria?.canPrimeNativeDisplayCriteria == true ? displayCriteria : null,
+      );
       await currentPlayer.open(
         Media(result.videoUrl!, start: resumePosition, headers: streamHeaders),
         play: isExoPlayer || !hasExternalSubs,

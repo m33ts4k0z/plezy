@@ -15,6 +15,7 @@ class TrackerContext {
   final bool isMovie;
   final int? season;
   final int? episodeNumber;
+  final int? animeProgress;
 
   /// Plex ratingKey of the item being played. Used only for logging — not
   /// sent to any tracker.
@@ -32,6 +33,7 @@ class TrackerContext {
     required this.libraryGlobalKey,
     this.season,
     this.episodeNumber,
+    this.animeProgress,
   });
 
   factory TrackerContext.movie({
@@ -56,6 +58,7 @@ class TrackerContext {
     required String? libraryGlobalKey,
     required int season,
     required int episodeNumber,
+    int? animeProgress,
   }) {
     return TrackerContext._(
       external: external,
@@ -65,6 +68,7 @@ class TrackerContext {
       libraryGlobalKey: libraryGlobalKey,
       season: season,
       episodeNumber: episodeNumber,
+      animeProgress: animeProgress,
     );
   }
 }

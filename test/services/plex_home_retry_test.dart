@@ -95,6 +95,68 @@ void main() {
       expect(httpClient.requests.map((r) => r.url.origin), everyElement(primary));
     });
 
+    test('fetchGlobalHubs uses promoted hub endpoint advertised by media providers', () async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      PlexApiCache.initialize(db);
+      addTearDown(db.close);
+
+      final httpClient = _SequenceClient([
+        (_) async => _jsonResponse(_mediaProvidersPayload()),
+        (_) async => _jsonResponse(_globalHubsPayload()),
+      ]);
+      final client = await PlexClient.create(
+        PlexConfig(
+          baseUrl: 'http://server:32400',
+          token: 'token',
+          clientIdentifier: 'client-id',
+          product: 'Plezy',
+          version: 'test',
+        ),
+        serverId: 'server-id',
+        serverName: 'Server',
+        httpClient: httpClient,
+        seedTranscoderVideoSupport: true,
+      );
+      addTearDown(client.close);
+
+      final hubs = await client.fetchGlobalHubs(limit: 12);
+
+      expect(hubs, hasLength(1));
+      expect(hubs.single.title, 'Recently Added Movies');
+      expect(httpClient.requests.map((r) => r.url.path), ['/media/providers', '/hubs/promoted']);
+      expect(httpClient.requests.last.url.queryParameters['count'], '12');
+    });
+
+    test('fetchContinueWatching omits count when uncapped', () async {
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      PlexApiCache.initialize(db);
+      addTearDown(db.close);
+
+      final httpClient = _SequenceClient([(_) async => _jsonResponse(_continueWatchingPayload())]);
+      final client = PlexClient.forTesting(
+        config: PlexConfig(
+          baseUrl: 'http://server:32400',
+          token: 'token',
+          clientIdentifier: 'client-id',
+          product: 'Plezy',
+          version: 'test',
+        ),
+        serverId: 'server-id',
+        serverName: 'Server',
+        httpClient: httpClient,
+      );
+      addTearDown(client.close);
+
+      final items = await client.fetchContinueWatching(count: null);
+
+      expect(items, hasLength(1));
+      expect(items.single.title, 'Movie A');
+      expect(httpClient.requests.single.url.path, '/hubs');
+      expect(httpClient.requests.single.url.queryParameters['identifier'], 'home.continue,home.ondeck');
+      expect(httpClient.requests.single.url.queryParameters.containsKey('count'), isFalse);
+      expect(httpClient.requests.single.url.queryParameters['includeGuids'], '1');
+    });
+
     test('fetchLibraryHubs retries transient failures without switching Plex endpoints', () async {
       final db = AppDatabase.forTesting(NativeDatabase.memory());
       PlexApiCache.initialize(db);
@@ -124,6 +186,8 @@ void main() {
       final hubs = await client.fetchLibraryHubs('4', libraryName: 'Movies', limit: 12);
 
       expect(hubs, hasLength(1));
+      expect(hubs.single.items.single.libraryId, '4');
+      expect(hubs.single.items.single.libraryTitle, 'Movies');
       expect(client.config.baseUrl, primary);
       expect(httpClient.requests, hasLength(2));
       expect(httpClient.requests.map((r) => r.url.origin), everyElement(primary));
@@ -152,6 +216,50 @@ Map<String, dynamic> _globalHubsPayload() => {
         'size': 1,
         'Metadata': [
           {'ratingKey': '1', 'type': 'movie', 'title': 'Movie A'},
+        ],
+      },
+    ],
+  },
+};
+
+Map<String, dynamic> _continueWatchingPayload() => {
+  'MediaContainer': {
+    'Hub': [
+      {
+        'key': '/hubs/home/continueWatching',
+        'title': 'Continue Watching',
+        'type': 'mixed',
+        'hubIdentifier': 'home.continue',
+        'size': 1,
+        'more': false,
+        'Metadata': [
+          {'ratingKey': '1', 'type': 'movie', 'title': 'Movie A'},
+        ],
+      },
+    ],
+  },
+};
+
+Map<String, dynamic> _mediaProvidersPayload() => {
+  'MediaContainer': {
+    'MediaProvider': [
+      {
+        'identifier': 'com.plexapp.plugins.library',
+        'Feature': [
+          {
+            'type': 'content',
+            'Directory': [
+              {'title': 'Home', 'hubKey': '/hubs'},
+              {
+                'id': '1',
+                'key': '/library/sections/1',
+                'hubKey': '/hubs/sections/1',
+                'type': 'movie',
+                'title': 'Movies',
+              },
+            ],
+          },
+          {'type': 'promoted', 'key': '/hubs/promoted'},
         ],
       },
     ],

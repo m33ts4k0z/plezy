@@ -1,4 +1,5 @@
 import Cocoa
+import QuartzCore
 
 /// Delegate to notify the plugin of PiP lifecycle events
 protocol MpvPipDelegate: AnyObject {
@@ -13,7 +14,7 @@ protocol MpvPipDelegate: AnyObject {
 }
 
 /// Encapsulates macOS Picture-in-Picture using the private PIP.framework (PIPViewController).
-/// This approach wraps the existing Metal rendering view in PiP — no VO switching needed.
+/// This approach wraps the existing Metal rendering layer in PiP — no VO switching needed.
 /// mpv continues rendering to its CAMetalLayer throughout PiP.
 class MpvPipController: NSObject, PIPViewControllerDelegate {
 
@@ -53,8 +54,7 @@ class MpvPipController: NSObject, PIPViewControllerDelegate {
     videoView.layer = metalLayer
 
     // Reset drawableSize to zero so it auto-derives from the layer's bounds.
-    // Without this, the explicit drawableSize set by updateFrame() (main window size)
-    // persists and causes mpv/MoltenVK to render at the wrong resolution in PiP.
+    // Without this, the explicit main-window drawableSize persists in PiP.
     metalLayer.drawableSize = .zero
 
     // Create a view controller for PIPViewController

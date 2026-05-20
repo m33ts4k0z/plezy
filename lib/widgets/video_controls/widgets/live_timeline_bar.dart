@@ -4,6 +4,7 @@ import '../../../models/livetv_capture_buffer.dart';
 import '../../../mpv/mpv.dart';
 import '../../../focus/focusable_wrapper.dart';
 import '../../../utils/formatters.dart';
+import '../../clickable_cursor.dart';
 
 /// Timeline bar for live TV time-shift.
 ///
@@ -67,6 +68,11 @@ class _LiveTimelineBarState extends State<LiveTimelineBar> {
     return (_rangeStart + (fraction * range).round()).clamp(_rangeStart, _rangeEnd);
   }
 
+  double _widthOf(BuildContext context) {
+    final renderObject = context.findRenderObject();
+    return renderObject is RenderBox ? renderObject.size.width : 0.0;
+  }
+
   @override
   Widget build(BuildContext context) {
     return StreamBuilder<Duration>(
@@ -127,19 +133,19 @@ class _LiveTimelineBarState extends State<LiveTimelineBar> {
       autoScroll: false,
       useBackgroundFocus: true,
       disableScale: true,
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          final width = constraints.maxWidth;
-          return GestureDetector(
-            onHorizontalDragStart: widget.enabled ? _onDragStart : null,
-            onHorizontalDragUpdate: widget.enabled ? (details) => _onDragUpdate(details, width) : null,
-            onHorizontalDragEnd: widget.enabled ? _onDragEnd : null,
-            onTapUp: widget.enabled ? (details) => _onTap(details, width) : null,
-            child: SizedBox(
-              height: 24,
-              child: CustomPaint(
-                size: Size(width, 24),
-                painter: _LiveTimelinePainter(positionFraction: positionFraction),
+      child: Builder(
+        builder: (context) {
+          return ClickableCursor(
+            enabled: widget.enabled,
+            child: GestureDetector(
+              onHorizontalDragStart: widget.enabled ? (_) => _onDragStart() : null,
+              onHorizontalDragUpdate: widget.enabled ? (details) => _onDragUpdate(details, _widthOf(context)) : null,
+              onHorizontalDragEnd: widget.enabled ? (_) => _onDragEnd() : null,
+              onTapUp: widget.enabled ? (details) => _onTap(details, _widthOf(context)) : null,
+              child: SizedBox(
+                width: double.infinity,
+                height: 24,
+                child: CustomPaint(painter: _LiveTimelinePainter(positionFraction: positionFraction)),
               ),
             ),
           );
@@ -148,7 +154,7 @@ class _LiveTimelineBarState extends State<LiveTimelineBar> {
     );
   }
 
-  void _onDragStart(DragStartDetails details) {
+  void _onDragStart() {
     setState(() {
       _isDragging = true;
       _dragPositionEpoch = _currentEpoch(widget.player.state.position);
@@ -163,7 +169,7 @@ class _LiveTimelineBarState extends State<LiveTimelineBar> {
     });
   }
 
-  void _onDragEnd(DragEndDetails details) {
+  void _onDragEnd() {
     final target = _dragPositionEpoch;
     setState(() => _isDragging = false);
     widget.onSeekEnd?.call(target);

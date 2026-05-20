@@ -1,5 +1,6 @@
 import 'dart:io' show Platform;
 
+import '../../media/media_display_criteria.dart';
 import '../models.dart';
 import 'platform/player_android.dart';
 import 'player_native.dart';
@@ -146,6 +147,10 @@ abstract class Player {
   /// [args] - Command and arguments as a list of strings.
   Future<void> command(List<String> args);
 
+  /// Prime native display matching from server metadata before the decoder
+  /// emits stream properties. Unsupported platforms ignore this.
+  Future<void> setDisplayCriteria(MediaDisplayCriteria? criteria);
+
   /// Configure subtitle fonts for libass rendering.
   ///
   /// Extracts a comprehensive Unicode font (Go Noto) to the cache directory
@@ -163,8 +168,12 @@ abstract class Player {
   /// On macOS, this controls the Metal layer visibility.
   /// On other platforms, this may have no effect.
   ///
+  /// When [restoreOnWindowVisible] is true, macOS may restore the layer as soon
+  /// as AppKit reports the window visible again instead of waiting for Dart's
+  /// lifecycle resume callback.
+  ///
   /// Returns true if the operation was successful.
-  Future<bool> setVisible(bool visible);
+  Future<bool> setVisible(bool visible, {bool restoreOnWindowVisible = false});
 
   /// Update the video frame/surface dimensions.
   ///

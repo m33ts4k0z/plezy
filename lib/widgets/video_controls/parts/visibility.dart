@@ -163,6 +163,11 @@ extension _PlexVideoControlsVisibilityMethods on _PlexVideoControlsState {
 
   /// Show controls in response to pointer activity (mouse/trackpad movement).
   void _showControlsFromPointerActivity() {
+    final nowMs = _pointerActivityStopwatch.elapsedMilliseconds;
+    final shouldThrottle = _showControls && nowMs - _lastPointerActivityMs < 120;
+    if (shouldThrottle) return;
+    _lastPointerActivityMs = nowMs;
+
     if (!_showControls) {
       _setControlsState(() {
         _showControls = true;
@@ -251,7 +256,7 @@ extension _PlexVideoControlsVisibilityMethods on _PlexVideoControlsState {
     // When maximized or fullscreen, always keep traffic lights visible so the
     // user can reach them without the controls-hide-on-mouse-leave race.
     // In normal windowed mode, toggle with controls as before.
-    final isMaximizedOrFullscreen = await windowManager.isMaximized() || await windowManager.isFullScreen();
+    final isMaximizedOrFullscreen = await windowManager.isMaximized() || await MacOSWindowService.isFullscreen();
     if (!mounted || generation != _trafficLightVisibilityGeneration) return;
     final visible = isMaximizedOrFullscreen || _forceShowControls ? true : _showControls;
     await MacOSWindowService.setTrafficLightsVisible(visible);
@@ -339,6 +344,7 @@ extension _PlexVideoControlsVisibilityMethods on _PlexVideoControlsState {
 
     if (requestFocus) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
         _desktopControlsKey.currentState?.requestPlayPauseFocus();
       });
     } else {
@@ -367,6 +373,7 @@ extension _PlexVideoControlsVisibilityMethods on _PlexVideoControlsState {
     _startHideTimer();
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
       _desktopControlsKey.currentState?.requestTimelineFocus();
     });
   }
@@ -374,13 +381,13 @@ extension _PlexVideoControlsVisibilityMethods on _PlexVideoControlsState {
   /// Hide controls when navigating up from timeline (keyboard mode)
   /// If skip marker button or Play Next dialog is visible, focus it instead of hiding controls
   void _hideControlsFromKeyboard() {
-    if (_currentMarker != null) {
-      _skipMarkerFocusNode.requestFocus();
+    if (widget.playNextFocusNode != null) {
+      widget.playNextFocusNode!.requestFocus();
       return;
     }
 
-    if (widget.playNextFocusNode != null) {
-      widget.playNextFocusNode!.requestFocus();
+    if (_currentMarker != null) {
+      _skipMarkerFocusNode.requestFocus();
       return;
     }
 

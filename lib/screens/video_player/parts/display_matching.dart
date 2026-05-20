@@ -47,6 +47,9 @@ extension _VideoPlayerDisplayMatchingMethods on VideoPlayerScreenState {
       }
 
       final didSwitch = await player!.setVideoFrameRate(fps, durationMs, extraDelayMs: delaySec * 1000);
+      if (didSwitch) {
+        await _refreshAndroidMpvDecoderAfterFrameRateSwitch(reason: 'post-first-frame display switch');
+      }
 
       if (mounted && player != null) {
         await player!.play();
@@ -63,6 +66,34 @@ extension _VideoPlayerDisplayMatchingMethods on VideoPlayerScreenState {
       appLogger.d('Frame rate matching: Set display to ${fps}fps (duration: ${durationMs}ms, switched=$didSwitch)');
     } catch (e) {
       appLogger.w('Failed to apply frame rate matching', error: e);
+    }
+  }
+
+  Future<void> _refreshAndroidMpvDecoderAfterFrameRateSwitch({required String reason}) async {
+    final p = player;
+    if (!mounted || !Platform.isAndroid || p == null || p is PlayerAndroid) return;
+
+    // Subscribe before flushing so the broadcast event isn't dropped when
+    // the restart fires synchronously fast.
+    var timedOut = false;
+    final restartFuture = p.streams.playbackRestart.first.timeout(
+      const Duration(seconds: 4),
+      onTimeout: () {
+        timedOut = true;
+      },
+    );
+    final sw = Stopwatch()..start();
+    try {
+      appLogger.d('Frame rate matching: flushing Android MPV buffers ($reason, command=drop-buffers)');
+      await p.command(['drop-buffers']);
+      await restartFuture;
+      appLogger.d(
+        'Frame rate matching: flushed Android MPV buffers '
+        '($reason, waited=${sw.elapsedMilliseconds}ms, '
+        'gate=${timedOut ? 'timeout' : 'playback-restart'})',
+      );
+    } catch (e) {
+      appLogger.w('Failed to flush Android MPV buffers after frame rate switch ($reason)', error: e);
     }
   }
 
@@ -84,13 +115,18 @@ extension _VideoPlayerDisplayMatchingMethods on VideoPlayerScreenState {
     if (player == null || _displayModeService == null) return;
 
     try {
+      final displayCriteria = _isTranscoding ? null : _currentMediaInfo?.displayCriteria;
       final fpsStr = await player!.getProperty('container-fps');
-      final fps = double.tryParse(fpsStr ?? '');
+      final fallbackFps = double.tryParse(fpsStr ?? '');
 
       final sigPeakStr = await player!.getProperty('video-params/sig-peak');
       final sigPeak = double.tryParse(sigPeakStr ?? '');
 
-      final delay = await _displayModeService!.applyDisplayMatching(fps: fps, sigPeak: sigPeak);
+      final delay = await _displayModeService!.applyDisplayMatching(
+        criteria: displayCriteria,
+        fallbackFps: fallbackFps,
+        fallbackSigPeak: sigPeak,
+      );
 
       if (delay > Duration.zero) {
         await Future.delayed(delay);

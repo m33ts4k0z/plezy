@@ -1,4 +1,6 @@
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:plezy/models/hotkey_model.dart';
 import 'package:plezy/services/settings_service.dart';
 import 'package:plezy/services/trackers/tracker_constants.dart';
 
@@ -61,6 +63,40 @@ void main() {
     });
   });
 
+  group('SettingsService keyboard shortcut defaults', () {
+    test('includes Ctrl+S screenshot shortcut', () {
+      expect(SettingsService.defaultKeyboardShortcuts()['screenshot'], 'Ctrl+S');
+
+      final hotkey = SettingsService.defaultKeyboardHotkeys()['screenshot'];
+      expect(hotkey, isNotNull);
+      expect(hotkey!.key, PhysicalKeyboardKey.keyS);
+      expect(hotkey.modifiers, [HotKeyModifier.control]);
+    });
+  });
+
+  group('SettingsService companion remote prefs', () {
+    test('last manual host address trims whitespace and drops blanks', () async {
+      final settings = await SettingsService.getInstance();
+
+      await settings.write(SettingsService.companionRemoteLastHostAddress, '  192.168.1.10:48632  ');
+      expect(settings.read(SettingsService.companionRemoteLastHostAddress), '192.168.1.10:48632');
+
+      await settings.write(SettingsService.companionRemoteLastHostAddress, '   ');
+      expect(settings.read(SettingsService.companionRemoteLastHostAddress), isNull);
+    });
+
+    test('resetAllSettings clears the last manual host address', () async {
+      final settings = await SettingsService.getInstance();
+
+      await settings.write(SettingsService.companionRemoteLastHostAddress, '192.168.1.10:48632');
+      expect(settings.read(SettingsService.companionRemoteLastHostAddress), isNotNull);
+
+      await settings.resetAllSettings();
+
+      expect(settings.read(SettingsService.companionRemoteLastHostAddress), isNull);
+    });
+  });
+
   group('SettingsService listenables', () {
     test('refreshListenables updates active prefs outside the resettable surface', () async {
       final settings = await SettingsService.getInstance();
@@ -93,6 +129,22 @@ void main() {
 
       expect(mode.value, TrackerLibraryFilterMode.blacklist);
       expect(ids.value, isEmpty);
+    });
+
+    test('tracker library filter only allows unknown libraries when no filter is configured', () async {
+      final settings = await SettingsService.getInstance();
+      final modePref = SettingsService.trackerFilterModePref(TrackerService.trakt);
+      final idsPref = SettingsService.trackerFilterIdsPref(TrackerService.trakt);
+
+      expect(settings.isLibraryAllowedForTracker(TrackerService.trakt, null), isTrue);
+
+      await settings.write(idsPref, ['server:blocked']);
+      expect(settings.isLibraryAllowedForTracker(TrackerService.trakt, null), isFalse);
+
+      await settings.write(modePref, TrackerLibraryFilterMode.whitelist);
+      await settings.write(idsPref, ['server:allowed']);
+      expect(settings.isLibraryAllowedForTracker(TrackerService.trakt, null), isFalse);
+      expect(settings.isLibraryAllowedForTracker(TrackerService.trakt, 'server:allowed'), isTrue);
     });
   });
 }

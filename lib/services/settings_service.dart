@@ -35,6 +35,17 @@ enum EpisodePosterMode { seriesPoster, seasonPoster, episodeThumbnail }
 
 enum SubAssOverride { no, yes, scale, force, strip }
 
+enum DvConversionModePreference { auto, disabled, dv81, hevcStrip }
+
+extension DvConversionModePreferenceNativeValue on DvConversionModePreference {
+  String get nativeValue => switch (this) {
+    DvConversionModePreference.auto => 'auto',
+    DvConversionModePreference.disabled => 'disabled',
+    DvConversionModePreference.dv81 => 'dv81',
+    DvConversionModePreference.hevcStrip => 'hevc_strip',
+  };
+}
+
 const String _bufferSizeMigratedKey = 'buffer_size_migrated_to_auto';
 const String _legacyUseSeasonPosterKey = 'use_season_poster';
 const String _legacyMpvConfigEntriesKey = 'mpv_config_entries';
@@ -207,6 +218,7 @@ Map<String, String> _defaultKeyboardShortcuts() => {
   'speed_reset': 'R',
   'sub_seek_next': 'Ctrl+Right',
   'sub_seek_prev': 'Ctrl+Left',
+  'screenshot': 'Ctrl+S',
 };
 
 Map<String, HotKey> _defaultKeyboardHotkeys() => {
@@ -233,6 +245,7 @@ Map<String, HotKey> _defaultKeyboardHotkeys() => {
   'sub_seek_prev': const HotKey(key: PhysicalKeyboardKey.arrowLeft, modifiers: [HotKeyModifier.control]),
   'shader_toggle': const HotKey(key: PhysicalKeyboardKey.keyG),
   'skip_marker': const HotKey(key: PhysicalKeyboardKey.enter),
+  'screenshot': const HotKey(key: PhysicalKeyboardKey.keyS, modifiers: [HotKeyModifier.control]),
 };
 
 Map<String, String> _decodeKeyboardShortcuts(dynamic raw) {
@@ -271,6 +284,7 @@ class SettingsService extends BaseSharedPreferencesService {
   static const sleepTimerDuration = IntPref('sleep_timer_duration', defaultValue: 30);
   static const audioSyncOffset = IntPref('audio_sync_offset');
   static const subtitleSyncOffset = IntPref('subtitle_sync_offset');
+  static const subtitleSearchLanguage = NullableStringPref('subtitle_search_language');
   static const volume = DoublePref('volume', defaultValue: 100.0);
   static const rotationLocked = BoolPref('rotation_locked', defaultValue: true);
   static const subtitleFontSize = IntPref('subtitle_font_size', defaultValue: 38);
@@ -286,6 +300,7 @@ class SettingsService extends BaseSharedPreferencesService {
   );
   static const subtitleBold = BoolPref('subtitle_bold');
   static const subtitleItalic = BoolPref('subtitle_italic');
+  static const cleanedOldImageCache = BoolPref('cleaned_old_image_cache');
   static const rememberTrackSelections = BoolPref('remember_track_selections', defaultValue: true);
   static const showChapterMarkersOnTimeline = BoolPref('show_chapter_markers_on_timeline', defaultValue: true);
   static const clickVideoTogglesPlayback = BoolPref('click_video_toggles_playback');
@@ -309,6 +324,11 @@ class SettingsService extends BaseSharedPreferencesService {
   static const enableSimklScrobble = BoolPref('enable_simkl_scrobble', defaultValue: true);
   static const matchContentFrameRate = BoolPref('match_content_frame_rate');
   static const tunneledPlayback = BoolPref('tunneled_playback', defaultValue: true);
+  static const dvConversionMode = EnumPref<DvConversionModePreference>(
+    'dv_conversion_mode',
+    values: DvConversionModePreference.values,
+    defaultValue: DvConversionModePreference.auto,
+  );
   static const defaultQualityPreset = EnumPref<TranscodeQualityPreset>(
     'default_quality_preset',
     values: TranscodeQualityPreset.values,
@@ -337,6 +357,10 @@ class SettingsService extends BaseSharedPreferencesService {
   static const customDownloadPath = NullableStringPref('custom_download_path');
   static final customRelayUrl = NullableStringPref('custom_relay_url', transform: _trimEmptyAsNull);
   static const recentRooms = NullableStringPref('watch_together_recent_rooms');
+  static final companionRemoteLastHostAddress = NullableStringPref(
+    'companion_remote_last_host_address',
+    transform: _trimEmptyAsNull,
+  );
 
   static final maxVolume = IntPref('max_volume', defaultValue: 100, transform: (v) => v.clamp(100, 300));
   static final subtitlePosition = IntPref('subtitle_position', defaultValue: 100, transform: (v) => v.clamp(0, 100));
@@ -445,11 +469,14 @@ class SettingsService extends BaseSharedPreferencesService {
   static Map<String, String> defaultKeyboardShortcuts() => _defaultKeyboardShortcuts();
   static Map<String, HotKey> defaultKeyboardHotkeys() => _defaultKeyboardHotkeys();
 
-  /// Null keys bypass the filter so we err on the side of syncing.
+  /// Unknown libraries are allowed only when no filter is configured.
   bool isLibraryAllowedForTracker(TrackerService service, String? libraryGlobalKey) {
-    if (libraryGlobalKey == null) return true;
-    final inList = read(trackerFilterIdsPref(service)).contains(libraryGlobalKey);
+    final filterIds = read(trackerFilterIdsPref(service));
     final mode = read(trackerFilterModePref(service));
+    if (libraryGlobalKey == null) {
+      return mode == TrackerLibraryFilterMode.blacklist && filterIds.isEmpty;
+    }
+    final inList = filterIds.contains(libraryGlobalKey);
     return mode == TrackerLibraryFilterMode.blacklist ? !inList : inList;
   }
 
@@ -655,6 +682,7 @@ class SettingsService extends BaseSharedPreferencesService {
     sleepTimerDuration,
     audioSyncOffset,
     subtitleSyncOffset,
+    subtitleSearchLanguage,
     volume,
     maxVolume,
     subtitleFontSize,
@@ -678,6 +706,7 @@ class SettingsService extends BaseSharedPreferencesService {
     enableSimklScrobble,
     matchContentFrameRate,
     tunneledPlayback,
+    dvConversionMode,
     defaultPlaybackSpeed,
     defaultBoxFitMode,
     autoPlayNextEpisode,
@@ -711,6 +740,7 @@ class SettingsService extends BaseSharedPreferencesService {
     selectedExternalPlayer,
     customExternalPlayers,
     customRelayUrl,
+    companionRemoteLastHostAddress,
   ];
 
   Future<void> resetAllSettings() async {

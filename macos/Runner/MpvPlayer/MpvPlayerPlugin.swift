@@ -13,7 +13,9 @@ class MpvPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, MpvPluginS
 
   // MpvPluginShared conformance
   var coreBase: MpvPlayerCoreBase? { playerCore }
-  func setPlayerVisible(_ visible: Bool) { playerCore?.setVisible(visible) }
+  func setPlayerVisible(_ visible: Bool, restoreOnWindowVisible: Bool) {
+    playerCore?.setVisible(visible, restoreOnWindowVisible: restoreOnWindowVisible)
+  }
   func updatePlayerFrame() { playerCore?.updateFrame() }
 
   // PiP
@@ -159,7 +161,7 @@ class MpvPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, MpvPluginS
   }
 
   /// Enter PiP by moving the Metal rendering layer to a PiP window.
-  /// No VO switching — mpv keeps rendering to the same Metal layer.
+  /// No VO switching — mpv keeps rendering to the same layer.
   private func enterPip(manual: Bool, result: FlutterResult? = nil) {
     guard let playerCore = playerCore else {
       result?([
@@ -167,8 +169,8 @@ class MpvPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, MpvPluginS
       ])
       return
     }
-    guard let metalLayer = playerCore.videoLayer else {
-      result?(["success": false, "errorCode": "failed", "errorMessage": "No video layer"])
+    guard let metalLayer = playerCore.metalLayer else {
+      result?(["success": false, "errorCode": "failed", "errorMessage": "No Metal layer"])
       return
     }
     guard let window = findFlutterWindow()?.0 else {

@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 import 'package:cached_network_image_ce/cached_network_image.dart';
 import '../../../media/library_first_character.dart';
 import '../../../media/library_query.dart';
+import '../../../media/media_backend.dart';
 import '../../../media/media_item.dart';
 import '../../../providers/multi_server_provider.dart';
 import '../../../utils/media_server_http_client.dart';
@@ -19,6 +20,7 @@ import '../../../services/image_cache_service.dart';
 import '../../../services/library_query_translator.dart';
 import '../../../services/plex_constants.dart';
 import '../../../utils/error_message_utils.dart';
+import '../../../utils/app_logger.dart';
 import '../../../utils/grid_size_calculator.dart';
 import '../../../utils/layout_constants.dart';
 import '../../../utils/media_image_helper.dart';
@@ -27,11 +29,13 @@ import '../alpha_jump_bar.dart';
 import '../alpha_jump_helper.dart';
 import '../alpha_scroll_handle.dart';
 import '../library_alpha_bar_strategy.dart';
+import '../library_alpha_scroll_metrics.dart';
 import '../library_filter_sort_loader.dart';
 import '../../../widgets/focusable_media_card.dart';
 import '../../../widgets/focusable_filter_chip.dart';
 import '../../../widgets/loading_indicator_box.dart';
 import '../../../widgets/media_grid_delegate.dart';
+import '../../../widgets/media_card_list_layout.dart';
 import '../../../widgets/overlay_sheet.dart';
 import '../../../mixins/library_tab_focus_mixin.dart';
 import '../folder_tree_view.dart';
@@ -44,11 +48,13 @@ import '../../../services/storage_service.dart';
 import '../../../services/settings_service.dart';
 import '../../../mixins/grid_focus_node_mixin.dart';
 import '../../../mixins/item_updatable.dart';
+import '../../../mixins/watch_state_aware.dart';
 import '../../../mixins/deletion_aware.dart';
 import '../../../mixins/paginated_item_loader.dart';
 import '../../../widgets/skeleton_media_card.dart';
 import '../../../utils/deletion_notifier.dart';
 import '../../../utils/global_key_utils.dart';
+import '../../../utils/watch_state_notifier.dart';
 import '../../../utils/platform_detector.dart';
 import '../../../i18n/strings.g.dart';
 import '../../main_screen.dart';
@@ -79,7 +85,13 @@ class LibraryBrowseTab extends BaseLibraryTab<MediaItem> {
 }
 
 class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrowseTab>
-    with ItemUpdatable, LibraryTabFocusMixin, GridFocusNodeMixin, DeletionAware, PaginatedItemLoader<LibraryBrowseTab> {
+    with
+        ItemUpdatable,
+        LibraryTabFocusMixin,
+        GridFocusNodeMixin,
+        WatchStateAware,
+        DeletionAware,
+        PaginatedItemLoader<MediaItem, LibraryBrowseTab> {
   @override
   String? get itemServerId => widget.library.serverId;
 
@@ -88,6 +100,25 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
 
   @override
   String? get deletionServerId => widget.library.serverId;
+
+  @override
+  String? get watchStateServerId => widget.library.serverId;
+
+  @override
+  Set<String>? get watchedIds => loadedItems.values.map((e) => e.id).toSet();
+
+  @override
+  Set<String>? get watchedGlobalKeys {
+    if (loadedItems.isEmpty) return <String>{};
+
+    final keys = <String>{};
+    for (final item in loadedItems.values) {
+      final serverId = item.serverId ?? widget.library.serverId;
+      if (serverId == null) return null;
+      keys.add(_toGlobalKey(item.id, serverId: serverId));
+    }
+    return keys;
+  }
 
   @override
   Set<String>? get deletionIds => loadedItems.values.map((e) => e.id).toSet();
@@ -103,6 +134,21 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
       keys.add(_toGlobalKey(item.id, serverId: serverId));
     }
     return keys;
+  }
+
+  @override
+  void onWatchStateChanged(WatchStateEvent event) {
+    if (event.changeType == WatchStateChangeType.progressUpdate ||
+        event.changeType == WatchStateChangeType.removedFromContinueWatching) {
+      return;
+    }
+
+    final affectedIds = {event.itemId, ...event.parentChain};
+    for (final item in loadedItems.values) {
+      if (affectedIds.contains(item.id)) {
+        unawaited(updateItem(item.id));
+      }
+    }
   }
 
   @override
@@ -152,14 +198,12 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
 
   @override
   void updateItemInLists(String itemId, MediaItem updatedMetadata) {
-    setState(() {
-      for (final entry in loadedItems.entries) {
-        if (entry.value.id == itemId) {
-          loadedItems[entry.key] = updatedMetadata;
-          break;
-        }
+    for (final entry in loadedItems.entries) {
+      if (entry.value.id == itemId) {
+        loadedItems[entry.key] = updatedMetadata;
+        break;
       }
-    });
+    }
   }
 
   // Browse-specific state (not in base class)
@@ -173,17 +217,7 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
   // Alpha jump bar state
   List<LibraryFirstCharacter> _firstCharacters = [];
   AlphaJumpHelper _alphaHelper = AlphaJumpHelper(const []);
-  late final LibraryAlphaBarStrategy _alphaStrategy = LibraryAlphaBarStrategy.forBackend(
-    widget.library.backend,
-    // Resolved on demand and only invoked by [PlexAlphaBarStrategy], which is
-    // only constructed when the library's backend is Plex — the bang is safe.
-    plexClientProvider: () {
-      final manager = context.read<MultiServerProvider>().serverManager;
-      return manager.getPlexClient(widget.library.serverId ?? '')!;
-    },
-    libraryKey: widget.library.id,
-    isShared: widget.library.isShared,
-  );
+  late LibraryAlphaBarStrategy _alphaStrategy = _createAlphaStrategy();
 
   /// On Jellyfin libraries the alpha bar acts as a filter (matches the
   /// JF web client's UX). Holds the active letter (`#`, `A`–`Z`) or null
@@ -195,9 +229,12 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
   /// doesn't need to call back into a Plex client for value listings.
   Map<String, List<MediaFilterValue>> _jellyfinFilterValues = const {};
   final ValueNotifier<int> _currentFirstVisibleIndex = ValueNotifier<int>(0);
-  int _currentColumnCount = 1;
-  double _lastCrossAxisExtent = 0;
+  LibraryAlphaScrollMetrics _scrollMetrics = LibraryAlphaScrollMetrics.empty;
   double _effectiveTopPadding = _gridTopPadding;
+  final GlobalKey _firstListItemKey = GlobalKey(debugLabel: 'first_library_list_item');
+  double? _measuredListRowHeight;
+  int? _listMetricsDensity;
+  bool? _listMetricsUsesWideRatio;
   final FocusNode _alphaJumpBarFocusNode = FocusNode(debugLabel: 'alpha_jump_bar');
   // When the user taps a letter, pin the highlight so scroll-based recalculation
   // doesn't immediately override it (e.g. when the letter has fewer items than a full row).
@@ -222,9 +259,42 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
   int _contentRequestId = 0;
   int _firstCharactersRequestId = 0;
   static const int _fetchSize = 200;
+  static const int _jellyfinFetchSize = 72;
   Timer? _scrollIdleTimer;
   bool _rangeLoadScheduled = false;
   bool _topScrollResetScheduled = false;
+
+  LibraryAlphaBarStrategy _createAlphaStrategy() {
+    final library = widget.library;
+    return LibraryAlphaBarStrategy.forBackend(
+      library.backend,
+      // Resolved on demand and only invoked by [PlexAlphaBarStrategy], which is
+      // only constructed when the library's backend is Plex — the bang is safe.
+      plexClientProvider: () {
+        final manager = context.read<MultiServerProvider>().serverManager;
+        return manager.getPlexClient(library.serverId ?? '')!;
+      },
+      libraryKey: library.id,
+      isShared: library.isShared,
+    );
+  }
+
+  @override
+  void didUpdateWidget(covariant LibraryBrowseTab oldWidget) {
+    // BaseLibraryTabState reloads during super.didUpdateWidget; refresh this
+    // first so first-character requests target the new backend/library.
+    if (oldWidget.library.globalKey != widget.library.globalKey ||
+        oldWidget.library.id != widget.library.id ||
+        oldWidget.library.backend != widget.library.backend ||
+        oldWidget.library.serverId != widget.library.serverId ||
+        oldWidget.library.isShared != widget.library.isShared) {
+      _alphaStrategy = _createAlphaStrategy();
+    }
+    super.didUpdateWidget(oldWidget);
+  }
+
+  bool get _isJellyfinLibrary => widget.library.backend == MediaBackend.jellyfin;
+  int get _activeFetchSize => _isJellyfinLibrary ? _jellyfinFetchSize : _fetchSize;
 
   // Focus nodes for filter chips
   final FocusNode _groupingChipFocusNode = FocusNode(debugLabel: 'grouping_chip');
@@ -342,7 +412,7 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
   }
 
   /// Height of the chips bar (padding + chip + padding)
-  static const double _chipsBarHeight = 48.0;
+  static const double _chipsBarHeight = 32.0;
 
   /// Focus the chips bar (for navigating from tab bar to content).
   /// Called by libraries screen when pressing DOWN on tab bar.
@@ -360,6 +430,7 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
     _isJumpScrolling = false;
     _jumpScrollGeneration++;
     _currentFirstVisibleIndex.value = 0;
+    _measuredListRowHeight = null;
 
     // The browse tab state is kept alive across libraries, so ensure this
     // tab's scroll resets to 0 (other tabs keep their own positions). Defer
@@ -399,17 +470,28 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
     // `/sorts`; Jellyfin maps `/Items/Filters` into the same shape with
     // values pre-cached and a hardcoded client-side sort list. Both flow
     // through the unified [MediaServerClient.fetchLibraryFiltersWithValues].
-    final loader = LibraryFilterSortLoader(clientFor: context.getMediaClientForLibrary);
+    final client = context.getMediaClientForLibrary(widget.library);
+    final loader = LibraryFilterSortLoader(clientFor: (_) => client);
 
     try {
-      // Filters+sorts must resolve before items so the saved-sort restoration
-      // can match a saved key against the just-loaded sort list, and so the
-      // first item fetch already includes the restored sort param.
-      final loaded = await loader.load(widget.library);
       final storage = await StorageService.getInstance();
       final savedFilters = storage.getLibraryFilters(sectionId: widget.library.globalKey);
       final savedSort = storage.getLibrarySort(widget.library.globalKey);
       final savedGrouping = storage.getLibraryGrouping(widget.library.globalKey);
+
+      final LoadedFiltersAndSorts loaded;
+      if (_isJellyfinLibrary) {
+        // `/Items/Filters` can be much slower than the paged `/Items` browse
+        // request on large Jellyfin libraries. Load only the local sort list
+        // before page 1, then fill filter values in the background.
+        final sorts = await client.fetchSortOptions(widget.library.id, libraryType: widget.library.kind.id);
+        loaded = LoadedFiltersAndSorts(filters: const [], sorts: sorts);
+      } else {
+        // Plex filters+sorts must resolve before items so saved-sort restoration
+        // can match a saved key against the just-loaded sort list, and so the
+        // first item fetch already includes the restored sort param.
+        loaded = await loader.load(widget.library);
+      }
 
       if (generation != _contentRequestId || !mounted) return;
       setState(() {
@@ -434,6 +516,10 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
         }
       });
 
+      if (_isJellyfinLibrary) {
+        _loadJellyfinFiltersInBackground(generation);
+      }
+
       // Load items and first characters in parallel
       // _loadItems manages its own requestId internally
       await Future.wait([_loadItems(), _loadFirstCharacters(requestId: firstCharactersGeneration)]);
@@ -446,6 +532,24 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
     }
   }
 
+  void _loadJellyfinFiltersInBackground(int generation) {
+    final client = context.getMediaClientForLibrary(widget.library);
+    unawaited(
+      client
+          .fetchLibraryFiltersWithValues(widget.library.id)
+          .then((result) {
+            if (generation != _contentRequestId || !mounted) return;
+            setState(() {
+              _filters = result.filters;
+              _jellyfinFilterValues = result.cachedValues;
+            });
+          })
+          .catchError((Object e, StackTrace st) {
+            appLogger.w('Jellyfin library filters failed; browse content remains available', error: e, stackTrace: st);
+          }),
+    );
+  }
+
   /// Initial UI state both Plex and Jellyfin paths need before fetching:
   /// loading flag set, lists cleared, filter/sort caches reset.
   void _resetTopOfPageState() {
@@ -456,12 +560,16 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
       resetPaginationState();
       _filters = [];
       _sortOptions = [];
+      _jellyfinFilterValues = const {};
+      _jellyfinAlphaPrefix = null;
       _selectedFilters = {};
       _selectedSort = null;
       _isSortDescending = false;
       _selectedGrouping = _getDefaultGrouping();
       _firstCharacters = [];
       _alphaHelper = AlphaJumpHelper(const []);
+      _scrollMetrics = LibraryAlphaScrollMetrics.empty;
+      _measuredListRowHeight = null;
     });
   }
 
@@ -509,9 +617,9 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
     });
 
     try {
-      await loadInitialPage(_calculateInitialFetchSize());
+      final initialPage = await loadInitialPageWithStatus(_calculateInitialFetchSize());
 
-      if (generation != _contentRequestId || !mounted) return;
+      if (!initialPage.applied || generation != _contentRequestId || !mounted) return;
       setState(() {
         isLoading = false;
       });
@@ -537,9 +645,10 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
   @override
   Future<LibraryPage<MediaItem>> fetchPage(int start, int size, AbortController? abort) async {
     final client = context.getMediaClientForLibrary(widget.library);
+    final filterParams = _buildFilterParams();
     final query = libraryQueryFromPlexMap(
-      map: _buildFilterParams(),
-      libraryKind: widget.library.kind,
+      map: filterParams,
+      libraryKind: filterParams.containsKey('type') ? null : widget.library.kind,
       offset: start,
       limit: size,
     );
@@ -731,25 +840,28 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
         )
         .then((_) {
           if (!mounted) return;
-          if (pendingCleared) {
-            setState(() {
-              _selectedSort = null;
-              _isSortDescending = false;
-            });
-            _loadItems();
-            _loadFirstCharacters();
-          } else if (pendingSort != null &&
-              (pendingSort!.key != _selectedSort?.key || pendingDescending != _isSortDescending)) {
-            setState(() {
-              _selectedSort = pendingSort;
-              _isSortDescending = pendingDescending;
-            });
-            StorageService.getInstance().then((storage) {
-              storage.saveLibrarySort(widget.library.globalKey, pendingSort!.key, descending: pendingDescending);
-            });
-            _loadItems();
-            _loadFirstCharacters();
-          }
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!mounted) return;
+            if (pendingCleared) {
+              setState(() {
+                _selectedSort = null;
+                _isSortDescending = false;
+              });
+              _loadItems();
+              _loadFirstCharacters();
+            } else if (pendingSort != null &&
+                (pendingSort!.key != _selectedSort?.key || pendingDescending != _isSortDescending)) {
+              setState(() {
+                _selectedSort = pendingSort;
+                _isSortDescending = pendingDescending;
+              });
+              StorageService.getInstance().then((storage) {
+                storage.saveLibrarySort(widget.library.globalKey, pendingSort!.key, descending: pendingDescending);
+              });
+              _loadItems();
+              _loadFirstCharacters();
+            }
+          });
         });
   }
 
@@ -799,10 +911,11 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
   /// FocusNode detached), so we target the last-column item in the first
   /// visible row — the grid cell closest to the alpha bar.
   void _navigateToGridNearScroll() {
-    if (totalSize == 0 || _currentColumnCount < 1) return;
+    final columnCount = _scrollMetrics.columnCount;
+    if (totalSize == 0 || columnCount < 1) return;
 
-    final row = _currentFirstVisibleIndex.value ~/ _currentColumnCount;
-    var targetIndex = ((row + 1) * _currentColumnCount - 1).clamp(0, totalSize - 1);
+    final row = _currentFirstVisibleIndex.value ~/ columnCount;
+    var targetIndex = ((row + 1) * columnCount - 1).clamp(0, totalSize - 1);
 
     // Find nearest loaded item — skeleton cards have no FocusNode
     if (!loadedItems.containsKey(targetIndex)) {
@@ -860,6 +973,13 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
 
   /// Whether the alpha jump bar should be shown.
   /// Only shown when sorting by title (titleSort) and not in folders mode.
+  bool get _isTitleSortDescending {
+    if (!_isSortDescending) return false;
+    final key = _selectedSort?.key.toLowerCase();
+    if (key == null || key.isEmpty) return false;
+    return key == 'title' || key == 'name' || key == 'sortname' || key.startsWith('titlesort');
+  }
+
   bool get _shouldShowAlphaJumpBar => _alphaStrategy.shouldShow(
     totalItemCount: totalSize,
     loadedCharacterCount: _firstCharacters.length,
@@ -879,6 +999,7 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
       final result = await _alphaStrategy.loadCharacters(
         filters: filterParams,
         typeId: typeId.isNotEmpty ? int.tryParse(typeId) : null,
+        descending: _isTitleSortDescending,
       );
       if (!mounted || currentRequestId != _firstCharactersRequestId) return;
       setState(() {
@@ -911,7 +1032,7 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
       clearPendingRanges();
       final range = _computeVisibleRange();
       if (range != null) {
-        ensureRangeLoaded(range.firstIndex, range.visibleCount, buffer: _fetchSize ~/ 2);
+        ensureRangeLoaded(range.firstIndex, range.visibleCount, buffer: _activeFetchSize ~/ 2);
         evictDistantItems(range.firstIndex, maxKeep: 500, threshold: 600);
         evictDistantFocusNodes(range.firstIndex);
       }
@@ -920,10 +1041,10 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
     // Eager prefetch: fetch data before scroll stops
     final range = _computeVisibleRange();
     if (range != null) {
-      prefetchAhead(range.firstIndex, range.visibleCount, pageSize: _fetchSize);
+      prefetchAhead(range.firstIndex, range.visibleCount, pageSize: _activeFetchSize);
     }
 
-    if (!_shouldShowAlphaJumpBar || _currentColumnCount < 1) return;
+    if (!_shouldShowAlphaJumpBar || !_scrollMetrics.isUsable) return;
 
     // During a jump animation, skip alpha bar processing to avoid flashing.
     if (_isJumpScrolling) return;
@@ -957,7 +1078,7 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
     // Use the last item in the first visible row so the highlighted letter
     // updates as soon as items with a new letter appear in that row.
     final maxIndex = totalSize > 0 ? totalSize - 1 : 0;
-    final lastInRow = (firstInRow + _currentColumnCount - 1).clamp(0, maxIndex);
+    final lastInRow = (firstInRow + _scrollMetrics.columnCount - 1).clamp(0, maxIndex);
     if (lastInRow != _currentFirstVisibleIndex.value) {
       _currentFirstVisibleIndex.value = lastInRow;
     }
@@ -967,19 +1088,14 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
   /// Chips bar is the first sliver (height = _chipsBarHeight) followed by the
   /// grid's own top padding before the first row.
   int _itemIndexFromScrollOffset(double offset) {
-    if (_lastCrossAxisExtent <= 0 || _currentColumnCount < 1) return 0;
-
-    final itemWidth = _lastCrossAxisExtent / _currentColumnCount;
-    final itemHeight = itemWidth / GridLayoutConstants.posterAspectRatio;
-    final rowHeight = itemHeight + GridLayoutConstants.mainAxisSpacing;
-    if (rowHeight <= 0) return 0;
-
-    // Items start at `_chipsBarHeight + _effectiveTopPadding` in scroll coords.
-    final contentOffset = (offset - _chipsBarHeight - _effectiveTopPadding).clamp(0.0, double.infinity);
-    final row = (contentOffset / rowHeight).floor();
-    final maxIndex = totalSize > 0 ? totalSize - 1 : 0;
-    return (row * _currentColumnCount).clamp(0, maxIndex);
+    return _scrollMetrics.itemIndexFromScrollOffset(
+      offset,
+      contentStartOffset: _contentStartScrollOffset,
+      totalSize: totalSize,
+    );
   }
+
+  double get _contentStartScrollOffset => _chipsBarHeight + _effectiveTopPadding;
 
   /// Handle a tap on the letter at [targetIndex] in the alpha bar. The
   /// active [LibraryAlphaBarStrategy] owns the per-backend behaviour and
@@ -996,7 +1112,7 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
     );
   }
 
-  /// Scroll the grid so the item at [targetIndex] becomes the first visible
+  /// Scroll the current layout so the item at [targetIndex] becomes the first visible
   /// row. Used by [PlexAlphaBarStrategy] via [_jumpToIndex].
   void _scrollGridToIndex(int targetIndex) {
     _jumpScrollGeneration++;
@@ -1025,21 +1141,17 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
     _loadItems();
   }
 
-  /// Scroll the grid so that [index] is visible just below the chips bar
+  /// Scroll the current layout so that [index] is visible just below the chips bar
   void _scrollToItemIndex(int index) {
     final pos = _innerPosition;
-    if (_currentColumnCount < 1 || _lastCrossAxisExtent <= 0 || pos == null) {
+    if (!_scrollMetrics.isUsable || pos == null) {
       _isJumpScrolling = false;
       return;
     }
 
-    final itemWidth = _lastCrossAxisExtent / _currentColumnCount;
-    final itemHeight = itemWidth / GridLayoutConstants.posterAspectRatio;
-    final rowHeight = itemHeight + GridLayoutConstants.mainAxisSpacing;
-    final targetRow = index ~/ _currentColumnCount;
     // Position the target row at the top of the viewport. Chips and the grid's
     // top padding both precede the items in scroll coordinates.
-    final offset = _chipsBarHeight + _effectiveTopPadding + targetRow * rowHeight;
+    final offset = _scrollMetrics.scrollOffsetForItemIndex(index, contentStartOffset: _contentStartScrollOffset);
 
     final gen = _jumpScrollGeneration;
     final maxExtent = pos.maxScrollExtent;
@@ -1094,6 +1206,7 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
                         firstCharacters: _firstCharacters,
                         onJump: _jumpToIndex,
                         currentLetter: _alphaLetterFor(visibleIndex),
+                        descending: _isTitleSortDescending,
                         isScrolling: scrolling,
                       ),
                     ),
@@ -1104,6 +1217,7 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
                       firstCharacters: _firstCharacters,
                       onJump: _jumpToIndex,
                       currentLetter: _alphaLetterFor(visibleIndex),
+                      descending: _isTitleSortDescending,
                       focusNode: _alphaJumpBarFocusNode,
                       onNavigateLeft: _navigateToGridNearScroll,
                       onBack: _navigateToGridNearScroll,
@@ -1140,7 +1254,6 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
           // Allow focus decoration to render outside scroll bounds.
           clipBehavior: Clip.none,
           slivers: [
-            SliverOverlapInjector(handle: NestedScrollView.sliverOverlapAbsorberHandleFor(context)),
             // Capture-only sliver: an invisible Builder whose context lives
             // inside this CustomScrollView, used to grab the per-tab
             // ScrollPosition. NSV's shared inner controller has one position
@@ -1195,27 +1308,23 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
       if (!mounted) return;
       final range = _computeVisibleRange();
       if (range != null) {
-        ensureRangeLoaded(range.firstIndex, range.visibleCount, buffer: _fetchSize ~/ 2);
+        ensureRangeLoaded(range.firstIndex, range.visibleCount, buffer: _activeFetchSize ~/ 2);
       }
     });
   }
 
   /// Returns the first-visible index and visible count from the scroll
-  /// position + grid metrics, or null if the viewport isn't measured yet.
+  /// position + layout metrics, or null if the viewport isn't measured yet.
   ({int firstIndex, int visibleCount})? _computeVisibleRange() {
     final pos = _innerPosition;
-    if (_currentColumnCount < 1 || pos == null || _lastCrossAxisExtent <= 0) return null;
+    if (!_scrollMetrics.isUsable || pos == null) return null;
     final offset = pos.pixels;
     final viewportHeight = pos.viewportDimension;
     if (!viewportHeight.isFinite) return null;
 
-    final itemWidth = _lastCrossAxisExtent / _currentColumnCount;
-    final itemHeight = itemWidth / GridLayoutConstants.posterAspectRatio;
-    final rowHeight = itemHeight + GridLayoutConstants.mainAxisSpacing;
-    if (rowHeight <= 0) return null;
-
-    final visibleRows = (viewportHeight / rowHeight).ceil() + 1;
-    return (firstIndex: _itemIndexFromScrollOffset(offset), visibleCount: visibleRows * _currentColumnCount);
+    final visibleCount = _scrollMetrics.visibleItemCount(viewportHeight);
+    if (visibleCount <= 0) return null;
+    return (firstIndex: _itemIndexFromScrollOffset(offset), visibleCount: visibleCount);
   }
 
   /// Compute initial fetch size based on viewport dimensions.
@@ -1229,43 +1338,47 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
       final itemWidth = screenSize.width / columnCount;
       final itemHeight = itemWidth / GridLayoutConstants.posterAspectRatio;
       final rowHeight = itemHeight + GridLayoutConstants.mainAxisSpacing;
-      if (rowHeight <= 0) return _fetchSize;
+      if (rowHeight <= 0) return _activeFetchSize;
       final visibleRows = (screenSize.height / rowHeight).ceil() + 1;
       final visibleCount = visibleRows * columnCount;
-      return (visibleCount * 3).clamp(100, 500);
+      if (_isJellyfinLibrary) {
+        return (visibleCount * 2).clamp(36, _jellyfinFetchSize).toInt();
+      }
+      return (visibleCount * 3).clamp(100, 500).toInt();
     } catch (_) {
-      return _fetchSize;
+      return _activeFetchSize;
     }
   }
 
   /// Prefetch images for items near the viewport to reduce pop-in.
   void _prefetchImages(int startIndex, List<MediaItem> items) {
     final pos = _innerPosition;
-    if (pos == null || _lastCrossAxisExtent <= 0 || _currentColumnCount < 1) return;
+    if (pos == null || !_scrollMetrics.isUsable) return;
 
     final offset = pos.pixels;
     final viewportHeight = pos.viewportDimension;
     if (!viewportHeight.isFinite) return;
     final firstVisible = _itemIndexFromScrollOffset(offset);
-    final itemWidth = _lastCrossAxisExtent / _currentColumnCount;
-    final itemHeight = itemWidth / GridLayoutConstants.posterAspectRatio;
-    final rowHeight = itemHeight + GridLayoutConstants.mainAxisSpacing;
-    if (rowHeight <= 0) return;
+    final itemWidth = _scrollMetrics.itemWidth;
+    final itemHeight = _scrollMetrics.itemHeight;
+    if (itemWidth <= 0 || itemHeight <= 0) return;
 
-    final visibleRows = (viewportHeight / rowHeight).ceil() + 1;
-    final visibleEnd = firstVisible + visibleRows * _currentColumnCount;
+    final visibleEnd = firstVisible + _scrollMetrics.visibleItemCount(viewportHeight);
     // Prefetch 2 rows beyond visible area
-    final prefetchEnd = visibleEnd + 2 * _currentColumnCount;
+    final prefetchEnd = visibleEnd + 2 * _scrollMetrics.columnCount;
 
     final client = getMediaClientForLibrary();
     final devicePixelRatio = MediaImageHelper.effectiveDevicePixelRatio(context);
+    final episodePosterMode = context.settingsRead(SettingsService.episodePosterMode);
 
     for (var i = 0; i < items.length; i++) {
       final index = startIndex + i;
       if (index < firstVisible || index > prefetchEnd) continue;
 
-      final thumb = items[i].thumbPath;
+      final item = items[i];
+      final thumb = item.posterThumb(mode: episodePosterMode);
       if (thumb == null || thumb.isEmpty) continue;
+      final imageType = item.usesWideAspectRatio(episodePosterMode) ? ImageType.thumb : ImageType.poster;
 
       final imageUrl = MediaImageHelper.getOptimizedImageUrl(
         client: client,
@@ -1273,8 +1386,7 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
         maxWidth: itemWidth,
         maxHeight: itemHeight,
         devicePixelRatio: devicePixelRatio,
-        enableTranscoding: MediaImageHelper.shouldTranscode(thumb),
-        imageType: ImageType.poster,
+        imageType: imageType,
       );
       if (imageUrl.isEmpty) continue;
 
@@ -1283,7 +1395,7 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
       final (_, memHeight) = MediaImageHelper.getMemCacheDimensions(
         displayWidth: scaledWidth.isFinite && scaledWidth > 0 ? scaledWidth.round() : 0,
         displayHeight: scaledHeight.isFinite && scaledHeight > 0 ? scaledHeight.round() : 0,
-        imageType: ImageType.poster,
+        imageType: imageType,
       );
 
       precacheImage(
@@ -1299,7 +1411,8 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
   }
 
   /// Whether the filters chip is visible
-  bool get _isFiltersChipVisible => _filters.isNotEmpty && _selectedGrouping != 'folders';
+  bool get _isFiltersChipVisible =>
+      (_filters.isNotEmpty || _selectedFilters.isNotEmpty) && _selectedGrouping != 'folders';
 
   /// Whether the sort chip is visible
   bool get _isSortChipVisible => _sortOptions.isNotEmpty && _selectedGrouping != 'folders';
@@ -1315,7 +1428,7 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
 
     return Container(
       color: Theme.of(context).scaffoldBackgroundColor,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 16),
       alignment: Alignment.centerLeft,
       child: Row(
         mainAxisSize: MainAxisSize.min,
@@ -1406,13 +1519,49 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
   }
 
   // Top padding for grid content. Chips are inline above the grid now, so this
-  // is purely focus-decoration clearance (~6px) on desktop. Phone has no D-pad
+  // is purely focus-decoration clearance on desktop. Phone has no D-pad
   // focus ring so no extra clearance is needed.
-  static const double _gridTopPadding = 12.0;
+  static const double _gridTopPadding = 6.0;
   static const double _gridTopPaddingPhone = 0.0;
 
   /// Width of the alpha jump bar widget
   static const double _alphaJumpBarWidth = 20.0;
+
+  void _setListScrollMetrics({required int density, required bool usesWideAspectRatio}) {
+    if (_listMetricsDensity != density || _listMetricsUsesWideRatio != usesWideAspectRatio) {
+      _measuredListRowHeight = null;
+      _listMetricsDensity = density;
+      _listMetricsUsesWideRatio = usesWideAspectRatio;
+    }
+
+    final itemWidth = MediaCardListLayout.posterWidth(density: density, usesWideAspectRatio: usesWideAspectRatio);
+    final itemHeight = MediaCardListLayout.posterHeight(density: density, usesWideAspectRatio: usesWideAspectRatio);
+    final rowHeight =
+        _measuredListRowHeight ??
+        MediaCardListLayout.estimatedRowHeight(density: density, usesWideAspectRatio: usesWideAspectRatio);
+    _scrollMetrics = LibraryAlphaScrollMetrics(
+      columnCount: 1,
+      rowHeight: rowHeight,
+      itemWidth: itemWidth,
+      itemHeight: itemHeight,
+    );
+  }
+
+  Widget _buildMeasuredFirstListItem(Widget child) {
+    WidgetsBinding.instance.addPostFrameCallback((_) => _measureFirstListRowHeight());
+    return KeyedSubtree(key: _firstListItemKey, child: child);
+  }
+
+  void _measureFirstListRowHeight() {
+    if (!mounted) return;
+    if (SettingsService.instanceOrNull?.read(SettingsService.viewMode) != ViewMode.list) return;
+    final height = (_firstListItemKey.currentContext?.findRenderObject() as RenderBox?)?.size.height;
+    if (height == null || height <= 0) return;
+    if ((_measuredListRowHeight ?? 0) == height) return;
+    _measuredListRowHeight = height;
+    _scrollMetrics = _scrollMetrics.copyWith(rowHeight: height);
+    _updateVisibleIndex();
+  }
 
   /// Builds either a sliver list or sliver grid based on the view mode
   Widget _buildItemsSliver(BuildContext context) {
@@ -1426,26 +1575,36 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
     _effectiveTopPadding = topPadding;
     final rightPadding = _shouldShowAlphaJumpBar && !isPhone ? _alphaJumpBarWidth : 8.0;
 
+    final useWideRatio = _selectedGrouping == 'episodes' && episodePosterMode == EpisodePosterMode.episodeThumbnail;
+
     if (viewMode == ViewMode.list) {
       // In list view, all items are in a single column (first column)
       return SliverPadding(
         padding: EdgeInsets.fromLTRB(8, topPadding, rightPadding, 8),
-        sliver: SliverList.builder(
-          itemCount: itemCount,
-          itemBuilder: (context, index) => _buildMediaCardItem(
-            index,
-            isFirstRow: index == 0,
-            isFirstColumn: true, // List view = single column
-            disableScale: true,
-            columnCount: 1,
-            itemCount: itemCount,
-          ),
+        sliver: SliverLayoutBuilder(
+          builder: (context, _) {
+            _setListScrollMetrics(density: libraryDensity, usesWideAspectRatio: useWideRatio);
+            return SliverList.builder(
+              itemCount: itemCount,
+              itemBuilder: (context, index) {
+                final child = _buildMediaCardItem(
+                  index,
+                  isFirstRow: index == 0,
+                  isFirstColumn: true, // List view = single column
+                  isLastColumn: true,
+                  disableScale: true,
+                  columnCount: 1,
+                  itemCount: itemCount,
+                );
+                return index == 0 ? _buildMeasuredFirstListItem(child) : child;
+              },
+            );
+          },
         ),
       );
     } else {
       // In grid view, calculate columns and pass to item builder
       // Use 16:9 aspect ratio when browsing episodes with episode thumbnail mode
-      final useWideRatio = _selectedGrouping == 'episodes' && episodePosterMode == EpisodePosterMode.episodeThumbnail;
       final baseMaxExtent = GridSizeCalculator.getMaxCrossAxisExtent(context, libraryDensity);
       final effectiveMaxExtent = useWideRatio ? baseMaxExtent * 1.8 : baseMaxExtent;
       final hasAlphaBarReservation = rightPadding > 8.0;
@@ -1459,8 +1618,14 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
             final baselineWidth = constraints.crossAxisExtent + (rightPadding - 8.0);
             final columnCount = GridSizeCalculator.getColumnCount(baselineWidth, effectiveMaxExtent);
             // Cache grid metrics for alpha jump bar scroll calculations
-            _lastCrossAxisExtent = constraints.crossAxisExtent;
-            _currentColumnCount = columnCount;
+            final itemWidth = constraints.crossAxisExtent / columnCount;
+            final itemHeight = itemWidth / GridLayoutConstants.posterAspectRatio;
+            _scrollMetrics = LibraryAlphaScrollMetrics(
+              columnCount: columnCount,
+              rowHeight: itemHeight + GridLayoutConstants.mainAxisSpacing,
+              itemWidth: itemWidth,
+              itemHeight: itemHeight,
+            );
             return SliverGrid.builder(
               gridDelegate: MediaGridDelegate.createDelegate(
                 context: context,

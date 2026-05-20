@@ -1,10 +1,10 @@
 import 'dart:async';
 import 'dart:io';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:plezy/widgets/app_icon.dart';
 import 'package:material_symbols_icons/symbols.dart';
 import 'package:provider/provider.dart';
-import '../exceptions/media_server_exceptions.dart';
 import '../media/media_backend.dart';
 import '../media/media_item.dart';
 import '../media/media_kind.dart';
@@ -15,10 +15,12 @@ import '../mixins/controller_disposer_mixin.dart';
 import '../services/plex_client.dart';
 import '../services/media_list_playback_launcher.dart';
 import '../services/playlist_items_loader.dart';
+import '../services/trackers/tracker_coordinator.dart';
 import '../models/transcode_quality_preset.dart';
 import '../utils/download_version_utils.dart';
 import '../utils/download_utils.dart';
 import '../utils/quality_preset_labels.dart';
+import '../utils/media_version_resolver.dart';
 import '../utils/global_key_utils.dart';
 import '../providers/download_provider.dart';
 import '../providers/multi_server_provider.dart';
@@ -29,6 +31,7 @@ import '../profiles/profile.dart';
 import '../utils/provider_extensions.dart';
 import '../utils/app_logger.dart';
 import '../utils/library_refresh_notifier.dart';
+import '../utils/media_server_http_client.dart';
 import '../utils/platform_detector.dart';
 import '../utils/snackbar_helper.dart';
 import '../utils/dialogs.dart';
@@ -59,6 +62,14 @@ class _MenuAction {
   final Color? foregroundColor;
 
   _MenuAction({required this.value, required this.icon, required this.label, this.hoverColor, this.foregroundColor});
+}
+
+Color _destructiveMenuForeground(BuildContext context) {
+  final colorScheme = Theme.of(context).colorScheme;
+  if (colorScheme.brightness != Brightness.dark) return colorScheme.error;
+
+  final error = HSLColor.fromColor(colorScheme.error);
+  return error.withLightness(error.lightness < 0.72 ? 0.72 : error.lightness).toColor();
 }
 
 bool isAdminActionAllowedForMediaItem({
@@ -202,11 +213,11 @@ class MediaContextMenuState extends State<MediaContextMenu> {
       activeProfile: activeProfile,
     );
 
-    // Backend capabilities — used to gate the "Play Version" item below.
-    // Reads the same `capabilities.videoTranscoding` flag the in-player
-    // sheet uses so the two surfaces never disagree about what's offered.
+    // Backend capabilities gate menu items so we don't expose actions the
+    // active server cannot perform.
     final mediaClient = _itemServerId != null ? multiServerProvider.getClientForServer(_itemServerId!) : null;
     final canTranscode = mediaClient?.capabilities.videoTranscoding ?? false;
+    final canRemoveFromContinueWatching = mediaClient?.capabilities.continueWatchingRemoval ?? false;
 
     final menuActions = <_MenuAction>[];
 
@@ -262,7 +273,7 @@ class MediaContextMenuState extends State<MediaContextMenu> {
         );
       }
 
-      if (widget.isInContinueWatching) {
+      if (widget.isInContinueWatching && canRemoveFromContinueWatching) {
         menuActions.add(
           _MenuAction(
             value: 'remove_from_continue_watching',
@@ -446,7 +457,7 @@ class MediaContextMenuState extends State<MediaContextMenu> {
             icon: Symbols.delete_forever_rounded,
             label: t.mediaMenu.deleteFromServer,
             hoverColor: Theme.of(context).colorScheme.error,
-            foregroundColor: Theme.of(context).colorScheme.error,
+            foregroundColor: _destructiveMenuForeground(context),
           ),
         );
       }
@@ -478,11 +489,40 @@ class MediaContextMenuState extends State<MediaContextMenu> {
         position = renderBox.localToGlobal(Offset.zero, ancestor: overlay);
       }
 
-      selected = await showDialog<String>(
+      selected = await showGeneralDialog<String>(
         context: context,
+        barrierDismissible: true,
+        barrierLabel: MaterialLocalizations.of(context).modalBarrierDismissLabel,
         barrierColor: Colors.transparent,
-        builder: (dialogContext) =>
+        transitionDuration: const Duration(milliseconds: 120),
+        pageBuilder: (dialogContext, _, _) =>
             _FocusablePopupMenu(actions: menuActions, position: position, focusFirstItem: openedFromKeyboard),
+        transitionBuilder: (dialogContext, animation, _, child) {
+          final curved = CurvedAnimation(
+            parent: animation,
+            curve: Curves.easeOutCubic,
+            reverseCurve: Curves.easeInCubic,
+          );
+          final screenSize = MediaQuery.sizeOf(dialogContext);
+          final alignment = Alignment(
+            screenSize.width <= 0 ? 0 : ((position.dx / screenSize.width) * 2 - 1).clamp(-1.0, 1.0).toDouble(),
+            screenSize.height <= 0 ? 0 : ((position.dy / screenSize.height) * 2 - 1).clamp(-1.0, 1.0).toDouble(),
+          );
+
+          return FadeTransition(
+            opacity: curved,
+            child: AnimatedBuilder(
+              animation: curved,
+              child: child,
+              builder: (context, child) => Transform.scale(
+                scale: 0.96 + curved.value * 0.04,
+                alignment: alignment,
+                transformHitTests: false,
+                child: child,
+              ),
+            ),
+          );
+        },
       );
     }
 
@@ -512,8 +552,12 @@ class MediaContextMenuState extends State<MediaContextMenu> {
             // hits /UserPlayedItems. WatchStateNotifier event is fired in both
             // paths so cross-screen UI updates regardless of backend.
             await _executeAction(context, () async {
+              final item = mediaItem;
               final client = context.tryGetMediaClientForServer(_itemServerId!);
-              if (client != null) await client.markWatched(mediaItem!);
+              if (client != null && item != null) {
+                await client.markWatched(item);
+                unawaited(TrackerCoordinator.instance.markWatched(item, client));
+              }
             }, t.messages.markedAsWatched);
           }
           break;
@@ -530,8 +574,12 @@ class MediaContextMenuState extends State<MediaContextMenu> {
             }
           } else {
             await _executeAction(context, () async {
+              final item = mediaItem;
               final client = context.tryGetMediaClientForServer(_itemServerId!);
-              if (client != null) await client.markUnwatched(mediaItem!);
+              if (client != null && item != null) {
+                await client.markUnwatched(item);
+                unawaited(TrackerCoordinator.instance.markUnwatched(item, client));
+              }
             }, t.messages.markedAsUnwatched);
           }
           break;
@@ -813,13 +861,12 @@ class MediaContextMenuState extends State<MediaContextMenu> {
 
   Future<bool> _handlePlayVersion(BuildContext context) async {
     final item = _mediaItem!;
+    final client = context.tryGetMediaClientForServer(_itemServerId);
     // Same flag the in-player Version & Quality sheet reads — keeps both
     // surfaces honest about what the active backend can actually do.
-    final canTranscode = _itemServerId == null
-        ? false
-        : (context.read<MultiServerProvider>().getClientForServer(_itemServerId!)?.capabilities.videoTranscoding ??
-              false);
-    final versions = item.mediaVersions ?? const [];
+    final canTranscode = client?.capabilities.videoTranscoding ?? false;
+    final versions = client == null ? item.mediaVersions ?? const [] : await resolveMediaVersions(item, client);
+    if (!context.mounted) return false;
 
     int selectedVersionIndex = 0;
     if (versions.length > 1) {
@@ -828,9 +875,9 @@ class MediaContextMenuState extends State<MediaContextMenu> {
       selectedVersionIndex = picked;
     }
 
+    final selectedVersion = selectedVersionIndex < versions.length ? versions[selectedVersionIndex] : null;
     TranscodeQualityPreset selectedQuality = TranscodeQualityPreset.original;
     if (canTranscode) {
-      final selectedVersion = selectedVersionIndex < versions.length ? versions[selectedVersionIndex] : null;
       final picked = await showQualityPickerDialog(
         context,
         sourceBitrateKbps: selectedVersion?.bitrate,
@@ -845,6 +892,7 @@ class MediaContextMenuState extends State<MediaContextMenu> {
       context,
       metadata: item,
       selectedMediaIndex: selectedVersionIndex,
+      selectedMediaSourceId: selectedVersion?.id,
       selectedQualityPreset: selectedQuality,
     );
     return true;
@@ -899,13 +947,9 @@ class MediaContextMenuState extends State<MediaContextMenu> {
     try {
       final item = _mediaItem!;
 
-      final playlists = await client.fetchPlaylists(playlistType: 'video');
-
-      if (!context.mounted) return;
-
       final result = await showDialog<String>(
         context: context,
-        builder: (context) => _PlaylistSelectionDialog(playlists: playlists),
+        builder: (context) => _PlaylistSelectionDialog(client: client),
       );
 
       if (result == null || !context.mounted) return;
@@ -1004,14 +1048,12 @@ class MediaContextMenuState extends State<MediaContextMenu> {
         }
         return;
       }
-
-      final collections = await client.fetchCollections(libraryId);
-
+      final resolvedLibraryId = libraryId;
       if (!context.mounted) return;
 
       final result = await showDialog<String>(
         context: context,
-        builder: (context) => _CollectionSelectionDialog(collections: collections),
+        builder: (context) => _CollectionSelectionDialog(client: client, libraryId: resolvedLibraryId),
       );
 
       if (result == null || !context.mounted) return;
@@ -1030,7 +1072,7 @@ class MediaContextMenuState extends State<MediaContextMenu> {
 
         appLogger.d('Creating collection "$collectionName" seeded with item ${item.id}');
         final newCollectionId = await client.createCollection(
-          libraryId: libraryId,
+          libraryId: resolvedLibraryId,
           title: collectionName,
           items: [item],
           itemKind: itemKind,
@@ -1078,32 +1120,13 @@ class MediaContextMenuState extends State<MediaContextMenu> {
   }
 
   Future<void> _showRatingSheet(BuildContext context, MediaItem item, MediaServerClient client) async {
-    final currentStarValue = (item.userRating != null && item.userRating! > 0) ? item.userRating! / 2.0 : 0.0;
     await OverlaySheetController.showAdaptive(
       context,
       showDragHandle: true,
       builder: (context) => RatingBottomSheet(
-        currentRating: currentStarValue,
-        onRate: (stars) async {
-          // 0-10 scale used by both Plex and Jellyfin rate endpoints.
-          final rating = stars * 2.0;
-          try {
-            await client.rate(item, rating);
-            widget.onRefresh?.call(item.id);
-          } on MediaServerHttpException catch (e) {
-            appLogger.w('Failed to set rating', error: e);
-            if (context.mounted) showErrorSnackBar(context, t.errors.failedToRate);
-          }
-        },
-        onClear: () async {
-          try {
-            await client.rate(item, -1);
-            widget.onRefresh?.call(item.id);
-          } on MediaServerHttpException catch (e) {
-            appLogger.w('Failed to clear rating', error: e);
-            if (context.mounted) showErrorSnackBar(context, t.errors.failedToRate);
-          }
-        },
+        item: item,
+        serverClient: client,
+        onServerRatingChanged: (_) => widget.onRefresh?.call(item.id),
       ),
     );
   }
@@ -1245,10 +1268,12 @@ class MediaContextMenuState extends State<MediaContextMenu> {
     final client = _getMediaClientForItem();
 
     try {
-      // [fetchChildren] is the neutral equivalent of the previous Plex-only
-      // `fetchAllCollectionItemsAsMediaItems` — both backends return the
-      // collection's contents.
-      final items = await client.fetchChildren(collection.id);
+      final items = await fetchAllCollectionItemsPaged(
+        client,
+        collection.id,
+        libraryId: collection.libraryId,
+        libraryTitle: collection.libraryTitle,
+      );
       if (!context.mounted) return;
 
       final result = await showCollectionDownloadOptionsAndQueue(
@@ -1406,8 +1431,12 @@ class MediaContextMenuState extends State<MediaContextMenu> {
     _ => '',
   };
 
-  Future<void> _handleManageSyncRule(BuildContext context) =>
-      manageSyncRule(context, downloadProvider: context.read<DownloadProvider>(), globalKey: _itemSyncRuleKey(context));
+  Future<void> _handleManageSyncRule(BuildContext context) => manageSyncRule(
+    context,
+    downloadProvider: context.read<DownloadProvider>(),
+    globalKey: _itemSyncRuleKey(context),
+    displayTitle: _itemDisplayTitle(),
+  );
 
   /// Fire-and-forget: if a sync rule exists for the target list, run it now so
   /// newly-added items download immediately instead of waiting for the next
@@ -1487,11 +1516,78 @@ class MediaContextMenuState extends State<MediaContextMenu> {
   }
 }
 
-/// Dialog to select a playlist or create a new one
-class _PlaylistSelectionDialog extends StatelessWidget {
-  final List<MediaPlaylist> playlists;
+/// Dialog to select a playlist or create a new one.
+class _PlaylistSelectionDialog extends StatefulWidget {
+  final MediaServerClient client;
 
-  const _PlaylistSelectionDialog({required this.playlists});
+  const _PlaylistSelectionDialog({required this.client});
+
+  @override
+  State<_PlaylistSelectionDialog> createState() => _PlaylistSelectionDialogState();
+}
+
+class _PlaylistSelectionDialogState extends State<_PlaylistSelectionDialog> {
+  static const int _pageSize = 100;
+
+  final AbortController _abortController = AbortController();
+  final ScrollController _scrollController = ScrollController();
+  final List<MediaPlaylist> _playlists = [];
+  bool _isLoading = false;
+  String? _errorMessage;
+  int? _totalCount;
+
+  bool get _hasMore => _totalCount == null || _playlists.length < _totalCount!;
+
+  @override
+  void initState() {
+    super.initState();
+    _scrollController.addListener(_onScroll);
+    unawaited(_loadNextPage());
+  }
+
+  @override
+  void dispose() {
+    _abortController.abort();
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  void _onScroll() {
+    if (!_scrollController.hasClients || !_hasMore || _isLoading) return;
+    final position = _scrollController.position;
+    if (position.pixels >= position.maxScrollExtent - 240) {
+      unawaited(_loadNextPage());
+    }
+  }
+
+  Future<void> _loadNextPage() async {
+    if (_isLoading || !_hasMore) return;
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+    try {
+      final page = await widget.client.fetchPlaylistsPage(
+        playlistType: 'video',
+        smart: false,
+        start: _playlists.length,
+        size: _pageSize,
+        abort: _abortController,
+      );
+      if (!mounted) return;
+      setState(() {
+        _playlists.addAll(page.items);
+        _totalCount = page.totalCount;
+        _isLoading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _errorMessage = e.toString();
+        _isLoading = false;
+      });
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -1500,8 +1596,9 @@ class _PlaylistSelectionDialog extends StatelessWidget {
       content: SizedBox(
         width: double.maxFinite,
         child: ListView.builder(
+          controller: _scrollController,
           shrinkWrap: true,
-          itemCount: playlists.length + 1,
+          itemCount: _playlists.length + 1 + (_hasMore || _isLoading || _errorMessage != null ? 1 : 0),
           itemBuilder: (context, index) {
             if (index == 0) {
               // Create new playlist option (always shown first)
@@ -1512,10 +1609,28 @@ class _PlaylistSelectionDialog extends StatelessWidget {
               );
             }
 
-            final playlist = playlists[index - 1];
-            final subtitleText = playlist.leafCount == 1
-                ? t.playlists.oneItem
-                : t.playlists.itemCount(count: playlist.leafCount!);
+            if (index > _playlists.length) {
+              if (_errorMessage != null) {
+                return ListTile(
+                  leading: const AppIcon(Symbols.error_rounded, fill: 1),
+                  title: Text(t.messages.errorLoading(error: _errorMessage!)),
+                  trailing: TextButton(onPressed: _loadNextPage, child: Text(t.common.retry)),
+                );
+              }
+              if (_hasMore && !_isLoading) {
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (mounted) unawaited(_loadNextPage());
+                });
+              }
+              return const Padding(
+                padding: EdgeInsets.all(16),
+                child: Center(child: CircularProgressIndicator()),
+              );
+            }
+
+            final playlist = _playlists[index - 1];
+            final leafCount = playlist.leafCount;
+            final subtitleText = leafCount == 1 ? t.playlists.oneItem : t.playlists.itemCount(count: leafCount ?? 0);
             return ListTile(
               leading: playlist.smart
                   ? const AppIcon(Symbols.auto_awesome_rounded, fill: 1)
@@ -1543,34 +1658,104 @@ class _PlaylistSelectionDialog extends StatelessWidget {
 
 /// Dialog to select a collection or create a new one
 class _CollectionSelectionDialog extends StatefulWidget {
-  final List<MediaItem> collections;
+  final MediaServerClient client;
+  final String libraryId;
 
-  const _CollectionSelectionDialog({required this.collections});
+  const _CollectionSelectionDialog({required this.client, required this.libraryId});
 
   @override
   State<_CollectionSelectionDialog> createState() => _CollectionSelectionDialogState();
 }
 
 class _CollectionSelectionDialogState extends State<_CollectionSelectionDialog> with ControllerDisposerMixin {
+  static const int _pageSize = 100;
+
   late final _filterController = createTextEditingController();
   final _filterFocusNode = FocusNode(debugLabel: 'CollectionFilter');
   final _firstCollectionFocusNode = FocusNode(debugLabel: 'CollectionFirstItem');
-  late List<MediaItem> _filteredCollections = widget.collections;
+  final AbortController _abortController = AbortController();
+  final _scrollController = ScrollController();
+  final List<MediaItem> _collections = [];
+  List<MediaItem> _filteredCollections = [];
+  bool _isLoading = false;
+  String? _errorMessage;
+  int? _totalCount;
+
+  bool get _hasMore => _totalCount == null || _collections.length < _totalCount!;
+
+  @override
+  void initState() {
+    super.initState();
+    _scrollController.addListener(_onScroll);
+    unawaited(_loadNextPage());
+  }
 
   @override
   void dispose() {
+    _abortController.abort();
+    _scrollController.dispose();
     _filterFocusNode.dispose();
     _firstCollectionFocusNode.dispose();
     super.dispose();
   }
 
-  void _onFilterChanged(String query) {
-    final lower = query.toLowerCase();
+  void _onScroll() {
+    if (!_scrollController.hasClients || !_hasMore || _isLoading) return;
+    final position = _scrollController.position;
+    if (position.pixels >= position.maxScrollExtent - 240) {
+      unawaited(_loadNextPage());
+    }
+  }
+
+  Future<void> _loadNextPage() async {
+    if (_isLoading || !_hasMore) return;
     setState(() {
-      _filteredCollections = lower.isEmpty
-          ? widget.collections
-          : widget.collections.where((c) => (c.title ?? '').toLowerCase().contains(lower)).toList();
+      _isLoading = true;
+      _errorMessage = null;
     });
+    try {
+      while (mounted && _hasMore) {
+        final page = await widget.client.fetchCollectionsPage(
+          widget.libraryId,
+          start: _collections.length,
+          size: _pageSize,
+          abort: _abortController,
+        );
+        if (!mounted) return;
+        setState(() {
+          _collections.addAll(page.items);
+          _totalCount = page.totalCount;
+          _applyFilter(_filterController.text);
+        });
+        if (_filterController.text.isEmpty || page.items.isEmpty) break;
+      }
+      if (!mounted) return;
+      setState(() {
+        _isLoading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _errorMessage = e.toString();
+        _isLoading = false;
+      });
+    }
+  }
+
+  void _onFilterChanged(String query) {
+    setState(() {
+      _applyFilter(query);
+    });
+    if (query.isNotEmpty && _hasMore) {
+      unawaited(_loadNextPage());
+    }
+  }
+
+  void _applyFilter(String query) {
+    final lower = query.toLowerCase();
+    _filteredCollections = lower.isEmpty
+        ? List.of(_collections)
+        : _collections.where((c) => (c.title ?? '').toLowerCase().contains(lower)).toList();
   }
 
   @override
@@ -1582,7 +1767,7 @@ class _CollectionSelectionDialogState extends State<_CollectionSelectionDialog> 
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (widget.collections.length >= 10) ...[
+            if (_collections.length >= 10) ...[
               FocusableTextField(
                 controller: _filterController,
                 focusNode: _filterFocusNode,
@@ -1599,16 +1784,36 @@ class _CollectionSelectionDialogState extends State<_CollectionSelectionDialog> 
             ],
             Flexible(
               child: ListView.builder(
+                controller: _scrollController,
                 shrinkWrap: true,
-                itemCount: _filteredCollections.length + 1,
+                itemCount: _filteredCollections.length + 1 + (_hasMore || _isLoading || _errorMessage != null ? 1 : 0),
                 itemBuilder: (context, index) {
                   if (index == 0) {
                     return FocusableListTile(
                       focusNode: _firstCollectionFocusNode,
-                      autofocus: widget.collections.length < 10,
+                      autofocus: _collections.length < 10,
                       leading: const AppIcon(Symbols.add_rounded, fill: 1),
                       title: Text(t.common.createNew),
                       onTap: () => Navigator.pop(context, '_create_new'),
+                    );
+                  }
+
+                  if (index > _filteredCollections.length) {
+                    if (_errorMessage != null) {
+                      return FocusableListTile(
+                        leading: const AppIcon(Symbols.error_rounded, fill: 1),
+                        title: Text(t.messages.errorLoading(error: _errorMessage!)),
+                        onTap: _loadNextPage,
+                      );
+                    }
+                    if (_hasMore && !_isLoading) {
+                      WidgetsBinding.instance.addPostFrameCallback((_) {
+                        if (mounted) unawaited(_loadNextPage());
+                      });
+                    }
+                    return const Padding(
+                      padding: EdgeInsets.all(16),
+                      child: Center(child: CircularProgressIndicator()),
                     );
                   }
 
@@ -1741,28 +1946,21 @@ class _FocusablePopupMenuState extends State<_FocusablePopupMenu> {
     final screenSize = MediaQuery.sizeOf(context);
     const menuWidth = 220.0;
 
-    // Clamp menu position to stay within screen bounds
+    // Treat the requested origin as the menu center, then clamp to screen bounds.
     const edgePadding = 8.0;
-    final left = widget.position.dx.clamp(edgePadding, screenSize.width - menuWidth - edgePadding);
-
     final estimatedHeight = widget.actions.length * 48.0 + 16;
-    final spaceBelow = screenSize.height - widget.position.dy - edgePadding;
-    final spaceAbove = widget.position.dy - edgePadding;
+    final maxLeft = screenSize.width - menuWidth - edgePadding;
+    final left = (widget.position.dx - menuWidth / 2)
+        .clamp(edgePadding, maxLeft < edgePadding ? edgePadding : maxLeft)
+        .toDouble();
 
-    // Place menu above the click point if it doesn't fit below and there's more room above
-    final double top;
-    final double maxHeight;
-    if (estimatedHeight <= spaceBelow) {
-      top = widget.position.dy;
-      maxHeight = spaceBelow;
-    } else if (spaceAbove > spaceBelow) {
-      final menuHeight = estimatedHeight.clamp(0.0, spaceAbove);
-      top = widget.position.dy - menuHeight;
-      maxHeight = menuHeight;
-    } else {
-      top = widget.position.dy;
-      maxHeight = spaceBelow;
-    }
+    final availableHeight = screenSize.height - edgePadding * 2;
+    final menuHeight = availableHeight <= 0 ? 0.0 : estimatedHeight.clamp(0.0, availableHeight).toDouble();
+    final maxTop = screenSize.height - menuHeight - edgePadding;
+    final top = (widget.position.dy - menuHeight / 2)
+        .clamp(edgePadding, maxTop < edgePadding ? edgePadding : maxTop)
+        .toDouble();
+    final maxHeight = menuHeight;
 
     return FocusScope(
       // When opened via mouse, don't autofocus any item — let hover handle highlights.
@@ -1780,54 +1978,62 @@ class _FocusablePopupMenuState extends State<_FocusablePopupMenu> {
           }
           return KeyEventResult.ignored;
         },
-        child: Stack(
-          children: [
-            // Barrier to close menu when clicking outside
-            Positioned.fill(
-              child: GestureDetector(
-                onTap: () => Navigator.pop(context),
-                behavior: HitTestBehavior.opaque,
-                child: const ColoredBox(color: Colors.transparent),
-              ),
-            ),
-            // Menu
-            Positioned(
-              left: left,
-              top: top,
-              child: Material(
-                elevation: 8,
-                color: Color.alphaBlend(
-                  Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.08),
-                  Theme.of(context).colorScheme.surface,
+        child: Listener(
+          behavior: HitTestBehavior.translucent,
+          onPointerDown: (event) {
+            if ((event.buttons & kSecondaryMouseButton) != 0) {
+              Navigator.pop(context);
+            }
+          },
+          child: Stack(
+            children: [
+              // Barrier to close menu when clicking outside
+              Positioned.fill(
+                child: GestureDetector(
+                  onTap: () => Navigator.pop(context),
+                  behavior: HitTestBehavior.opaque,
+                  child: const ColoredBox(color: Colors.transparent),
                 ),
-                borderRadius: BorderRadius.circular(tokens(context).radiusSm),
-                clipBehavior: Clip.antiAlias,
-                child: ConstrainedBox(
-                  constraints: BoxConstraints(minWidth: menuWidth, maxWidth: menuWidth, maxHeight: maxHeight),
-                  child: SingleChildScrollView(
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: widget.actions.asMap().entries.map((entry) {
-                        final index = entry.key;
-                        final action = entry.value;
-                        return FocusableListTile(
-                          key: ValueKey(action.value),
-                          focusNode: index == 0 && widget.focusFirstItem ? _initialFocusNode : null,
-                          leading: AppIcon(action.icon, fill: 1, size: 20),
-                          title: Text(action.label),
-                          onTap: () => Navigator.pop(context, action.value),
-                          hoverColor: action.hoverColor,
-                          textColor: action.foregroundColor,
-                          iconColor: action.foregroundColor,
-                        );
-                      }).toList(),
+              ),
+              // Menu
+              Positioned(
+                left: left,
+                top: top,
+                child: Material(
+                  elevation: 8,
+                  color: Color.alphaBlend(
+                    Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.08),
+                    Theme.of(context).colorScheme.surface,
+                  ),
+                  borderRadius: BorderRadius.circular(tokens(context).radiusSm),
+                  clipBehavior: Clip.antiAlias,
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(minWidth: menuWidth, maxWidth: menuWidth, maxHeight: maxHeight),
+                    child: SingleChildScrollView(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: widget.actions.asMap().entries.map((entry) {
+                          final index = entry.key;
+                          final action = entry.value;
+                          return FocusableListTile(
+                            key: ValueKey(action.value),
+                            focusNode: index == 0 && widget.focusFirstItem ? _initialFocusNode : null,
+                            leading: AppIcon(action.icon, fill: 1, size: 20),
+                            title: Text(action.label),
+                            onTap: () => Navigator.pop(context, action.value),
+                            hoverColor: action.hoverColor,
+                            textColor: action.foregroundColor,
+                            iconColor: action.foregroundColor,
+                          );
+                        }).toList(),
+                      ),
                     ),
                   ),
                 ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
