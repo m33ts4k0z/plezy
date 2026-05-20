@@ -26,6 +26,8 @@ extension _VideoPlayerLifecycleMethods on VideoPlayerScreenState {
       'pipActive': pipActive,
       'pipTransitionInFlight': _androidAutoPipTransitionInFlight,
       'hiddenForBackground': _hiddenForBackground,
+      'mediaControlsSuspendedForTvBackground': _mediaControlsSuspendedForTvBackground,
+      'pendingForegroundMediaResume': _resumeFromSuspendedMediaControlOnForeground,
       'backend': _playerBackendLabel,
     };
     if (action != null) {
@@ -44,6 +46,8 @@ extension _VideoPlayerLifecycleMethods on VideoPlayerScreenState {
       ' pipActive=$pipActive'
       ' pipTransitionInFlight=$_androidAutoPipTransitionInFlight'
       ' hiddenForBackground=$_hiddenForBackground'
+      ' mediaControlsSuspendedForTvBackground=$_mediaControlsSuspendedForTvBackground'
+      ' pendingForegroundMediaResume=$_resumeFromSuspendedMediaControlOnForeground'
       ' backend=$_playerBackendLabel',
     );
   }
@@ -105,12 +109,13 @@ extension _VideoPlayerLifecycleMethods on VideoPlayerScreenState {
     _suspendLiveTimelineForBackground();
 
     if (isTv) {
+      await _suspendMediaControlsForTvBackground('hidden');
       _recordLifecycleState('hidden', action: 'tv_background_pause_only');
       return;
     }
 
     _hiddenForBackground = true;
-    await currentPlayer.setVisible(false);
+    await currentPlayer.setVisible(false, restoreOnWindowVisible: Platform.isMacOS);
     _recordLifecycleState('hidden', action: 'render_hidden');
   }
 
@@ -128,7 +133,9 @@ extension _VideoPlayerLifecycleMethods on VideoPlayerScreenState {
     // video-output refresh before any auto-resume logic runs.
     if (_hiddenForBackground && currentPlayer != null && _isPlayerInitialized) {
       await currentPlayer.setVisible(true);
-      await currentPlayer.updateFrame();
+      if (!Platform.isMacOS) {
+        await currentPlayer.updateFrame();
+      }
 
       if (!mounted || currentPlayer != player) return;
 
@@ -138,6 +145,7 @@ extension _VideoPlayerLifecycleMethods on VideoPlayerScreenState {
 
     // Restore media controls and wakelock when app is resumed.
     if (_isPlayerInitialized && mounted) {
+      _resumeMediaControlsAfterTvBackground('app_resumed');
       await _restoreMediaControlsAfterResume();
     }
 

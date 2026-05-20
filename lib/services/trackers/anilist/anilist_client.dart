@@ -3,7 +3,9 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import '../../../utils/abortable_http_request.dart';
 import '../../../utils/app_logger.dart';
+import '../../../utils/json_utils.dart';
 import '../../../utils/platform_http_client_stub.dart'
     if (dart.library.io) '../../../utils/platform_http_client_io.dart'
     as platform;
@@ -48,13 +50,95 @@ class AnilistClient {
     await query(mutation, variables: {'mediaId': mediaId, 'progress': progress, 'status': status});
   }
 
+  Future<void> deleteMediaListEntry(int mediaId) async {
+    const idQuery = '''
+      query(\$mediaId: Int) {
+        Media(id: \$mediaId, type: ANIME) {
+          mediaListEntry {
+            id
+          }
+        }
+      }
+    ''';
+    final data = await query(idQuery, variables: {'mediaId': mediaId});
+    final media = data['Media'];
+    if (media is! Map) return;
+    final entry = media['mediaListEntry'];
+    if (entry is! Map) return;
+    final entryId = flexibleInt(entry['id']);
+    if (entryId == null) return;
+
+    const mutation = '''
+      mutation(\$id: Int) {
+        DeleteMediaListEntry(id: \$id) {
+          deleted
+        }
+      }
+    ''';
+    await query(mutation, variables: {'id': entryId});
+  }
+
+  Future<void> setMediaListScore({required int mediaId, required int score}) async {
+    const mutation = '''
+      mutation(\$mediaId: Int, \$scoreRaw: Int) {
+        SaveMediaListEntry(mediaId: \$mediaId, scoreRaw: \$scoreRaw) {
+          id
+        }
+      }
+    ''';
+    await query(mutation, variables: {'mediaId': mediaId, 'scoreRaw': score.clamp(0, 10).toInt() * 10});
+  }
+
+  Future<int?> getMediaListScore(int mediaId) async {
+    const mediaQuery = '''
+      query(\$mediaId: Int) {
+        Media(id: \$mediaId, type: ANIME) {
+          mediaListEntry {
+            scoreRaw: score(format: POINT_100)
+          }
+        }
+      }
+    ''';
+    final data = await query(mediaQuery, variables: {'mediaId': mediaId});
+    final media = data['Media'];
+    if (media is! Map) return null;
+    final entry = media['mediaListEntry'];
+    if (entry is! Map) return null;
+    final scoreRaw = flexibleInt(entry['scoreRaw']);
+    if (scoreRaw == null || scoreRaw <= 0) return null;
+    return (scoreRaw / 10).round().clamp(1, 10).toInt();
+  }
+
+  Future<int?> getAnimeEpisodeCount(int mediaId) async {
+    const mediaQuery = '''
+      query(\$mediaId: Int) {
+        Media(id: \$mediaId, type: ANIME) {
+          episodes
+        }
+      }
+    ''';
+    final data = await query(mediaQuery, variables: {'mediaId': mediaId});
+    final media = data['Media'];
+    if (media is! Map) return null;
+    final count = flexibleInt(media['episodes']);
+    return count != null && count > 0 ? count : null;
+  }
+
   Future<Map<String, dynamic>> query(String query, {Map<String, dynamic>? variables}) async {
     final uri = Uri.parse(AnilistConstants.apiBase);
     final headers = AnilistConstants.headers(accessToken: _session.accessToken);
     final body = json.encode({'query': query, 'variables': ?variables});
 
     final sw = Stopwatch()..start();
-    final res = await _http.post(uri, headers: headers, body: body).timeout(TrackerConstants.requestTimeout);
+    final res = await sendAbortableHttpRequest(
+      _http,
+      'POST',
+      uri,
+      headers: headers,
+      body: body,
+      timeout: TrackerConstants.requestTimeout,
+      operation: 'AniList POST ${uri.path}',
+    );
     sw.stop();
     appLogger.d('AniList POST ${uri.path} → ${res.statusCode} (${sw.elapsedMilliseconds}ms)');
 

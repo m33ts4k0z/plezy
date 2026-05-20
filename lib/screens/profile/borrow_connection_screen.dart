@@ -24,7 +24,7 @@ import '../../utils/snackbar_helper.dart';
 import '../../widgets/app_icon.dart';
 import '../../widgets/backend_badge.dart';
 import '../../widgets/loading_indicator_box.dart';
-import '../../widgets/desktop_app_bar.dart';
+import '../../widgets/focused_scroll_scaffold.dart';
 import '../libraries/state_messages.dart';
 import 'pin_entry_dialog.dart';
 
@@ -156,57 +156,50 @@ class _BorrowConnectionScreenState extends State<BorrowConnectionScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: FutureBuilder<List<_BorrowCandidate>>(
-        future: _candidatesFuture,
-        builder: (context, snapshot) {
-          final candidates = snapshot.data ?? const <_BorrowCandidate>[];
-          return CustomScrollView(
-            slivers: [
-              ExcludeFocus(
-                child: CustomAppBar(
-                  title: Text(t.profiles.borrowAddTo(displayName: widget.targetProfile.displayName)),
-                  pinned: true,
-                ),
+    return FutureBuilder<List<_BorrowCandidate>>(
+      future: _candidatesFuture,
+      builder: (context, snapshot) {
+        final candidates = snapshot.data ?? const <_BorrowCandidate>[];
+        return FocusedScrollScaffold(
+          title: Text(t.profiles.borrowAddTo(displayName: widget.targetProfile.displayName)),
+          slivers: [
+            SliverPadding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
+              sliver: SliverToBoxAdapter(
+                child: Text(t.profiles.borrowExplain, style: Theme.of(context).textTheme.bodySmall),
               ),
-              SliverPadding(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 4),
-                sliver: SliverToBoxAdapter(
-                  child: Text(t.profiles.borrowExplain, style: Theme.of(context).textTheme.bodySmall),
+            ),
+            if (snapshot.connectionState != ConnectionState.done)
+              LoadingIndicatorBox.sliver
+            else if (candidates.isEmpty)
+              SliverFillRemaining(
+                child: EmptyStateWidget(
+                  message: t.profiles.borrowEmpty,
+                  subtitle: t.profiles.borrowEmptySubtitle,
+                  icon: Symbols.share_rounded,
+                  iconSize: 48,
                 ),
-              ),
-              if (snapshot.connectionState != ConnectionState.done)
-                LoadingIndicatorBox.sliver
-              else if (candidates.isEmpty)
-                SliverFillRemaining(
-                  child: EmptyStateWidget(
-                    message: t.profiles.borrowEmpty,
-                    subtitle: t.profiles.borrowEmptySubtitle,
-                    icon: Symbols.share_rounded,
-                    iconSize: 48,
-                  ),
-                )
-              else
-                SliverList(
-                  delegate: SliverChildBuilderDelegate((context, index) {
-                    final cand = candidates[index];
-                    return Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                      child: FocusableWrapper(
-                        autofocus: index == 0,
-                        disableScale: true,
-                        onSelect: _busy ? null : () => _borrow(cand),
-                        child: Card(
-                          child: _BorrowTile(candidate: cand, onTap: () => _borrow(cand)),
-                        ),
+              )
+            else
+              SliverList(
+                delegate: SliverChildBuilderDelegate((context, index) {
+                  final cand = candidates[index];
+                  return Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                    child: FocusableWrapper(
+                      autofocus: index == 0,
+                      disableScale: true,
+                      onSelect: _busy ? null : () => _borrow(cand),
+                      child: Card(
+                        child: _BorrowTile(candidate: cand, onTap: () => _borrow(cand)),
                       ),
-                    );
-                  }, childCount: candidates.length),
-                ),
-            ],
-          );
-        },
-      ),
+                    ),
+                  );
+                }, childCount: candidates.length),
+              ),
+          ],
+        );
+      },
     );
   }
 
@@ -248,7 +241,7 @@ class _BorrowConnectionScreenState extends State<BorrowConnectionScreen> {
       if (pin == null) return false;
       if (!verifyProfilePin(cand.source, pin)) {
         if (!mounted) return false;
-        showErrorSnackBar(context, 'Incorrect PIN.');
+        showErrorSnackBar(context, t.profiles.incorrectPin);
         return false;
       }
       return true;
@@ -261,7 +254,7 @@ class _BorrowConnectionScreenState extends State<BorrowConnectionScreen> {
     if (parentId == null || homeUuid == null) return false;
     final parent = await context.read<ConnectionRegistry>().getPlexAccount(parentId);
     if (parent == null) {
-      if (mounted) showErrorSnackBar(context, 'Source profile is missing its parent account.');
+      if (mounted) showErrorSnackBar(context, t.profiles.sourceProfileMissingParentAccount);
       return false;
     }
     final auth = await PlexAuthService.create();
@@ -279,7 +272,7 @@ class _BorrowConnectionScreenState extends State<BorrowConnectionScreen> {
       );
       if (!result.succeeded) {
         if (result.status == PlexHomeSwitchStatus.failed && mounted) {
-          showErrorSnackBar(context, 'Failed to verify PIN.');
+          showErrorSnackBar(context, t.profiles.failedToVerifyPin);
         }
         return false;
       }
@@ -307,7 +300,7 @@ class _BorrowConnectionScreenState extends State<BorrowConnectionScreen> {
       );
       if (!result.succeeded) {
         if (result.status == PlexHomeSwitchStatus.failed && mounted) {
-          showErrorSnackBar(context, 'Failed to borrow connection.');
+          showErrorSnackBar(context, t.profiles.borrowFailed);
         }
         return;
       }
@@ -326,12 +319,12 @@ class _BorrowConnectionScreenState extends State<BorrowConnectionScreen> {
           Navigator.of(context).pop(true);
           return;
         }
-        showSuccessSnackBar(context, 'Connection borrowed.');
+        showSuccessSnackBar(context, t.profiles.borrowConnectionBorrowed);
       }
     } catch (e, st) {
       appLogger.w('Borrow failed', error: e, stackTrace: st);
       if (mounted) {
-        showErrorSnackBar(context, 'Failed to borrow connection.');
+        showErrorSnackBar(context, t.profiles.borrowFailed);
       }
     } finally {
       auth.dispose();
@@ -356,7 +349,7 @@ class _BorrowConnectionScreenState extends State<BorrowConnectionScreen> {
         Navigator.of(context).pop(true);
         return;
       }
-      showSuccessSnackBar(context, 'Connection borrowed.');
+      showSuccessSnackBar(context, t.profiles.borrowConnectionBorrowed);
     }
   }
 }
@@ -400,7 +393,7 @@ class _BorrowTile extends StatelessWidget {
                   Row(
                     children: [
                       Text(
-                        'From ${candidate.source.displayName}',
+                        t.profiles.borrowFromProfile(displayName: candidate.source.displayName),
                         style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
                       ),
                       if (candidate.source.isPinProtected) ...[
@@ -412,7 +405,10 @@ class _BorrowTile extends StatelessWidget {
                   if (candidate.connection is PlexAccountConnection)
                     Padding(
                       padding: const EdgeInsets.only(top: 4),
-                      child: Text('as ${candidate.source.displayName}', style: theme.textTheme.bodySmall),
+                      child: Text(
+                        t.profiles.connectionAs(displayName: candidate.source.displayName),
+                        style: theme.textTheme.bodySmall,
+                      ),
                     ),
                 ],
               ),

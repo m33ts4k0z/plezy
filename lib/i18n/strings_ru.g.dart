@@ -49,6 +49,7 @@ class TranslationsRu extends Translations with BaseTranslations<AppLocale, Trans
 	@override late final _TranslationsHotkeysRu hotkeys = _TranslationsHotkeysRu._(_root);
 	@override late final _TranslationsFileInfoRu fileInfo = _TranslationsFileInfoRu._(_root);
 	@override late final _TranslationsMediaMenuRu mediaMenu = _TranslationsMediaMenuRu._(_root);
+	@override late final _TranslationsRateSheetRu rateSheet = _TranslationsRateSheetRu._(_root);
 	@override late final _TranslationsAccessibilityRu accessibility = _TranslationsAccessibilityRu._(_root);
 	@override late final _TranslationsTooltipsRu tooltips = _TranslationsTooltipsRu._(_root);
 	@override late final _TranslationsVideoControlsRu videoControls = _TranslationsVideoControlsRu._(_root);
@@ -108,16 +109,16 @@ class _TranslationsAuthRu extends TranslationsAuthEn {
 	@override String get authenticate => 'Аутентификация';
 	@override String get authenticationTimeout => 'Время аутентификации истекло. Попробуйте снова.';
 	@override String get scanQRToSignIn => 'Отсканируйте QR-код для входа';
-	@override String get waitingForAuth => 'Ожидание аутентификации...\nЗавершите вход в браузере.';
+	@override String get waitingForAuth => 'Ожидание аутентификации...\nВойдите в браузере.';
 	@override String get useBrowser => 'Использовать браузер';
 	@override String get or => 'или';
 	@override String get connectToJellyfin => 'Подключиться к Jellyfin';
 	@override String get useQuickConnect => 'Использовать Quick Connect';
 	@override String get quickConnectCode => 'Код Quick Connect';
-	@override String get quickConnectInstructions => 'Откройте сервер Jellyfin в браузере, войдите и выберите Quick Connect в меню пользователя. Введите этот код, чтобы подтвердить вход.';
+	@override String get quickConnectInstructions => 'Откройте Quick Connect в Jellyfin и введите этот код.';
 	@override String get quickConnectWaiting => 'Ожидание подтверждения…';
 	@override String get quickConnectCancel => 'Отмена';
-	@override String get quickConnectExpired => 'Срок действия кода Quick Connect истёк до подтверждения. Повторите попытку.';
+	@override String get quickConnectExpired => 'Срок Quick Connect истек. Попробуйте снова.';
 }
 
 // Path: common
@@ -158,9 +159,6 @@ class _TranslationsCommonRu extends TranslationsCommonEn {
 	@override String get mute => 'Без звука';
 	@override String get ok => 'OK';
 	@override String get reconnect => 'Переподключить';
-	@override String get exitConfirmTitle => 'Выйти из приложения?';
-	@override String get exitConfirmMessage => 'Вы уверены, что хотите выйти?';
-	@override String get dontAskAgain => 'Больше не спрашивать';
 	@override String get exit => 'Выход';
 	@override String get viewAll => 'Показать все';
 	@override String get checkingNetwork => 'Проверка сети...';
@@ -171,6 +169,7 @@ class _TranslationsCommonRu extends TranslationsCommonEn {
 	@override String get loading => 'Загрузка...';
 	@override String get fullscreen => 'Полноэкранный режим';
 	@override String get exitFullscreen => 'Выйти из полноэкранного режима';
+	@override String get pressBackAgainToExit => 'Нажмите ещё раз для выхода';
 }
 
 // Path: screens
@@ -241,21 +240,21 @@ class _TranslationsSettingsRu extends TranslationsSettingsEn {
 	@override String get listView => 'Список';
 	@override String get showHeroSection => 'Показать раздел избранного';
 	@override String get useGlobalHubs => 'Использовать макет главной';
-	@override String get useGlobalHubsDescription => 'Показывать хабы главной страницы как в официальном клиенте. Если выключено, показывает рекомендации по библиотекам.';
+	@override String get useGlobalHubsDescription => 'Показывать единые разделы главной. Иначе использовать рекомендации библиотек.';
 	@override String get showServerNameOnHubs => 'Показывать имя сервера в хабах';
-	@override String get showServerNameOnHubsDescription => 'Всегда показывать имя сервера в заголовках хабов. При выключении показывает только для дублирующихся имён.';
+	@override String get showServerNameOnHubsDescription => 'Всегда показывать имена серверов в заголовках разделов.';
 	@override String get groupLibrariesByServer => 'Группировать библиотеки по серверам';
-	@override String get groupLibrariesByServerDescription => 'Показывать заголовок для каждого медиасервера в боковой панели при подключении к нескольким серверам.';
+	@override String get groupLibrariesByServerDescription => 'Группировать библиотеки боковой панели по медиасерверам.';
 	@override String get alwaysKeepSidebarOpen => 'Всегда держать боковую панель открытой';
 	@override String get alwaysKeepSidebarOpenDescription => 'Боковая панель остаётся развёрнутой, область контента подстраивается';
 	@override String get showUnwatchedCount => 'Показывать количество непросмотренных';
 	@override String get showUnwatchedCountDescription => 'Отображать количество непросмотренных эпизодов для сериалов и сезонов';
 	@override String get showEpisodeNumberOnCards => 'Показывать номер эпизода на карточках';
-	@override String get showEpisodeNumberOnCardsDescription => 'Отображать номер эпизода рядом с сезоном (напр. S2 E3) на карточках эпизодов';
+	@override String get showEpisodeNumberOnCardsDescription => 'Показывать номер сезона и серии на карточках серий';
 	@override String get showSeasonPostersOnTabs => 'Показывать постеры сезонов на вкладках';
-	@override String get showSeasonPostersOnTabsDescription => 'Отображать постер сезона над каждой вкладкой сезона на странице сведений сериала';
+	@override String get showSeasonPostersOnTabsDescription => 'Показывать постер каждого сезона над его вкладкой';
 	@override String get hideSpoilers => 'Скрыть спойлеры непросмотренных эпизодов';
-	@override String get hideSpoilersDescription => 'Размывать миниатюры и скрывать описания эпизодов, которые вы ещё не смотрели';
+	@override String get hideSpoilersDescription => 'Размывать миниатюры и описания непросмотренных серий';
 	@override String get playerBackend => 'Бэкенд плеера';
 	@override String get exoPlayer => 'ExoPlayer (Рекомендуется)';
 	@override String get mpv => 'mpv';
@@ -264,7 +263,7 @@ class _TranslationsSettingsRu extends TranslationsSettingsEn {
 	@override String get bufferSize => 'Размер буфера';
 	@override String bufferSizeMB({required Object size}) => '${size}МБ';
 	@override String get bufferSizeAuto => 'Авто (Рекомендуется)';
-	@override String bufferSizeWarning({required Object heap, required Object size}) => 'У вашего устройства ${heap}МБ памяти. Буфер ${size}МБ может вызвать проблемы с воспроизведением.';
+	@override String bufferSizeWarning({required Object heap, required Object size}) => 'Доступно памяти: ${heap}MB. Буфер ${size}MB может повлиять на воспроизведение.';
 	@override String get defaultQualityTitle => 'Качество по умолчанию';
 	@override String get defaultQualityDescription => 'Используется при запуске воспроизведения. Более низкие значения снижают пропускную способность.';
 	@override String get subtitleStyling => 'Стиль субтитров';
@@ -276,18 +275,18 @@ class _TranslationsSettingsRu extends TranslationsSettingsEn {
 	@override String get defaultSleepTimer => 'Таймер сна по умолчанию';
 	@override String minutesUnit({required Object minutes}) => '${minutes} минут';
 	@override String get rememberTrackSelections => 'Запоминать выбор дорожек для каждого сериала/фильма';
-	@override String get rememberTrackSelectionsDescription => 'Автоматически сохранять предпочтения языка аудио и субтитров при переключении дорожек во время воспроизведения';
+	@override String get rememberTrackSelectionsDescription => 'Запоминать выбор аудио и субтитров для тайтла';
 	@override String get showChapterMarkersOnTimeline => 'Показывать маркеры глав на шкале перемотки';
 	@override String get showChapterMarkersOnTimelineDescription => 'Разделять шкалу перемотки по границам глав';
 	@override String get clickVideoTogglesPlayback => 'Клик по видео для переключения воспроизведения/паузы';
-	@override String get clickVideoTogglesPlaybackDescription => 'Если включено, клик по видеоплееру воспроизводит/ставит на паузу. В противном случае показывает/скрывает элементы управления.';
+	@override String get clickVideoTogglesPlaybackDescription => 'Клик по видео запускает/ставит на паузу вместо показа управления.';
 	@override String get videoPlayerControls => 'Элементы управления плеером';
 	@override String get keyboardShortcuts => 'Горячие клавиши';
 	@override String get keyboardShortcutsDescription => 'Настроить горячие клавиши';
 	@override String get videoPlayerNavigation => 'Навигация видеоплеера';
 	@override String get videoPlayerNavigationDescription => 'Использовать клавиши стрелок для навигации по элементам управления плеером';
 	@override String get watchTogetherRelay => 'Relay совместного просмотра';
-	@override String get watchTogetherRelayDescription => 'Указать пользовательский relay-сервер для совместного просмотра. Все участники должны использовать один и тот же сервер.';
+	@override String get watchTogetherRelayDescription => 'Задайте свой relay. Все должны использовать один сервер.';
 	@override String get watchTogetherRelayHint => 'https://my-relay.example.com';
 	@override String get crashReporting => 'Отчёты об ошибках';
 	@override String get crashReportingDescription => 'Отправлять отчёты об ошибках для улучшения приложения';
@@ -296,10 +295,10 @@ class _TranslationsSettingsRu extends TranslationsSettingsEn {
 	@override String get viewLogs => 'Просмотр логов';
 	@override String get viewLogsDescription => 'Просмотр логов приложения';
 	@override String get clearCache => 'Очистить кэш';
-	@override String get clearCacheDescription => 'Это удалит все кэшированные изображения и данные. После очистки кэша приложение может загружать контент дольше.';
+	@override String get clearCacheDescription => 'Очистить кэш изображений и данных. Контент может загружаться медленнее.';
 	@override String get clearCacheSuccess => 'Кэш успешно очищен';
 	@override String get resetSettings => 'Сбросить настройки';
-	@override String get resetSettingsDescription => 'Все настройки будут сброшены до значений по умолчанию. Это действие нельзя отменить.';
+	@override String get resetSettingsDescription => 'Восстановить настройки по умолчанию. Это нельзя отменить.';
 	@override String get resetSettingsSuccess => 'Настройки успешно сброшены';
 	@override String get backup => 'Резервная копия';
 	@override String get exportSettings => 'Экспорт настроек';
@@ -320,7 +319,7 @@ class _TranslationsSettingsRu extends TranslationsSettingsEn {
 	@override String get updateAvailable => 'Доступно обновление';
 	@override String get checkForUpdates => 'Проверить обновления';
 	@override String get autoCheckUpdatesOnStartup => 'Автоматически проверять обновления при запуске';
-	@override String get autoCheckUpdatesOnStartupDescription => 'Показывать уведомление при запуске, если доступна новая версия';
+	@override String get autoCheckUpdatesOnStartupDescription => 'Уведомлять о доступном обновлении при запуске';
 	@override String get validationErrorEnterNumber => 'Введите корректное число';
 	@override String validationErrorDuration({required Object min, required Object max, required Object unit}) => 'Длительность должна быть от ${min} до ${max} ${unit}';
 	@override String shortcutAlreadyAssigned({required Object action}) => 'Клавиша уже назначена для ${action}';
@@ -331,7 +330,7 @@ class _TranslationsSettingsRu extends TranslationsSettingsEn {
 	@override String get autoSkipCredits => 'Автопропуск титров';
 	@override String get autoSkipCreditsDescription => 'Автоматически пропускать титры и воспроизводить следующий эпизод';
 	@override String get forceSkipMarkerFallback => 'Принудительные резервные маркеры';
-	@override String get forceSkipMarkerFallbackDescription => 'Использовать шаблоны заголовков глав для маркеров пропуска, даже если Plex предоставляет встроенные маркеры';
+	@override String get forceSkipMarkerFallbackDescription => 'Использовать шаблоны названий глав, даже если в Plex есть маркеры';
 	@override String get autoSkipDelay => 'Задержка автопропуска';
 	@override String autoSkipDelayDescription({required Object seconds}) => 'Подождать ${seconds} секунд перед автопропуском';
 	@override String get introPattern => 'Шаблон маркера вступления';
@@ -353,8 +352,8 @@ class _TranslationsSettingsRu extends TranslationsSettingsEn {
 	@override String get downloadOnWifiOnly => 'Загружать только по WiFi';
 	@override String get downloadOnWifiOnlyDescription => 'Запретить загрузку по мобильным данным';
 	@override String get autoRemoveWatchedDownloads => 'Автоудаление просмотренных загрузок';
-	@override String get autoRemoveWatchedDownloadsDescription => 'Автоматически удалять загруженные эпизоды и фильмы после просмотра';
-	@override String get cellularDownloadBlocked => 'Загрузка по мобильным данным отключена. Подключитесь к WiFi или измените настройку.';
+	@override String get autoRemoveWatchedDownloadsDescription => 'Автоматически удалять просмотренные загрузки';
+	@override String get cellularDownloadBlocked => 'Загрузки через мобильную сеть заблокированы. Используйте WiFi или измените настройку.';
 	@override String get maxVolume => 'Максимальная громкость';
 	@override String get maxVolumeDescription => 'Разрешить усиление громкости выше 100% для тихих медиа';
 	@override String maxVolumePercent({required Object percent}) => '${percent}%';
@@ -367,22 +366,26 @@ class _TranslationsSettingsRu extends TranslationsSettingsEn {
 	@override String get companionRemoteServer => 'Сервер удалённого управления';
 	@override String get companionRemoteServerDescription => 'Разрешить мобильным устройствам в сети управлять этим приложением';
 	@override String get autoPip => 'Автоматический «картинка в картинке»';
-	@override String get autoPipDescription => 'Автоматически переходить в режим «картинка в картинке» при выходе из приложения во время воспроизведения';
+	@override String get autoPipDescription => 'Включать картинку-в-картинке при выходе во время воспроизведения';
 	@override String get matchContentFrameRate => 'Соответствие частоты кадров контента';
-	@override String get matchContentFrameRateDescription => 'Настроить частоту обновления дисплея под видеоконтент, уменьшая дрожание и экономя батарею';
+	@override String get matchContentFrameRateDescription => 'Подстраивать частоту обновления экрана под видео';
 	@override String get matchRefreshRate => 'Соответствие частоты обновления';
-	@override String get matchRefreshRateDescription => 'Переключать частоту обновления дисплея под видеоконтент в полноэкранном режиме';
+	@override String get matchRefreshRateDescription => 'Подстраивать частоту обновления в полноэкранном режиме';
 	@override String get matchDynamicRange => 'Соответствие динамического диапазона';
-	@override String get matchDynamicRangeDescription => 'Автоматически включать HDR для HDR-контента и возвращать SDR при выходе из плеера';
+	@override String get matchDynamicRangeDescription => 'Включать HDR для HDR-контента, затем возвращаться к SDR';
 	@override String get displaySwitchDelay => 'Задержка переключения дисплея';
 	@override String get tunneledPlayback => 'Туннельное воспроизведение';
-	@override String get tunneledPlaybackDescription => 'Использовать аппаратный видеотуннелинг. Отключите, если видите чёрный экран со звуком при HDR-контенте';
+	@override String get tunneledPlaybackDescription => 'Использовать видеотуннелирование. Отключите, если HDR показывает черный экран.';
+	@override String get dvConversionMode => 'Преобразование Dolby Vision';
+	@override String get dvConversionModeDescription => 'Выберите, как ExoPlayer обрабатывает файлы Dolby Vision Profile 7.';
+	@override String get dvConversionAuto => 'Авто';
+	@override String get dvConversionNative => 'Нативно / отключено';
+	@override String get dvConversionDv81 => 'P7 → P8.1';
+	@override String get dvConversionHevcStrip => 'P7 → HEVC';
 	@override String get requireProfileSelectionOnOpen => 'Запрашивать профиль при запуске';
 	@override String get requireProfileSelectionOnOpenDescription => 'Показывать выбор профиля при каждом открытии приложения';
-	@override String get confirmExitOnBack => 'Подтверждать выход';
-	@override String get confirmExitOnBackDescription => 'Показывать диалог подтверждения при нажатии «назад» для выхода из приложения';
 	@override String get forceTvMode => 'Принудительный режим ТВ';
-	@override String get forceTvModeDescription => 'Использовать макет ТВ независимо от автоматического определения. Полезно на устройствах Android TV, которые не сообщают о функции leanback. Приложение перезапустится при изменении.';
+	@override String get forceTvModeDescription => 'Принудительно включить ТВ-интерфейс. Для устройств без автоопределения. Требуется перезапуск.';
 	@override String get startInFullscreen => 'Запускать в полноэкранном режиме';
 	@override String get startInFullscreenDescription => 'Открывать Plezy в полноэкранном режиме при запуске';
 	@override String get autoHidePerformanceOverlay => 'Автоскрытие оверлея производительности';
@@ -476,13 +479,33 @@ class _TranslationsMediaMenuRu extends TranslationsMediaMenuEn {
 	@override String get shufflePlay => 'Случайное воспроизведение';
 	@override String get fileInfo => 'Информация о файле';
 	@override String get deleteFromServer => 'Удалить с сервера';
-	@override String get confirmDelete => 'Это навсегда удалит этот медиафайл и его файлы с вашего сервера. Это действие нельзя отменить.';
+	@override String get confirmDelete => 'Удалить это медиа и его файлы с сервера?';
 	@override String get deleteMultipleWarning => 'Это включает все эпизоды и их файлы.';
 	@override String get mediaDeletedSuccessfully => 'Медиаэлемент успешно удалён';
 	@override String get mediaFailedToDelete => 'Не удалось удалить медиаэлемент';
 	@override String get rate => 'Оценить';
 	@override String get playFromBeginning => 'Воспроизвести сначала';
 	@override String get playVersion => 'Воспроизвести версию...';
+}
+
+// Path: rateSheet
+class _TranslationsRateSheetRu extends TranslationsRateSheetEn {
+	_TranslationsRateSheetRu._(TranslationsRu root) : this._root = root, super.internal(root);
+
+	final TranslationsRu _root; // ignore: unused_field
+
+	// Translations
+	@override String get title => 'Оценить';
+	@override String get server => 'Сервер';
+	@override String starValue({required Object rating}) => '${rating} / 5';
+	@override String scoreValue({required Object score}) => '${score} / 10';
+	@override String get setScore => 'Установить оценку';
+	@override String get notRated => 'Без оценки';
+	@override String get liked => 'Понравилось';
+	@override String get notLiked => 'Не отмечено понравившимся';
+	@override String get saved => 'Сохранено';
+	@override String get notAvailable => 'Совпадений не найдено';
+	@override String get noConnectedTrackers => 'Подключите трекер в настройках, чтобы оценивать там.';
 }
 
 // Path: accessibility
@@ -578,6 +601,7 @@ class _TranslationsVideoControlsRu extends TranslationsVideoControlsEn {
 	@override String endsAt({required Object time}) => 'Закончится в ${time}';
 	@override String get pipActive => 'Воспроизводится в режиме «картинка в картинке»';
 	@override String get pipFailed => 'Не удалось запустить режим «картинка в картинке»';
+	@override String get screenshotSaved => 'Снимок экрана сохранён';
 	@override late final _TranslationsVideoControlsPipErrorsRu pipErrors = _TranslationsVideoControlsPipErrorsRu._(_root);
 	@override String get chapters => 'Главы';
 	@override String get noChaptersAvailable => 'Главы недоступны';
@@ -647,7 +671,7 @@ class _TranslationsMessagesRu extends TranslationsMessagesEn {
 	@override String failedPlayback({required Object action, required Object error}) => 'Не удалось ${action}: ${error}';
 	@override String get switchingToCompatiblePlayer => 'Переключение на совместимый плеер...';
 	@override String get serverLimitTitle => 'Ошибка воспроизведения';
-	@override String get serverLimitBody => 'Сервер вернул ошибку (HTTP 500). Обычно это означает, что владелец сервера установил лимит пропускной способности или транскодирования, из-за которого ваш сеанс отклоняется. Со стороны клиента сделать ничего нельзя — владельцу сервера нужно изменить настройки.';
+	@override String get serverLimitBody => 'Ошибка сервера (HTTP 500). Лимит пропускной способности/транскодирования, вероятно, отклонил сессию. Попросите владельца изменить настройки.';
 	@override String get logsUploaded => 'Логи загружены';
 	@override String get logsUploadFailed => 'Не удалось загрузить логи';
 	@override String get logId => 'ID лога';
@@ -718,13 +742,13 @@ class _TranslationsProfilesRu extends TranslationsProfilesEn {
 	@override String get addPlezyProfile => 'Добавить профиль Plezy';
 	@override String get switchingProfile => 'Переключение профиля…';
 	@override String get deleteThisProfileTitle => 'Удалить этот профиль?';
-	@override String deleteThisProfileMessage({required Object displayName}) => '${displayName} будет удалён. Подключения не пострадают.';
+	@override String deleteThisProfileMessage({required Object displayName}) => 'Удалить ${displayName}. Подключения не изменятся.';
 	@override String get active => 'Активный';
 	@override String get manage => 'Управление';
 	@override String get delete => 'Удалить';
 	@override String get signOut => 'Выйти';
 	@override String get signOutPlexTitle => 'Выйти из Plex?';
-	@override String signOutPlexMessage({required Object displayName}) => '${displayName} и все пользователи Plex Home этой учётной записи будут удалены с этого устройства. Вы можете войти снова в любое время.';
+	@override String signOutPlexMessage({required Object displayName}) => 'Удалить ${displayName} и всех пользователей Plex Home? Вы сможете войти снова в любое время.';
 	@override String get signedOutPlex => 'Вы вышли из Plex.';
 	@override String get signOutFailed => 'Не удалось выйти.';
 	@override String get sectionTitle => 'Профили';
@@ -732,30 +756,44 @@ class _TranslationsProfilesRu extends TranslationsProfilesEn {
 	@override String summaryMultipleWithActive({required Object count, required Object activeName}) => '${count} профилей · активный: ${activeName}';
 	@override String summaryMultiple({required Object count}) => '${count} профилей';
 	@override String get removeConnectionTitle => 'Удалить соединение?';
-	@override String removeConnectionMessage({required Object displayName, required Object connectionLabel}) => '${displayName} потеряет доступ к ${connectionLabel}. Само соединение останется доступным для других профилей.';
+	@override String removeConnectionMessage({required Object displayName, required Object connectionLabel}) => 'Удалить доступ ${displayName} к ${connectionLabel}. У других профилей он останется.';
 	@override String get deleteProfileTitle => 'Удалить профиль?';
-	@override String deleteProfileMessage({required Object displayName}) => 'Это удалит ${displayName} и все его соединения с этого устройства. Сами серверы Plex/Jellyfin не будут затронуты.';
+	@override String deleteProfileMessage({required Object displayName}) => 'Удалить ${displayName} и его подключения. Серверы останутся доступны.';
 	@override String get profileNameLabel => 'Имя профиля';
 	@override String get pinProtectionLabel => 'Защита PIN-кодом';
 	@override String get pinManagedByPlex => 'PIN управляется Plex. Редактируйте на plex.tv.';
 	@override String get noPinSetEditOnPlex => 'PIN не установлен. Чтобы требовать его, отредактируйте пользователя Home на plex.tv.';
 	@override String get setPin => 'Установить PIN';
+	@override String get setPinTitle => 'Установить PIN';
+	@override String get confirmPinTitle => 'Подтвердить PIN';
+	@override String get pinSet => 'PIN установлен';
+	@override String get changePin => 'Изменить';
+	@override String get removePin => 'Удалить';
 	@override String get connectionsLabel => 'Соединения';
 	@override String get add => 'Добавить';
 	@override String get deleteProfileButton => 'Удалить профиль';
 	@override String get noConnectionsHint => 'Нет соединений — добавьте одно, чтобы использовать этот профиль.';
+	@override String get noConnections => 'Нет соединений';
 	@override String get plexHomeAccount => 'Аккаунт Plex Home';
 	@override String get connectionDefault => 'По умолчанию';
+	@override String connectionAs({required Object displayName}) => 'как ${displayName}';
 	@override String get makeDefault => 'Сделать по умолчанию';
 	@override String get removeConnection => 'Удалить';
+	@override String get profileRenamed => 'Профиль переименован.';
 	@override String borrowAddTo({required Object displayName}) => 'Добавить в ${displayName}';
-	@override String get borrowExplain => 'Заимствуйте соединение из другого профиля. Защищённые PIN-кодом исходные профили запросят PIN перед предоставлением доступа.';
+	@override String get borrowExplain => 'Заимствуйте подключение другого профиля. Для профилей с PIN нужен PIN.';
 	@override String get borrowEmpty => 'Пока нечего заимствовать.';
-	@override String get borrowEmptySubtitle => 'Сначала подключите аккаунт Plex или сервер Jellyfin к другому профилю, а затем вернитесь сюда.';
+	@override String get borrowEmptySubtitle => 'Сначала подключите Plex или Jellyfin к другому профилю.';
+	@override String borrowFromProfile({required Object displayName}) => 'Из ${displayName}';
+	@override String get borrowConnectionBorrowed => 'Подключение заимствовано.';
+	@override String get borrowFailed => 'Не удалось заимствовать подключение.';
+	@override String get incorrectPin => 'Неверный PIN.';
+	@override String get sourceProfileMissingParentAccount => 'У исходного профиля отсутствует родительская учетная запись.';
+	@override String get failedToVerifyPin => 'Не удалось проверить PIN.';
 	@override String get newProfile => 'Новый профиль';
 	@override String get profileNameHint => 'например, Гости, Дети, Семейная комната';
 	@override String get pinProtectionOptional => 'Защита PIN-кодом (необязательно)';
-	@override String get pinExplain => 'Для переключения на этот профиль требуется 4-значный PIN. Мягкий барьер — любой, кто может очистить данные приложения, может его обойти.';
+	@override String get pinExplain => 'Для переключения профилей нужен 4-значный PIN.';
 	@override String get continueButton => 'Продолжить';
 	@override String get pinsDontMatch => 'PIN-коды не совпадают';
 }
@@ -770,7 +808,7 @@ class _TranslationsConnectionsRu extends TranslationsConnectionsEn {
 	@override String get sectionTitle => 'Подключения';
 	@override String get addConnection => 'Добавить подключение';
 	@override String get addConnectionSubtitleNoProfile => 'Войдите через Plex или подключите сервер Jellyfin';
-	@override String addConnectionSubtitleScoped({required Object displayName}) => 'Добавить к ${displayName} — учётная запись Plex, сервер Jellyfin или заимствовать из другого профиля';
+	@override String addConnectionSubtitleScoped({required Object displayName}) => 'Добавить к ${displayName}: Plex, Jellyfin или подключение другого профиля';
 	@override String sessionExpiredOne({required Object name}) => 'Сессия истекла для ${name}';
 	@override String sessionExpiredMany({required Object count}) => 'Сессия истекла для ${count} серверов';
 	@override String get signInAgain => 'Войти снова';
@@ -898,7 +936,7 @@ class _TranslationsServerSelectionRu extends TranslationsServerSelectionEn {
 	final TranslationsRu _root; // ignore: unused_field
 
 	// Translations
-	@override String get allServerConnectionsFailed => 'Не удалось подключиться ни к одному серверу. Проверьте сеть и попробуйте снова.';
+	@override String get allServerConnectionsFailed => 'Не удалось подключиться ни к одному серверу. Проверьте сеть.';
 	@override String noServersFoundForAccount({required Object username, required Object email}) => 'Серверы не найдены для ${username} (${email})';
 	@override String failedToLoadServers({required Object error}) => 'Не удалось загрузить серверы: ${error}';
 }
@@ -1033,7 +1071,7 @@ class _TranslationsCollectionsRu extends TranslationsCollectionsEn {
 	@override String get empty => 'Коллекция пуста';
 	@override String get unknownLibrarySection => 'Невозможно удалить: неизвестный раздел библиотеки';
 	@override String get deleteCollection => 'Удалить коллекцию';
-	@override String deleteConfirm({required Object title}) => 'Вы уверены, что хотите удалить "${title}"? Это действие нельзя отменить.';
+	@override String deleteConfirm({required Object title}) => 'Удалить "${title}"? Это нельзя отменить.';
 	@override String get deleted => 'Коллекция удалена';
 	@override String get deleteFailed => 'Не удалось удалить коллекцию';
 	@override String deleteFailedWithError({required Object error}) => 'Не удалось удалить коллекцию: ${error}';
@@ -1131,11 +1169,11 @@ class _TranslationsWatchTogetherRu extends TranslationsWatchTogetherEn {
 	@override String get pasteFromClipboard => 'Вставить из буфера обмена';
 	@override String get pleaseEnterCode => 'Введите код сессии';
 	@override String get codeMustBe5Chars => 'Код сессии должен содержать 5 символов';
-	@override String get joinInstructions => 'Введите код сессии, предоставленный хостом, чтобы присоединиться к просмотру.';
+	@override String get joinInstructions => 'Введите код сессии хоста, чтобы присоединиться.';
 	@override String get failedToCreate => 'Не удалось создать сессию';
 	@override String get failedToJoin => 'Не удалось присоединиться к сессии';
 	@override String get sessionCodeCopied => 'Код сессии скопирован в буфер обмена';
-	@override String get relayUnreachable => 'Ретранслятор недоступен. Возможно, ваш провайдер блокирует подключение. Вы можете попробовать, но «Смотреть вместе» может не работать.';
+	@override String get relayUnreachable => 'Сервер relay недоступен. Блокировка ISP может мешать Watch Together.';
 	@override String get reconnectingToHost => 'Переподключение к хосту...';
 	@override String get currentPlayback => 'Текущее воспроизведение';
 	@override String get joinCurrentPlayback => 'Присоединиться к текущему воспроизведению';
@@ -1172,10 +1210,10 @@ class _TranslationsDownloadsRu extends TranslationsDownloadsEn {
 	@override String get deleteDownload => 'Удалить загрузку';
 	@override String get retryDownload => 'Повторить загрузку';
 	@override String get downloadQueued => 'Загрузка поставлена в очередь';
-	@override String get serverErrorBitrate => 'Ошибка сервера — файл может превышать лимит битрейта удалённого стриминга';
+	@override String get serverErrorBitrate => 'Ошибка сервера: файл может превышать удаленный лимит bitrate';
 	@override String episodesQueued({required Object count}) => '${count} эпизодов поставлено в очередь загрузки';
 	@override String get downloadDeleted => 'Загрузка удалена';
-	@override String deleteConfirm({required Object title}) => 'Вы уверены, что хотите удалить "${title}"? Загруженный файл будет удалён с устройства.';
+	@override String deleteConfirm({required Object title}) => 'Удалить "${title}" с этого устройства?';
 	@override String deletingWithProgress({required Object title, required Object current, required Object total}) => 'Удаление ${title}... (${current} из ${total})';
 	@override String get deleting => 'Удаление...';
 	@override String get queuedTooltip => 'В очереди';
@@ -1285,7 +1323,7 @@ class _TranslationsExternalPlayerRu extends TranslationsExternalPlayerEn {
 	// Translations
 	@override String get title => 'Внешний плеер';
 	@override String get useExternalPlayer => 'Использовать внешний плеер';
-	@override String get useExternalPlayerDescription => 'Открывать видео во внешнем приложении вместо встроенного плеера';
+	@override String get useExternalPlayerDescription => 'Открывать видео в другом приложении';
 	@override String get selectPlayer => 'Выбрать плеер';
 	@override String get customPlayers => 'Свои плееры';
 	@override String get systemDefault => 'Системный по умолчанию';
@@ -1393,7 +1431,7 @@ class _TranslationsMatchScreenRu extends TranslationsMatchScreenEn {
 	@override String get match => 'Сопоставить...';
 	@override String get fixMatch => 'Исправить сопоставление...';
 	@override String get unmatch => 'Сбросить сопоставление';
-	@override String get unmatchConfirm => 'Сбросить текущее сопоставление этого элемента? Plex будет считать его несопоставленным, пока вы не сопоставите его снова.';
+	@override String get unmatchConfirm => 'Очистить это совпадение? Plex будет считать его несопоставленным до повторного сопоставления.';
 	@override String get unmatchSuccess => 'Сопоставление сброшено';
 	@override String get unmatchFailed => 'Не удалось сбросить сопоставление';
 	@override String get matchApplied => 'Сопоставление применено';
@@ -1427,7 +1465,7 @@ class _TranslationsTraktRu extends TranslationsTraktEn {
 	@override String get connected => 'Подключено';
 	@override String connectedAs({required Object username}) => 'Подключено как @${username}';
 	@override String get disconnectConfirm => 'Отключить аккаунт Trakt?';
-	@override String get disconnectConfirmBody => 'Plezy перестанет отправлять события воспроизведения в Trakt. Вы можете подключиться снова в любое время.';
+	@override String get disconnectConfirmBody => 'Plezy перестанет отправлять события в Trakt. Можно подключить снова в любое время.';
 	@override String get scrobble => 'Скробблинг в реальном времени';
 	@override String get scrobbleDescription => 'Отправлять события воспроизведения, паузы и остановки в Trakt во время просмотра.';
 	@override String get watchedSync => 'Синхронизация статуса просмотра';
@@ -1448,7 +1486,7 @@ class _TranslationsTrackersRu extends TranslationsTrackersEn {
 	@override String get scrobble => 'Автоматически отслеживать прогресс';
 	@override String get scrobbleDescription => 'Обновляет список, когда вы заканчиваете эпизод или фильм.';
 	@override String disconnectConfirm({required Object service}) => 'Отключить ${service}?';
-	@override String disconnectConfirmBody({required Object service}) => 'Plezy перестанет обновлять ваш список ${service}. Вы можете подключиться снова в любое время.';
+	@override String disconnectConfirmBody({required Object service}) => 'Plezy перестанет обновлять ${service}. Подключите снова в любое время.';
 	@override String connectFailed({required Object service}) => 'Не удалось подключиться к ${service}. Попробуйте ещё раз.';
 	@override late final _TranslationsTrackersServicesRu services = _TranslationsTrackersServicesRu._(_root);
 	@override late final _TranslationsTrackersDeviceCodeRu deviceCode = _TranslationsTrackersDeviceCodeRu._(_root);
@@ -1464,7 +1502,7 @@ class _TranslationsAddServerRu extends TranslationsAddServerEn {
 
 	// Translations
 	@override String get addJellyfinTitle => 'Добавить сервер Jellyfin';
-	@override String get jellyfinUrlIntro => 'Введите URL вашего сервера Jellyfin — например, `https://jellyfin.example.com`. Войти можно после.';
+	@override String get jellyfinUrlIntro => 'Введите URL сервера, например `https://jellyfin.example.com`.';
 	@override String get serverUrl => 'URL сервера';
 	@override String get findServer => 'Найти сервер';
 	@override String get username => 'Имя пользователя';
@@ -1476,25 +1514,25 @@ class _TranslationsAddServerRu extends TranslationsAddServerEn {
 	@override String signInFailed({required Object error}) => 'Не удалось войти: ${error}';
 	@override String quickConnectFailed({required Object error}) => 'Quick Connect не удался: ${error}';
 	@override String get addPlexTitle => 'Войти через Plex';
-	@override String get plexAuthIntro => 'Выберите способ входа в Plex. Поток в браузере открывает plex.tv, где вы подтверждаете подключение; QR-вариант удобен для TV или удалённых устройств.';
+	@override String get plexAuthIntro => 'Войдите через браузер или QR-код.';
 	@override String get plexQRPrompt => 'Отсканируйте этот QR-код, чтобы войти.';
 	@override String get waitingForPlexConfirmation => 'Ожидание подтверждения от plex.tv…';
 	@override String get pinExpired => 'Срок действия PIN истёк до входа. Попробуйте снова.';
-	@override String get duplicatePlexAccount => 'Это устройство уже подключено к учётной записи Plex. Выйдите в настройках, чтобы сменить учётную запись.';
+	@override String get duplicatePlexAccount => 'В Plex уже выполнен вход. Выйдите, чтобы сменить аккаунт.';
 	@override String failedToRegisterAccount({required Object error}) => 'Не удалось зарегистрировать учётную запись: ${error}';
 	@override String get enterJellyfinUrlError => 'Введите URL вашего сервера Jellyfin';
 	@override String get addConnectionTitle => 'Добавить подключение';
 	@override String addConnectionTitleScoped({required Object name}) => 'Добавить в ${name}';
-	@override String get addConnectionIntroGlobal => 'Добавьте ещё один медиасервер. Можно сочетать учётные записи Plex и серверы Jellyfin — элементы со всех подключённых бэкендов появятся вместе на главном экране.';
+	@override String get addConnectionIntroGlobal => 'Добавьте еще один медиасервер. Plex и Jellyfin появятся вместе на главной.';
 	@override String get addConnectionIntroScoped => 'Добавьте новый сервер или одолжите из другого профиля.';
 	@override String get signInWithPlexCard => 'Войти через Plex';
-	@override String get signInWithPlexCardSubtitle => 'Авторизуйте это устройство в вашей учётной записи Plex. Серверы, общие с учётной записью, добавятся автоматически.';
-	@override String get signInWithPlexCardSubtitleScoped => 'Авторизуйте новую учётную запись Plex. Её Home-пользователи появятся как профили.';
+	@override String get signInWithPlexCardSubtitle => 'Авторизуйте это устройство. Общие серверы будут добавлены.';
+	@override String get signInWithPlexCardSubtitleScoped => 'Авторизуйте аккаунт Plex. Пользователи Home станут профилями.';
 	@override String get connectToJellyfinCard => 'Подключиться к Jellyfin';
-	@override String get connectToJellyfinCardSubtitle => 'Введите URL сервера Jellyfin и войдите с именем пользователя и паролем (Quick Connect — скоро).';
+	@override String get connectToJellyfinCardSubtitle => 'Введите URL сервера, имя пользователя и пароль.';
 	@override String connectToJellyfinCardSubtitleScoped({required Object name}) => 'Войдите на сервер Jellyfin. Привязывается к ${name}.';
 	@override String get borrowFromAnotherProfile => 'Одолжить из другого профиля';
-	@override String get borrowFromAnotherProfileSubtitle => 'Повторно используйте подключение, уже привязанное к другому профилю. PIN-защищённые исходные профили запрашивают PIN.';
+	@override String get borrowFromAnotherProfileSubtitle => 'Используйте подключение другого профиля. Для профилей с PIN нужен PIN.';
 }
 
 // Path: hotkeys.actions
@@ -1525,6 +1563,7 @@ class _TranslationsHotkeysActionsRu extends TranslationsHotkeysActionsEn {
 	@override String get subSeekPrev => 'К предыдущему субтитру';
 	@override String get shaderToggle => 'Вкл./выкл. шейдеры';
 	@override String get skipMarker => 'Пропустить вступление/титры';
+	@override String get screenshot => 'Сделать снимок экрана';
 }
 
 // Path: videoControls.pipErrors
@@ -1536,7 +1575,7 @@ class _TranslationsVideoControlsPipErrorsRu extends TranslationsVideoControlsPip
 	// Translations
 	@override String get androidVersion => 'Требуется Android 8.0 или новее';
 	@override String get iosVersion => 'Требуется iOS 15.0 или новее';
-	@override String get permissionDisabled => 'Разрешение «картинка в картинке» отключено. Включите в Настройки > Приложения > Plezy > Картинка в картинке';
+	@override String get permissionDisabled => 'Картинка-в-картинке отключена. Включите ее в системных настройках.';
 	@override String get notSupported => 'Устройство не поддерживает режим «картинка в картинке»';
 	@override String get voSwitchFailed => 'Не удалось переключить видеовыход для «картинки в картинке»';
 	@override String get failed => 'Не удалось запустить режим «картинка в картинке»';
@@ -1596,8 +1635,18 @@ class _TranslationsLibrariesSortLabelsRu extends TranslationsLibrariesSortLabels
 	@override String get dateAdded => 'Дата добавления';
 	@override String get releaseDate => 'Дата выхода';
 	@override String get rating => 'Рейтинг';
+	@override String get communityRating => 'Оценка сообщества';
+	@override String get criticRating => 'Оценка критиков';
 	@override String get lastPlayed => 'Последний просмотр';
+	@override String get datePlayed => 'Дата просмотра';
 	@override String get playCount => 'Количество просмотров';
+	@override String get productionYear => 'Год производства';
+	@override String get runtime => 'Длительность';
+	@override String get officialRating => 'Официальный рейтинг';
+	@override String get premiereDate => 'Дата премьеры';
+	@override String get startDate => 'Дата начала';
+	@override String get airTime => 'Время эфира';
+	@override String get studio => 'Студия';
 	@override String get random => 'Случайно';
 	@override String get dateShared => 'Дата открытия доступа';
 	@override String get latestEpisodeAirDate => 'Дата выхода последнего эпизода';
@@ -1616,7 +1665,7 @@ class _TranslationsCompanionRemoteSessionRu extends TranslationsCompanionRemoteS
 	@override String get connected => 'Подключено';
 	@override String get serverRunning => 'Удалённый сервер активен';
 	@override String get serverStopped => 'Удалённый сервер остановлен';
-	@override String get serverRunningDescription => 'Мобильные устройства в вашей сети могут обнаруживать это приложение и подключаться к нему';
+	@override String get serverRunningDescription => 'Мобильные устройства в вашей сети могут подключаться к этому приложению';
 	@override String get serverStoppedDescription => 'Запустите сервер, чтобы разрешить подключение мобильных устройств';
 	@override String get usePhoneToControl => 'Используйте мобильное устройство для управления этим приложением';
 	@override String get startServer => 'Запустить сервер';
@@ -1631,20 +1680,20 @@ class _TranslationsCompanionRemotePairingRu extends TranslationsCompanionRemoteP
 	final TranslationsRu _root; // ignore: unused_field
 
 	// Translations
-	@override String get discoveryDescription => 'Устройства в вашей сети с Plezy на том же аккаунте Plex появятся автоматически';
+	@override String get discoveryDescription => 'Устройства Plezy с тем же аккаунтом Plex появятся здесь';
 	@override String get hostAddressHint => '192.168.1.100:48632';
 	@override String get connecting => 'Подключение...';
 	@override String get searchingForDevices => 'Поиск устройств...';
 	@override String get noDevicesFound => 'Устройства в вашей сети не найдены';
-	@override String get noDevicesHint => 'Убедитесь, что Plezy открыт на вашем компьютере и оба устройства находятся в одной сети WiFi';
+	@override String get noDevicesHint => 'Откройте Plezy на компьютере и используйте тот же WiFi';
 	@override String get availableDevices => 'Доступные устройства';
 	@override String get manualConnection => 'Ручное подключение';
-	@override String get cryptoInitFailed => 'Не удалось инициализировать безопасное соединение. Убедитесь, что вы вошли в аккаунт Plex.';
+	@override String get cryptoInitFailed => 'Не удалось запустить защищенное подключение. Сначала войдите в Plex.';
 	@override String get validationHostRequired => 'Введите адрес хоста';
 	@override String get validationHostFormat => 'Формат должен быть IP:порт (например, 192.168.1.100:48632)';
-	@override String get connectionTimedOut => 'Время подключения истекло. Убедитесь, что оба устройства находятся в одной сети.';
+	@override String get connectionTimedOut => 'Время подключения истекло. Используйте одну сеть на обоих устройствах.';
 	@override String get sessionNotFound => 'Устройство не найдено. Убедитесь, что Plezy запущен на хосте.';
-	@override String get authFailed => 'Ошибка аутентификации. Убедитесь, что оба устройства используют один и тот же аккаунт Plex.';
+	@override String get authFailed => 'Аутентификация не удалась. На обоих устройствах нужен один аккаунт Plex.';
 	@override String failedToConnect({required Object error}) => 'Не удалось подключиться: ${error}';
 }
 
@@ -1718,7 +1767,7 @@ class _TranslationsTrackersOauthProxyRu extends TranslationsTrackersOauthProxyEn
 
 	// Translations
 	@override String title({required Object service}) => 'Войти в ${service}';
-	@override String get body => 'Отсканируйте этот QR-код телефоном или откройте ссылку ниже на любом устройстве с браузером.';
+	@override String get body => 'Отсканируйте этот QR-код или откройте URL на любом устройстве.';
 	@override String openToSignIn({required Object service}) => 'Открыть ${service} для входа';
 	@override String get urlCopied => 'URL скопирован';
 }
@@ -1759,16 +1808,16 @@ extension on TranslationsRu {
 			'auth.authenticate' => 'Аутентификация',
 			'auth.authenticationTimeout' => 'Время аутентификации истекло. Попробуйте снова.',
 			'auth.scanQRToSignIn' => 'Отсканируйте QR-код для входа',
-			'auth.waitingForAuth' => 'Ожидание аутентификации...\nЗавершите вход в браузере.',
+			'auth.waitingForAuth' => 'Ожидание аутентификации...\nВойдите в браузере.',
 			'auth.useBrowser' => 'Использовать браузер',
 			'auth.or' => 'или',
 			'auth.connectToJellyfin' => 'Подключиться к Jellyfin',
 			'auth.useQuickConnect' => 'Использовать Quick Connect',
 			'auth.quickConnectCode' => 'Код Quick Connect',
-			'auth.quickConnectInstructions' => 'Откройте сервер Jellyfin в браузере, войдите и выберите Quick Connect в меню пользователя. Введите этот код, чтобы подтвердить вход.',
+			'auth.quickConnectInstructions' => 'Откройте Quick Connect в Jellyfin и введите этот код.',
 			'auth.quickConnectWaiting' => 'Ожидание подтверждения…',
 			'auth.quickConnectCancel' => 'Отмена',
-			'auth.quickConnectExpired' => 'Срок действия кода Quick Connect истёк до подтверждения. Повторите попытку.',
+			'auth.quickConnectExpired' => 'Срок Quick Connect истек. Попробуйте снова.',
 			'common.cancel' => 'Отмена',
 			'common.save' => 'Сохранить',
 			'common.close' => 'Закрыть',
@@ -1800,9 +1849,6 @@ extension on TranslationsRu {
 			'common.mute' => 'Без звука',
 			'common.ok' => 'OK',
 			'common.reconnect' => 'Переподключить',
-			'common.exitConfirmTitle' => 'Выйти из приложения?',
-			'common.exitConfirmMessage' => 'Вы уверены, что хотите выйти?',
-			'common.dontAskAgain' => 'Больше не спрашивать',
 			'common.exit' => 'Выход',
 			'common.viewAll' => 'Показать все',
 			'common.checkingNetwork' => 'Проверка сети...',
@@ -1813,6 +1859,7 @@ extension on TranslationsRu {
 			'common.loading' => 'Загрузка...',
 			'common.fullscreen' => 'Полноэкранный режим',
 			'common.exitFullscreen' => 'Выйти из полноэкранного режима',
+			'common.pressBackAgainToExit' => 'Нажмите ещё раз для выхода',
 			'screens.licenses' => 'Лицензии',
 			'screens.switchProfile' => 'Сменить профиль',
 			'screens.subtitleStyling' => 'Стиль субтитров',
@@ -1856,21 +1903,21 @@ extension on TranslationsRu {
 			'settings.listView' => 'Список',
 			'settings.showHeroSection' => 'Показать раздел избранного',
 			'settings.useGlobalHubs' => 'Использовать макет главной',
-			'settings.useGlobalHubsDescription' => 'Показывать хабы главной страницы как в официальном клиенте. Если выключено, показывает рекомендации по библиотекам.',
+			'settings.useGlobalHubsDescription' => 'Показывать единые разделы главной. Иначе использовать рекомендации библиотек.',
 			'settings.showServerNameOnHubs' => 'Показывать имя сервера в хабах',
-			'settings.showServerNameOnHubsDescription' => 'Всегда показывать имя сервера в заголовках хабов. При выключении показывает только для дублирующихся имён.',
+			'settings.showServerNameOnHubsDescription' => 'Всегда показывать имена серверов в заголовках разделов.',
 			'settings.groupLibrariesByServer' => 'Группировать библиотеки по серверам',
-			'settings.groupLibrariesByServerDescription' => 'Показывать заголовок для каждого медиасервера в боковой панели при подключении к нескольким серверам.',
+			'settings.groupLibrariesByServerDescription' => 'Группировать библиотеки боковой панели по медиасерверам.',
 			'settings.alwaysKeepSidebarOpen' => 'Всегда держать боковую панель открытой',
 			'settings.alwaysKeepSidebarOpenDescription' => 'Боковая панель остаётся развёрнутой, область контента подстраивается',
 			'settings.showUnwatchedCount' => 'Показывать количество непросмотренных',
 			'settings.showUnwatchedCountDescription' => 'Отображать количество непросмотренных эпизодов для сериалов и сезонов',
 			'settings.showEpisodeNumberOnCards' => 'Показывать номер эпизода на карточках',
-			'settings.showEpisodeNumberOnCardsDescription' => 'Отображать номер эпизода рядом с сезоном (напр. S2 E3) на карточках эпизодов',
+			'settings.showEpisodeNumberOnCardsDescription' => 'Показывать номер сезона и серии на карточках серий',
 			'settings.showSeasonPostersOnTabs' => 'Показывать постеры сезонов на вкладках',
-			'settings.showSeasonPostersOnTabsDescription' => 'Отображать постер сезона над каждой вкладкой сезона на странице сведений сериала',
+			'settings.showSeasonPostersOnTabsDescription' => 'Показывать постер каждого сезона над его вкладкой',
 			'settings.hideSpoilers' => 'Скрыть спойлеры непросмотренных эпизодов',
-			'settings.hideSpoilersDescription' => 'Размывать миниатюры и скрывать описания эпизодов, которые вы ещё не смотрели',
+			'settings.hideSpoilersDescription' => 'Размывать миниатюры и описания непросмотренных серий',
 			'settings.playerBackend' => 'Бэкенд плеера',
 			'settings.exoPlayer' => 'ExoPlayer (Рекомендуется)',
 			'settings.mpv' => 'mpv',
@@ -1879,7 +1926,7 @@ extension on TranslationsRu {
 			'settings.bufferSize' => 'Размер буфера',
 			'settings.bufferSizeMB' => ({required Object size}) => '${size}МБ',
 			'settings.bufferSizeAuto' => 'Авто (Рекомендуется)',
-			'settings.bufferSizeWarning' => ({required Object heap, required Object size}) => 'У вашего устройства ${heap}МБ памяти. Буфер ${size}МБ может вызвать проблемы с воспроизведением.',
+			'settings.bufferSizeWarning' => ({required Object heap, required Object size}) => 'Доступно памяти: ${heap}MB. Буфер ${size}MB может повлиять на воспроизведение.',
 			'settings.defaultQualityTitle' => 'Качество по умолчанию',
 			'settings.defaultQualityDescription' => 'Используется при запуске воспроизведения. Более низкие значения снижают пропускную способность.',
 			'settings.subtitleStyling' => 'Стиль субтитров',
@@ -1891,18 +1938,18 @@ extension on TranslationsRu {
 			'settings.defaultSleepTimer' => 'Таймер сна по умолчанию',
 			'settings.minutesUnit' => ({required Object minutes}) => '${minutes} минут',
 			'settings.rememberTrackSelections' => 'Запоминать выбор дорожек для каждого сериала/фильма',
-			'settings.rememberTrackSelectionsDescription' => 'Автоматически сохранять предпочтения языка аудио и субтитров при переключении дорожек во время воспроизведения',
+			'settings.rememberTrackSelectionsDescription' => 'Запоминать выбор аудио и субтитров для тайтла',
 			'settings.showChapterMarkersOnTimeline' => 'Показывать маркеры глав на шкале перемотки',
 			'settings.showChapterMarkersOnTimelineDescription' => 'Разделять шкалу перемотки по границам глав',
 			'settings.clickVideoTogglesPlayback' => 'Клик по видео для переключения воспроизведения/паузы',
-			'settings.clickVideoTogglesPlaybackDescription' => 'Если включено, клик по видеоплееру воспроизводит/ставит на паузу. В противном случае показывает/скрывает элементы управления.',
+			'settings.clickVideoTogglesPlaybackDescription' => 'Клик по видео запускает/ставит на паузу вместо показа управления.',
 			'settings.videoPlayerControls' => 'Элементы управления плеером',
 			'settings.keyboardShortcuts' => 'Горячие клавиши',
 			'settings.keyboardShortcutsDescription' => 'Настроить горячие клавиши',
 			'settings.videoPlayerNavigation' => 'Навигация видеоплеера',
 			'settings.videoPlayerNavigationDescription' => 'Использовать клавиши стрелок для навигации по элементам управления плеером',
 			'settings.watchTogetherRelay' => 'Relay совместного просмотра',
-			'settings.watchTogetherRelayDescription' => 'Указать пользовательский relay-сервер для совместного просмотра. Все участники должны использовать один и тот же сервер.',
+			'settings.watchTogetherRelayDescription' => 'Задайте свой relay. Все должны использовать один сервер.',
 			'settings.watchTogetherRelayHint' => 'https://my-relay.example.com',
 			'settings.crashReporting' => 'Отчёты об ошибках',
 			'settings.crashReportingDescription' => 'Отправлять отчёты об ошибках для улучшения приложения',
@@ -1911,10 +1958,10 @@ extension on TranslationsRu {
 			'settings.viewLogs' => 'Просмотр логов',
 			'settings.viewLogsDescription' => 'Просмотр логов приложения',
 			'settings.clearCache' => 'Очистить кэш',
-			'settings.clearCacheDescription' => 'Это удалит все кэшированные изображения и данные. После очистки кэша приложение может загружать контент дольше.',
+			'settings.clearCacheDescription' => 'Очистить кэш изображений и данных. Контент может загружаться медленнее.',
 			'settings.clearCacheSuccess' => 'Кэш успешно очищен',
 			'settings.resetSettings' => 'Сбросить настройки',
-			'settings.resetSettingsDescription' => 'Все настройки будут сброшены до значений по умолчанию. Это действие нельзя отменить.',
+			'settings.resetSettingsDescription' => 'Восстановить настройки по умолчанию. Это нельзя отменить.',
 			'settings.resetSettingsSuccess' => 'Настройки успешно сброшены',
 			'settings.backup' => 'Резервная копия',
 			'settings.exportSettings' => 'Экспорт настроек',
@@ -1935,7 +1982,7 @@ extension on TranslationsRu {
 			'settings.updateAvailable' => 'Доступно обновление',
 			'settings.checkForUpdates' => 'Проверить обновления',
 			'settings.autoCheckUpdatesOnStartup' => 'Автоматически проверять обновления при запуске',
-			'settings.autoCheckUpdatesOnStartupDescription' => 'Показывать уведомление при запуске, если доступна новая версия',
+			'settings.autoCheckUpdatesOnStartupDescription' => 'Уведомлять о доступном обновлении при запуске',
 			'settings.validationErrorEnterNumber' => 'Введите корректное число',
 			'settings.validationErrorDuration' => ({required Object min, required Object max, required Object unit}) => 'Длительность должна быть от ${min} до ${max} ${unit}',
 			'settings.shortcutAlreadyAssigned' => ({required Object action}) => 'Клавиша уже назначена для ${action}',
@@ -1946,7 +1993,7 @@ extension on TranslationsRu {
 			'settings.autoSkipCredits' => 'Автопропуск титров',
 			'settings.autoSkipCreditsDescription' => 'Автоматически пропускать титры и воспроизводить следующий эпизод',
 			'settings.forceSkipMarkerFallback' => 'Принудительные резервные маркеры',
-			'settings.forceSkipMarkerFallbackDescription' => 'Использовать шаблоны заголовков глав для маркеров пропуска, даже если Plex предоставляет встроенные маркеры',
+			'settings.forceSkipMarkerFallbackDescription' => 'Использовать шаблоны названий глав, даже если в Plex есть маркеры',
 			'settings.autoSkipDelay' => 'Задержка автопропуска',
 			'settings.autoSkipDelayDescription' => ({required Object seconds}) => 'Подождать ${seconds} секунд перед автопропуском',
 			'settings.introPattern' => 'Шаблон маркера вступления',
@@ -1968,8 +2015,8 @@ extension on TranslationsRu {
 			'settings.downloadOnWifiOnly' => 'Загружать только по WiFi',
 			'settings.downloadOnWifiOnlyDescription' => 'Запретить загрузку по мобильным данным',
 			'settings.autoRemoveWatchedDownloads' => 'Автоудаление просмотренных загрузок',
-			'settings.autoRemoveWatchedDownloadsDescription' => 'Автоматически удалять загруженные эпизоды и фильмы после просмотра',
-			'settings.cellularDownloadBlocked' => 'Загрузка по мобильным данным отключена. Подключитесь к WiFi или измените настройку.',
+			'settings.autoRemoveWatchedDownloadsDescription' => 'Автоматически удалять просмотренные загрузки',
+			'settings.cellularDownloadBlocked' => 'Загрузки через мобильную сеть заблокированы. Используйте WiFi или измените настройку.',
 			'settings.maxVolume' => 'Максимальная громкость',
 			'settings.maxVolumeDescription' => 'Разрешить усиление громкости выше 100% для тихих медиа',
 			'settings.maxVolumePercent' => ({required Object percent}) => '${percent}%',
@@ -1982,22 +2029,26 @@ extension on TranslationsRu {
 			'settings.companionRemoteServer' => 'Сервер удалённого управления',
 			'settings.companionRemoteServerDescription' => 'Разрешить мобильным устройствам в сети управлять этим приложением',
 			'settings.autoPip' => 'Автоматический «картинка в картинке»',
-			'settings.autoPipDescription' => 'Автоматически переходить в режим «картинка в картинке» при выходе из приложения во время воспроизведения',
+			'settings.autoPipDescription' => 'Включать картинку-в-картинке при выходе во время воспроизведения',
 			'settings.matchContentFrameRate' => 'Соответствие частоты кадров контента',
-			'settings.matchContentFrameRateDescription' => 'Настроить частоту обновления дисплея под видеоконтент, уменьшая дрожание и экономя батарею',
+			'settings.matchContentFrameRateDescription' => 'Подстраивать частоту обновления экрана под видео',
 			'settings.matchRefreshRate' => 'Соответствие частоты обновления',
-			'settings.matchRefreshRateDescription' => 'Переключать частоту обновления дисплея под видеоконтент в полноэкранном режиме',
+			'settings.matchRefreshRateDescription' => 'Подстраивать частоту обновления в полноэкранном режиме',
 			'settings.matchDynamicRange' => 'Соответствие динамического диапазона',
-			'settings.matchDynamicRangeDescription' => 'Автоматически включать HDR для HDR-контента и возвращать SDR при выходе из плеера',
+			'settings.matchDynamicRangeDescription' => 'Включать HDR для HDR-контента, затем возвращаться к SDR',
 			'settings.displaySwitchDelay' => 'Задержка переключения дисплея',
 			'settings.tunneledPlayback' => 'Туннельное воспроизведение',
-			'settings.tunneledPlaybackDescription' => 'Использовать аппаратный видеотуннелинг. Отключите, если видите чёрный экран со звуком при HDR-контенте',
+			'settings.tunneledPlaybackDescription' => 'Использовать видеотуннелирование. Отключите, если HDR показывает черный экран.',
+			'settings.dvConversionMode' => 'Преобразование Dolby Vision',
+			'settings.dvConversionModeDescription' => 'Выберите, как ExoPlayer обрабатывает файлы Dolby Vision Profile 7.',
+			'settings.dvConversionAuto' => 'Авто',
+			'settings.dvConversionNative' => 'Нативно / отключено',
+			'settings.dvConversionDv81' => 'P7 → P8.1',
+			'settings.dvConversionHevcStrip' => 'P7 → HEVC',
 			'settings.requireProfileSelectionOnOpen' => 'Запрашивать профиль при запуске',
 			'settings.requireProfileSelectionOnOpenDescription' => 'Показывать выбор профиля при каждом открытии приложения',
-			'settings.confirmExitOnBack' => 'Подтверждать выход',
-			'settings.confirmExitOnBackDescription' => 'Показывать диалог подтверждения при нажатии «назад» для выхода из приложения',
 			'settings.forceTvMode' => 'Принудительный режим ТВ',
-			'settings.forceTvModeDescription' => 'Использовать макет ТВ независимо от автоматического определения. Полезно на устройствах Android TV, которые не сообщают о функции leanback. Приложение перезапустится при изменении.',
+			'settings.forceTvModeDescription' => 'Принудительно включить ТВ-интерфейс. Для устройств без автоопределения. Требуется перезапуск.',
 			'settings.startInFullscreen' => 'Запускать в полноэкранном режиме',
 			'settings.startInFullscreenDescription' => 'Открывать Plezy в полноэкранном режиме при запуске',
 			'settings.autoHidePerformanceOverlay' => 'Автоскрытие оверлея производительности',
@@ -2042,6 +2093,7 @@ extension on TranslationsRu {
 			'hotkeys.actions.subSeekPrev' => 'К предыдущему субтитру',
 			'hotkeys.actions.shaderToggle' => 'Вкл./выкл. шейдеры',
 			'hotkeys.actions.skipMarker' => 'Пропустить вступление/титры',
+			'hotkeys.actions.screenshot' => 'Сделать снимок экрана',
 			'fileInfo.title' => 'Информация о файле',
 			'fileInfo.video' => 'Видео',
 			'fileInfo.audio' => 'Аудио',
@@ -2075,13 +2127,24 @@ extension on TranslationsRu {
 			'mediaMenu.shufflePlay' => 'Случайное воспроизведение',
 			'mediaMenu.fileInfo' => 'Информация о файле',
 			'mediaMenu.deleteFromServer' => 'Удалить с сервера',
-			'mediaMenu.confirmDelete' => 'Это навсегда удалит этот медиафайл и его файлы с вашего сервера. Это действие нельзя отменить.',
+			'mediaMenu.confirmDelete' => 'Удалить это медиа и его файлы с сервера?',
 			'mediaMenu.deleteMultipleWarning' => 'Это включает все эпизоды и их файлы.',
 			'mediaMenu.mediaDeletedSuccessfully' => 'Медиаэлемент успешно удалён',
 			'mediaMenu.mediaFailedToDelete' => 'Не удалось удалить медиаэлемент',
 			'mediaMenu.rate' => 'Оценить',
 			'mediaMenu.playFromBeginning' => 'Воспроизвести сначала',
 			'mediaMenu.playVersion' => 'Воспроизвести версию...',
+			'rateSheet.title' => 'Оценить',
+			'rateSheet.server' => 'Сервер',
+			'rateSheet.starValue' => ({required Object rating}) => '${rating} / 5',
+			'rateSheet.scoreValue' => ({required Object score}) => '${score} / 10',
+			'rateSheet.setScore' => 'Установить оценку',
+			'rateSheet.notRated' => 'Без оценки',
+			'rateSheet.liked' => 'Понравилось',
+			'rateSheet.notLiked' => 'Не отмечено понравившимся',
+			'rateSheet.saved' => 'Сохранено',
+			'rateSheet.notAvailable' => 'Совпадений не найдено',
+			'rateSheet.noConnectedTrackers' => 'Подключите трекер в настройках, чтобы оценивать там.',
 			'accessibility.mediaCardMovie' => ({required Object title}) => '${title}, фильм',
 			'accessibility.mediaCardShow' => ({required Object title}) => '${title}, сериал',
 			'accessibility.mediaCardEpisode' => ({required Object title, required Object episodeInfo}) => '${title}, ${episodeInfo}',
@@ -2150,9 +2213,10 @@ extension on TranslationsRu {
 			'videoControls.endsAt' => ({required Object time}) => 'Закончится в ${time}',
 			'videoControls.pipActive' => 'Воспроизводится в режиме «картинка в картинке»',
 			'videoControls.pipFailed' => 'Не удалось запустить режим «картинка в картинке»',
+			'videoControls.screenshotSaved' => 'Снимок экрана сохранён',
 			'videoControls.pipErrors.androidVersion' => 'Требуется Android 8.0 или новее',
 			'videoControls.pipErrors.iosVersion' => 'Требуется iOS 15.0 или новее',
-			'videoControls.pipErrors.permissionDisabled' => 'Разрешение «картинка в картинке» отключено. Включите в Настройки > Приложения > Plezy > Картинка в картинке',
+			'videoControls.pipErrors.permissionDisabled' => 'Картинка-в-картинке отключена. Включите ее в системных настройках.',
 			'videoControls.pipErrors.notSupported' => 'Устройство не поддерживает режим «картинка в картинке»',
 			'videoControls.pipErrors.voSwitchFailed' => 'Не удалось переключить видеовыход для «картинки в картинке»',
 			'videoControls.pipErrors.failed' => 'Не удалось запустить режим «картинка в картинке»',
@@ -2207,7 +2271,7 @@ extension on TranslationsRu {
 			'messages.failedPlayback' => ({required Object action, required Object error}) => 'Не удалось ${action}: ${error}',
 			'messages.switchingToCompatiblePlayer' => 'Переключение на совместимый плеер...',
 			'messages.serverLimitTitle' => 'Ошибка воспроизведения',
-			'messages.serverLimitBody' => 'Сервер вернул ошибку (HTTP 500). Обычно это означает, что владелец сервера установил лимит пропускной способности или транскодирования, из-за которого ваш сеанс отклоняется. Со стороны клиента сделать ничего нельзя — владельцу сервера нужно изменить настройки.',
+			'messages.serverLimitBody' => 'Ошибка сервера (HTTP 500). Лимит пропускной способности/транскодирования, вероятно, отклонил сессию. Попросите владельца изменить настройки.',
 			'messages.logsUploaded' => 'Логи загружены',
 			'messages.logsUploadFailed' => 'Не удалось загрузить логи',
 			'messages.logId' => 'ID лога',
@@ -2242,13 +2306,15 @@ extension on TranslationsRu {
 			'profiles.addPlezyProfile' => 'Добавить профиль Plezy',
 			'profiles.switchingProfile' => 'Переключение профиля…',
 			'profiles.deleteThisProfileTitle' => 'Удалить этот профиль?',
-			'profiles.deleteThisProfileMessage' => ({required Object displayName}) => '${displayName} будет удалён. Подключения не пострадают.',
+			'profiles.deleteThisProfileMessage' => ({required Object displayName}) => 'Удалить ${displayName}. Подключения не изменятся.',
 			'profiles.active' => 'Активный',
 			'profiles.manage' => 'Управление',
 			'profiles.delete' => 'Удалить',
 			'profiles.signOut' => 'Выйти',
 			'profiles.signOutPlexTitle' => 'Выйти из Plex?',
-			'profiles.signOutPlexMessage' => ({required Object displayName}) => '${displayName} и все пользователи Plex Home этой учётной записи будут удалены с этого устройства. Вы можете войти снова в любое время.',
+			'profiles.signOutPlexMessage' => ({required Object displayName}) => 'Удалить ${displayName} и всех пользователей Plex Home? Вы сможете войти снова в любое время.',
+			_ => null,
+		} ?? switch (path) {
 			'profiles.signedOutPlex' => 'Вы вышли из Plex.',
 			'profiles.signOutFailed' => 'Не удалось выйти.',
 			'profiles.sectionTitle' => 'Профили',
@@ -2256,38 +2322,50 @@ extension on TranslationsRu {
 			'profiles.summaryMultipleWithActive' => ({required Object count, required Object activeName}) => '${count} профилей · активный: ${activeName}',
 			'profiles.summaryMultiple' => ({required Object count}) => '${count} профилей',
 			'profiles.removeConnectionTitle' => 'Удалить соединение?',
-			'profiles.removeConnectionMessage' => ({required Object displayName, required Object connectionLabel}) => '${displayName} потеряет доступ к ${connectionLabel}. Само соединение останется доступным для других профилей.',
+			'profiles.removeConnectionMessage' => ({required Object displayName, required Object connectionLabel}) => 'Удалить доступ ${displayName} к ${connectionLabel}. У других профилей он останется.',
 			'profiles.deleteProfileTitle' => 'Удалить профиль?',
-			'profiles.deleteProfileMessage' => ({required Object displayName}) => 'Это удалит ${displayName} и все его соединения с этого устройства. Сами серверы Plex/Jellyfin не будут затронуты.',
+			'profiles.deleteProfileMessage' => ({required Object displayName}) => 'Удалить ${displayName} и его подключения. Серверы останутся доступны.',
 			'profiles.profileNameLabel' => 'Имя профиля',
 			'profiles.pinProtectionLabel' => 'Защита PIN-кодом',
 			'profiles.pinManagedByPlex' => 'PIN управляется Plex. Редактируйте на plex.tv.',
 			'profiles.noPinSetEditOnPlex' => 'PIN не установлен. Чтобы требовать его, отредактируйте пользователя Home на plex.tv.',
 			'profiles.setPin' => 'Установить PIN',
-			_ => null,
-		} ?? switch (path) {
+			'profiles.setPinTitle' => 'Установить PIN',
+			'profiles.confirmPinTitle' => 'Подтвердить PIN',
+			'profiles.pinSet' => 'PIN установлен',
+			'profiles.changePin' => 'Изменить',
+			'profiles.removePin' => 'Удалить',
 			'profiles.connectionsLabel' => 'Соединения',
 			'profiles.add' => 'Добавить',
 			'profiles.deleteProfileButton' => 'Удалить профиль',
 			'profiles.noConnectionsHint' => 'Нет соединений — добавьте одно, чтобы использовать этот профиль.',
+			'profiles.noConnections' => 'Нет соединений',
 			'profiles.plexHomeAccount' => 'Аккаунт Plex Home',
 			'profiles.connectionDefault' => 'По умолчанию',
+			'profiles.connectionAs' => ({required Object displayName}) => 'как ${displayName}',
 			'profiles.makeDefault' => 'Сделать по умолчанию',
 			'profiles.removeConnection' => 'Удалить',
+			'profiles.profileRenamed' => 'Профиль переименован.',
 			'profiles.borrowAddTo' => ({required Object displayName}) => 'Добавить в ${displayName}',
-			'profiles.borrowExplain' => 'Заимствуйте соединение из другого профиля. Защищённые PIN-кодом исходные профили запросят PIN перед предоставлением доступа.',
+			'profiles.borrowExplain' => 'Заимствуйте подключение другого профиля. Для профилей с PIN нужен PIN.',
 			'profiles.borrowEmpty' => 'Пока нечего заимствовать.',
-			'profiles.borrowEmptySubtitle' => 'Сначала подключите аккаунт Plex или сервер Jellyfin к другому профилю, а затем вернитесь сюда.',
+			'profiles.borrowEmptySubtitle' => 'Сначала подключите Plex или Jellyfin к другому профилю.',
+			'profiles.borrowFromProfile' => ({required Object displayName}) => 'Из ${displayName}',
+			'profiles.borrowConnectionBorrowed' => 'Подключение заимствовано.',
+			'profiles.borrowFailed' => 'Не удалось заимствовать подключение.',
+			'profiles.incorrectPin' => 'Неверный PIN.',
+			'profiles.sourceProfileMissingParentAccount' => 'У исходного профиля отсутствует родительская учетная запись.',
+			'profiles.failedToVerifyPin' => 'Не удалось проверить PIN.',
 			'profiles.newProfile' => 'Новый профиль',
 			'profiles.profileNameHint' => 'например, Гости, Дети, Семейная комната',
 			'profiles.pinProtectionOptional' => 'Защита PIN-кодом (необязательно)',
-			'profiles.pinExplain' => 'Для переключения на этот профиль требуется 4-значный PIN. Мягкий барьер — любой, кто может очистить данные приложения, может его обойти.',
+			'profiles.pinExplain' => 'Для переключения профилей нужен 4-значный PIN.',
 			'profiles.continueButton' => 'Продолжить',
 			'profiles.pinsDontMatch' => 'PIN-коды не совпадают',
 			'connections.sectionTitle' => 'Подключения',
 			'connections.addConnection' => 'Добавить подключение',
 			'connections.addConnectionSubtitleNoProfile' => 'Войдите через Plex или подключите сервер Jellyfin',
-			'connections.addConnectionSubtitleScoped' => ({required Object displayName}) => 'Добавить к ${displayName} — учётная запись Plex, сервер Jellyfin или заимствовать из другого профиля',
+			'connections.addConnectionSubtitleScoped' => ({required Object displayName}) => 'Добавить к ${displayName}: Plex, Jellyfin или подключение другого профиля',
 			'connections.sessionExpiredOne' => ({required Object name}) => 'Сессия истекла для ${name}',
 			'connections.sessionExpiredMany' => ({required Object count}) => 'Сессия истекла для ${count} серверов',
 			'connections.signInAgain' => 'Войти снова',
@@ -2380,8 +2458,18 @@ extension on TranslationsRu {
 			'libraries.sortLabels.dateAdded' => 'Дата добавления',
 			'libraries.sortLabels.releaseDate' => 'Дата выхода',
 			'libraries.sortLabels.rating' => 'Рейтинг',
+			'libraries.sortLabels.communityRating' => 'Оценка сообщества',
+			'libraries.sortLabels.criticRating' => 'Оценка критиков',
 			'libraries.sortLabels.lastPlayed' => 'Последний просмотр',
+			'libraries.sortLabels.datePlayed' => 'Дата просмотра',
 			'libraries.sortLabels.playCount' => 'Количество просмотров',
+			'libraries.sortLabels.productionYear' => 'Год производства',
+			'libraries.sortLabels.runtime' => 'Длительность',
+			'libraries.sortLabels.officialRating' => 'Официальный рейтинг',
+			'libraries.sortLabels.premiereDate' => 'Дата премьеры',
+			'libraries.sortLabels.startDate' => 'Дата начала',
+			'libraries.sortLabels.airTime' => 'Время эфира',
+			'libraries.sortLabels.studio' => 'Студия',
 			'libraries.sortLabels.random' => 'Случайно',
 			'libraries.sortLabels.dateShared' => 'Дата открытия доступа',
 			'libraries.sortLabels.latestEpisodeAirDate' => 'Дата выхода последнего эпизода',
@@ -2390,7 +2478,7 @@ extension on TranslationsRu {
 			'about.versionLabel' => ({required Object version}) => 'Версия ${version}',
 			'about.appDescription' => 'Красивый клиент Plex и Jellyfin на Flutter',
 			'about.viewLicensesDescription' => 'Просмотр лицензий сторонних библиотек',
-			'serverSelection.allServerConnectionsFailed' => 'Не удалось подключиться ни к одному серверу. Проверьте сеть и попробуйте снова.',
+			'serverSelection.allServerConnectionsFailed' => 'Не удалось подключиться ни к одному серверу. Проверьте сеть.',
 			'serverSelection.noServersFoundForAccount' => ({required Object username, required Object email}) => 'Серверы не найдены для ${username} (${email})',
 			'serverSelection.failedToLoadServers' => ({required Object error}) => 'Не удалось загрузить серверы: ${error}',
 			'hubDetail.title' => 'Название',
@@ -2471,7 +2559,7 @@ extension on TranslationsRu {
 			'collections.empty' => 'Коллекция пуста',
 			'collections.unknownLibrarySection' => 'Невозможно удалить: неизвестный раздел библиотеки',
 			'collections.deleteCollection' => 'Удалить коллекцию',
-			'collections.deleteConfirm' => ({required Object title}) => 'Вы уверены, что хотите удалить "${title}"? Это действие нельзя отменить.',
+			'collections.deleteConfirm' => ({required Object title}) => 'Удалить "${title}"? Это нельзя отменить.',
 			'collections.deleted' => 'Коллекция удалена',
 			'collections.deleteFailed' => 'Не удалось удалить коллекцию',
 			'collections.deleteFailedWithError' => ({required Object error}) => 'Не удалось удалить коллекцию: ${error}',
@@ -2551,11 +2639,11 @@ extension on TranslationsRu {
 			'watchTogether.pasteFromClipboard' => 'Вставить из буфера обмена',
 			'watchTogether.pleaseEnterCode' => 'Введите код сессии',
 			'watchTogether.codeMustBe5Chars' => 'Код сессии должен содержать 5 символов',
-			'watchTogether.joinInstructions' => 'Введите код сессии, предоставленный хостом, чтобы присоединиться к просмотру.',
+			'watchTogether.joinInstructions' => 'Введите код сессии хоста, чтобы присоединиться.',
 			'watchTogether.failedToCreate' => 'Не удалось создать сессию',
 			'watchTogether.failedToJoin' => 'Не удалось присоединиться к сессии',
 			'watchTogether.sessionCodeCopied' => 'Код сессии скопирован в буфер обмена',
-			'watchTogether.relayUnreachable' => 'Ретранслятор недоступен. Возможно, ваш провайдер блокирует подключение. Вы можете попробовать, но «Смотреть вместе» может не работать.',
+			'watchTogether.relayUnreachable' => 'Сервер relay недоступен. Блокировка ISP может мешать Watch Together.',
 			'watchTogether.reconnectingToHost' => 'Переподключение к хосту...',
 			'watchTogether.currentPlayback' => 'Текущее воспроизведение',
 			'watchTogether.joinCurrentPlayback' => 'Присоединиться к текущему воспроизведению',
@@ -2583,10 +2671,10 @@ extension on TranslationsRu {
 			'downloads.deleteDownload' => 'Удалить загрузку',
 			'downloads.retryDownload' => 'Повторить загрузку',
 			'downloads.downloadQueued' => 'Загрузка поставлена в очередь',
-			'downloads.serverErrorBitrate' => 'Ошибка сервера — файл может превышать лимит битрейта удалённого стриминга',
+			'downloads.serverErrorBitrate' => 'Ошибка сервера: файл может превышать удаленный лимит bitrate',
 			'downloads.episodesQueued' => ({required Object count}) => '${count} эпизодов поставлено в очередь загрузки',
 			'downloads.downloadDeleted' => 'Загрузка удалена',
-			'downloads.deleteConfirm' => ({required Object title}) => 'Вы уверены, что хотите удалить "${title}"? Загруженный файл будет удалён с устройства.',
+			'downloads.deleteConfirm' => ({required Object title}) => 'Удалить "${title}" с этого устройства?',
 			'downloads.deletingWithProgress' => ({required Object title, required Object current, required Object total}) => 'Удаление ${title}... (${current} из ${total})',
 			'downloads.deleting' => 'Удаление...',
 			'downloads.queuedTooltip' => 'В очереди',
@@ -2651,26 +2739,26 @@ extension on TranslationsRu {
 			'companionRemote.session.connected' => 'Подключено',
 			'companionRemote.session.serverRunning' => 'Удалённый сервер активен',
 			'companionRemote.session.serverStopped' => 'Удалённый сервер остановлен',
-			'companionRemote.session.serverRunningDescription' => 'Мобильные устройства в вашей сети могут обнаруживать это приложение и подключаться к нему',
+			'companionRemote.session.serverRunningDescription' => 'Мобильные устройства в вашей сети могут подключаться к этому приложению',
 			'companionRemote.session.serverStoppedDescription' => 'Запустите сервер, чтобы разрешить подключение мобильных устройств',
 			'companionRemote.session.usePhoneToControl' => 'Используйте мобильное устройство для управления этим приложением',
 			'companionRemote.session.startServer' => 'Запустить сервер',
 			'companionRemote.session.stopServer' => 'Остановить сервер',
 			'companionRemote.session.minimize' => 'Свернуть',
-			'companionRemote.pairing.discoveryDescription' => 'Устройства в вашей сети с Plezy на том же аккаунте Plex появятся автоматически',
+			'companionRemote.pairing.discoveryDescription' => 'Устройства Plezy с тем же аккаунтом Plex появятся здесь',
 			'companionRemote.pairing.hostAddressHint' => '192.168.1.100:48632',
 			'companionRemote.pairing.connecting' => 'Подключение...',
 			'companionRemote.pairing.searchingForDevices' => 'Поиск устройств...',
 			'companionRemote.pairing.noDevicesFound' => 'Устройства в вашей сети не найдены',
-			'companionRemote.pairing.noDevicesHint' => 'Убедитесь, что Plezy открыт на вашем компьютере и оба устройства находятся в одной сети WiFi',
+			'companionRemote.pairing.noDevicesHint' => 'Откройте Plezy на компьютере и используйте тот же WiFi',
 			'companionRemote.pairing.availableDevices' => 'Доступные устройства',
 			'companionRemote.pairing.manualConnection' => 'Ручное подключение',
-			'companionRemote.pairing.cryptoInitFailed' => 'Не удалось инициализировать безопасное соединение. Убедитесь, что вы вошли в аккаунт Plex.',
+			'companionRemote.pairing.cryptoInitFailed' => 'Не удалось запустить защищенное подключение. Сначала войдите в Plex.',
 			'companionRemote.pairing.validationHostRequired' => 'Введите адрес хоста',
 			'companionRemote.pairing.validationHostFormat' => 'Формат должен быть IP:порт (например, 192.168.1.100:48632)',
-			'companionRemote.pairing.connectionTimedOut' => 'Время подключения истекло. Убедитесь, что оба устройства находятся в одной сети.',
+			'companionRemote.pairing.connectionTimedOut' => 'Время подключения истекло. Используйте одну сеть на обоих устройствах.',
 			'companionRemote.pairing.sessionNotFound' => 'Устройство не найдено. Убедитесь, что Plezy запущен на хосте.',
-			'companionRemote.pairing.authFailed' => 'Ошибка аутентификации. Убедитесь, что оба устройства используют один и тот же аккаунт Plex.',
+			'companionRemote.pairing.authFailed' => 'Аутентификация не удалась. На обоих устройствах нужен один аккаунт Plex.',
 			'companionRemote.pairing.failedToConnect' => ({required Object error}) => 'Не удалось подключиться: ${error}',
 			'companionRemote.remote.disconnectConfirm' => 'Отключиться от удалённой сессии?',
 			'companionRemote.remote.reconnecting' => 'Переподключение...',
@@ -2711,7 +2799,7 @@ extension on TranslationsRu {
 			'videoSettings.audioNormalization' => 'Нормализация громкости',
 			'externalPlayer.title' => 'Внешний плеер',
 			'externalPlayer.useExternalPlayer' => 'Использовать внешний плеер',
-			'externalPlayer.useExternalPlayerDescription' => 'Открывать видео во внешнем приложении вместо встроенного плеера',
+			'externalPlayer.useExternalPlayerDescription' => 'Открывать видео в другом приложении',
 			'externalPlayer.selectPlayer' => 'Выбрать плеер',
 			'externalPlayer.customPlayers' => 'Свои плееры',
 			'externalPlayer.systemDefault' => 'Системный по умолчанию',
@@ -2739,6 +2827,8 @@ extension on TranslationsRu {
 			'metadataEdit.summary' => 'Описание',
 			'metadataEdit.poster' => 'Постер',
 			'metadataEdit.background' => 'Фон',
+			_ => null,
+		} ?? switch (path) {
 			'metadataEdit.logo' => 'Логотип',
 			'metadataEdit.squareArt' => 'Квадратное изображение',
 			'metadataEdit.selectPoster' => 'Выбрать постер',
@@ -2778,8 +2868,6 @@ extension on TranslationsRu {
 			'metadataEdit.episodeOrdering' => 'Порядок эпизодов',
 			'metadataEdit.tmdbAiring' => 'The Movie Database (Эфирный)',
 			'metadataEdit.tvdbAiring' => 'TheTVDB (Эфирный)',
-			_ => null,
-		} ?? switch (path) {
 			'metadataEdit.tvdbAbsolute' => 'TheTVDB (Абсолютный)',
 			'metadataEdit.metadataLanguage' => 'Язык метаданных',
 			'metadataEdit.useOriginalTitle' => 'Использовать оригинальное название',
@@ -2803,7 +2891,7 @@ extension on TranslationsRu {
 			'matchScreen.match' => 'Сопоставить...',
 			'matchScreen.fixMatch' => 'Исправить сопоставление...',
 			'matchScreen.unmatch' => 'Сбросить сопоставление',
-			'matchScreen.unmatchConfirm' => 'Сбросить текущее сопоставление этого элемента? Plex будет считать его несопоставленным, пока вы не сопоставите его снова.',
+			'matchScreen.unmatchConfirm' => 'Очистить это совпадение? Plex будет считать его несопоставленным до повторного сопоставления.',
 			'matchScreen.unmatchSuccess' => 'Сопоставление сброшено',
 			'matchScreen.unmatchFailed' => 'Не удалось сбросить сопоставление',
 			'matchScreen.matchApplied' => 'Сопоставление применено',
@@ -2819,7 +2907,7 @@ extension on TranslationsRu {
 			'trakt.connected' => 'Подключено',
 			'trakt.connectedAs' => ({required Object username}) => 'Подключено как @${username}',
 			'trakt.disconnectConfirm' => 'Отключить аккаунт Trakt?',
-			'trakt.disconnectConfirmBody' => 'Plezy перестанет отправлять события воспроизведения в Trakt. Вы можете подключиться снова в любое время.',
+			'trakt.disconnectConfirmBody' => 'Plezy перестанет отправлять события в Trakt. Можно подключить снова в любое время.',
 			'trakt.scrobble' => 'Скробблинг в реальном времени',
 			'trakt.scrobbleDescription' => 'Отправлять события воспроизведения, паузы и остановки в Trakt во время просмотра.',
 			'trakt.watchedSync' => 'Синхронизация статуса просмотра',
@@ -2831,7 +2919,7 @@ extension on TranslationsRu {
 			'trackers.scrobble' => 'Автоматически отслеживать прогресс',
 			'trackers.scrobbleDescription' => 'Обновляет список, когда вы заканчиваете эпизод или фильм.',
 			'trackers.disconnectConfirm' => ({required Object service}) => 'Отключить ${service}?',
-			'trackers.disconnectConfirmBody' => ({required Object service}) => 'Plezy перестанет обновлять ваш список ${service}. Вы можете подключиться снова в любое время.',
+			'trackers.disconnectConfirmBody' => ({required Object service}) => 'Plezy перестанет обновлять ${service}. Подключите снова в любое время.',
 			'trackers.connectFailed' => ({required Object service}) => 'Не удалось подключиться к ${service}. Попробуйте ещё раз.',
 			'trackers.services.mal' => 'MyAnimeList',
 			'trackers.services.anilist' => 'AniList',
@@ -2842,7 +2930,7 @@ extension on TranslationsRu {
 			'trackers.deviceCode.waitingForAuthorization' => 'Ожидание авторизации…',
 			'trackers.deviceCode.codeCopied' => 'Код скопирован',
 			'trackers.oauthProxy.title' => ({required Object service}) => 'Войти в ${service}',
-			'trackers.oauthProxy.body' => 'Отсканируйте этот QR-код телефоном или откройте ссылку ниже на любом устройстве с браузером.',
+			'trackers.oauthProxy.body' => 'Отсканируйте этот QR-код или откройте URL на любом устройстве.',
 			'trackers.oauthProxy.openToSignIn' => ({required Object service}) => 'Открыть ${service} для входа',
 			'trackers.oauthProxy.urlCopied' => 'URL скопирован',
 			'trackers.libraryFilter.title' => 'Фильтр библиотек',
@@ -2858,7 +2946,7 @@ extension on TranslationsRu {
 			'trackers.libraryFilter.libraries' => 'Библиотеки',
 			'trackers.libraryFilter.noLibraries' => 'Библиотеки недоступны',
 			'addServer.addJellyfinTitle' => 'Добавить сервер Jellyfin',
-			'addServer.jellyfinUrlIntro' => 'Введите URL вашего сервера Jellyfin — например, `https://jellyfin.example.com`. Войти можно после.',
+			'addServer.jellyfinUrlIntro' => 'Введите URL сервера, например `https://jellyfin.example.com`.',
 			'addServer.serverUrl' => 'URL сервера',
 			'addServer.findServer' => 'Найти сервер',
 			'addServer.username' => 'Имя пользователя',
@@ -2870,25 +2958,25 @@ extension on TranslationsRu {
 			'addServer.signInFailed' => ({required Object error}) => 'Не удалось войти: ${error}',
 			'addServer.quickConnectFailed' => ({required Object error}) => 'Quick Connect не удался: ${error}',
 			'addServer.addPlexTitle' => 'Войти через Plex',
-			'addServer.plexAuthIntro' => 'Выберите способ входа в Plex. Поток в браузере открывает plex.tv, где вы подтверждаете подключение; QR-вариант удобен для TV или удалённых устройств.',
+			'addServer.plexAuthIntro' => 'Войдите через браузер или QR-код.',
 			'addServer.plexQRPrompt' => 'Отсканируйте этот QR-код, чтобы войти.',
 			'addServer.waitingForPlexConfirmation' => 'Ожидание подтверждения от plex.tv…',
 			'addServer.pinExpired' => 'Срок действия PIN истёк до входа. Попробуйте снова.',
-			'addServer.duplicatePlexAccount' => 'Это устройство уже подключено к учётной записи Plex. Выйдите в настройках, чтобы сменить учётную запись.',
+			'addServer.duplicatePlexAccount' => 'В Plex уже выполнен вход. Выйдите, чтобы сменить аккаунт.',
 			'addServer.failedToRegisterAccount' => ({required Object error}) => 'Не удалось зарегистрировать учётную запись: ${error}',
 			'addServer.enterJellyfinUrlError' => 'Введите URL вашего сервера Jellyfin',
 			'addServer.addConnectionTitle' => 'Добавить подключение',
 			'addServer.addConnectionTitleScoped' => ({required Object name}) => 'Добавить в ${name}',
-			'addServer.addConnectionIntroGlobal' => 'Добавьте ещё один медиасервер. Можно сочетать учётные записи Plex и серверы Jellyfin — элементы со всех подключённых бэкендов появятся вместе на главном экране.',
+			'addServer.addConnectionIntroGlobal' => 'Добавьте еще один медиасервер. Plex и Jellyfin появятся вместе на главной.',
 			'addServer.addConnectionIntroScoped' => 'Добавьте новый сервер или одолжите из другого профиля.',
 			'addServer.signInWithPlexCard' => 'Войти через Plex',
-			'addServer.signInWithPlexCardSubtitle' => 'Авторизуйте это устройство в вашей учётной записи Plex. Серверы, общие с учётной записью, добавятся автоматически.',
-			'addServer.signInWithPlexCardSubtitleScoped' => 'Авторизуйте новую учётную запись Plex. Её Home-пользователи появятся как профили.',
+			'addServer.signInWithPlexCardSubtitle' => 'Авторизуйте это устройство. Общие серверы будут добавлены.',
+			'addServer.signInWithPlexCardSubtitleScoped' => 'Авторизуйте аккаунт Plex. Пользователи Home станут профилями.',
 			'addServer.connectToJellyfinCard' => 'Подключиться к Jellyfin',
-			'addServer.connectToJellyfinCardSubtitle' => 'Введите URL сервера Jellyfin и войдите с именем пользователя и паролем (Quick Connect — скоро).',
+			'addServer.connectToJellyfinCardSubtitle' => 'Введите URL сервера, имя пользователя и пароль.',
 			'addServer.connectToJellyfinCardSubtitleScoped' => ({required Object name}) => 'Войдите на сервер Jellyfin. Привязывается к ${name}.',
 			'addServer.borrowFromAnotherProfile' => 'Одолжить из другого профиля',
-			'addServer.borrowFromAnotherProfileSubtitle' => 'Повторно используйте подключение, уже привязанное к другому профилю. PIN-защищённые исходные профили запрашивают PIN.',
+			'addServer.borrowFromAnotherProfileSubtitle' => 'Используйте подключение другого профиля. Для профилей с PIN нужен PIN.',
 			_ => null,
 		};
 	}

@@ -3,7 +3,9 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import '../../../utils/abortable_http_request.dart';
 import '../../../utils/app_logger.dart';
+import '../../../utils/json_utils.dart';
 import '../../../utils/platform_http_client_stub.dart'
     if (dart.library.io) '../../../utils/platform_http_client_io.dart'
     as platform;
@@ -55,7 +57,32 @@ class MalClient {
   /// ```
   Future<void> updateMyListStatus(int animeId, Map<String, String> fields) async {
     // MAL's list-status endpoint is form-encoded (not JSON).
-    await _request('PATCH', '/anime/$animeId/my_list_status', formBody: fields);
+    await _request('PUT', '/anime/$animeId/my_list_status', formBody: fields);
+  }
+
+  Future<void> deleteMyListStatus(int animeId) async {
+    await _request('DELETE', '/anime/$animeId/my_list_status');
+  }
+
+  Future<int?> getMyListScore(int animeId) async {
+    try {
+      final res = await _request('GET', '/anime/$animeId?fields=my_list_status');
+      if (res is! Map) return null;
+      final myListStatus = res['my_list_status'];
+      if (myListStatus is! Map) return null;
+      final score = flexibleInt(myListStatus['score']);
+      return score != null && score > 0 ? score : null;
+    } on MalApiException catch (e) {
+      if (e.statusCode == 404) return null;
+      rethrow;
+    }
+  }
+
+  Future<int?> getAnimeEpisodeCount(int animeId) async {
+    final res = await _request('GET', '/anime/$animeId?fields=num_episodes');
+    if (res is! Map) return null;
+    final count = flexibleInt(res['num_episodes']);
+    return count != null && count > 0 ? count : null;
   }
 
   Future<MalSession> _refresh() => _refreshCoalescer.run(_doRefresh);
@@ -131,13 +158,17 @@ class MalClient {
 
     final sw = Stopwatch()..start();
     final res = await switch (method) {
-      'GET' => _http.get(uri, headers: headers),
-      'POST' => _http.post(uri, headers: headers, body: encoded),
-      'PATCH' => _http.patch(uri, headers: headers, body: encoded),
-      'PUT' => _http.put(uri, headers: headers, body: encoded),
-      'DELETE' => _http.delete(uri, headers: headers),
+      'GET' || 'POST' || 'PATCH' || 'PUT' || 'DELETE' => sendAbortableHttpRequest(
+        _http,
+        method,
+        uri,
+        headers: headers,
+        body: encoded,
+        timeout: TrackerConstants.requestTimeout,
+        operation: 'MAL $method ${uri.path}',
+      ),
       _ => throw ArgumentError('Unsupported HTTP method: $method'),
-    }.timeout(TrackerConstants.requestTimeout);
+    };
     sw.stop();
     appLogger.d('MAL $method ${uri.path} → ${res.statusCode} (${sw.elapsedMilliseconds}ms)');
     return res;

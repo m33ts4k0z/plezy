@@ -129,14 +129,20 @@ class AppDatabase extends _$AppDatabase {
           );
 
           await m.createTable(connections);
-          await m.create(idxConnectionsKind);
+          await _ignoreAlreadyExists('Index idx_connections_kind', () => m.create(idxConnectionsKind));
 
           await m.createTable(profiles);
-          await m.create(idxProfilesKind);
+          await _ignoreAlreadyExists('Index idx_profiles_kind', () => m.create(idxProfilesKind));
 
           await m.createTable(profileConnections);
-          await m.create(idxProfileConnectionsConnectionId);
-          await m.create(idxProfileConnectionsProfileId);
+          await _ignoreAlreadyExists(
+            'Index idx_profile_connections_connection_id',
+            () => m.create(idxProfileConnectionsConnectionId),
+          );
+          await _ignoreAlreadyExists(
+            'Index idx_profile_connections_profile_id',
+            () => m.create(idxProfileConnectionsProfileId),
+          );
 
           await _ignoreAlreadyExists('DownloadOwners table', () => m.createTable(downloadOwners));
           await _ignoreAlreadyExists('Index idx_download_owners_profile', () => m.create(idxDownloadOwnersProfile));
@@ -190,7 +196,10 @@ class AppDatabase extends _$AppDatabase {
               )
           ''');
 
-          await m.create(idxOfflineWatchProgressServer);
+          await _ignoreAlreadyExists(
+            'Index idx_offline_watch_progress_server',
+            () => m.create(idxOfflineWatchProgressServer),
+          );
           await _ignoreAlreadyExists('Index idx_sync_rules_profile', () => m.create(idxSyncRulesProfile));
           await _ignoreAlreadyExists(
             'Index idx_offline_watch_progress_profile',
@@ -561,11 +570,7 @@ LazyDatabase _openConnection() {
 
     // Migrate from old location on desktop (was in Documents subfolder)
     if (!Platform.isAndroid && !Platform.isIOS && !await file.exists()) {
-      final oldFolder = await getApplicationDocumentsDirectory();
-      final oldFile = File(p.join(oldFolder.path, 'plezy_downloads.db'));
-      if (await oldFile.exists()) {
-        await oldFile.rename(file.path);
-      }
+      await migrateLegacyDesktopDatabase(target: file);
     }
 
     return NativeDatabase.createInBackground(
@@ -579,4 +584,57 @@ LazyDatabase _openConnection() {
       },
     );
   });
+}
+
+/// Move the legacy desktop DB from `Documents/` to `ApplicationSupport/`.
+/// `File.rename` only works within a single volume — Windows users with
+/// OneDrive-redirected Documents (or any cross-drive setup) hit
+/// `ERROR_NOT_SAME_DEVICE` (errno 17), and the uncaught throw used to
+/// strand the splash on "Loading servers..." forever (#1022). Falls back
+/// to copy + delete on any [FileSystemException] and swallows all errors
+/// so a failed migration never propagates fatally.
+///
+/// [sourceOverride] and [renameOverride] are test seams — production
+/// callers leave them null.
+Future<void> migrateLegacyDesktopDatabase({
+  required File target,
+  File? sourceOverride,
+  Future<void> Function(File source, String targetPath)? renameOverride,
+}) async {
+  final File oldFile;
+  if (sourceOverride != null) {
+    oldFile = sourceOverride;
+  } else {
+    final oldFolder = await getApplicationDocumentsDirectory();
+    oldFile = File(p.join(oldFolder.path, 'plezy_downloads.db'));
+  }
+  if (!await oldFile.exists()) return;
+
+  try {
+    if (renameOverride != null) {
+      await renameOverride(oldFile, target.path);
+    } else {
+      await oldFile.rename(target.path);
+    }
+    appLogger.i('Moved legacy DB from ${oldFile.path} → ${target.path}');
+    return;
+  } on FileSystemException catch (e) {
+    appLogger.w('Legacy DB rename failed (osError=${e.osError?.errorCode}); falling back to copy', error: e);
+  }
+
+  try {
+    await oldFile.copy(target.path);
+    try {
+      await oldFile.delete();
+    } catch (e) {
+      // Leaving the source behind is non-fatal — the new file is canonical.
+      appLogger.w('Legacy DB copied but old file delete failed: $e');
+    }
+    appLogger.i('Copied legacy DB from ${oldFile.path} → ${target.path}');
+  } catch (e, st) {
+    // Copy itself failed (disk full, source locked by OneDrive sync,
+    // permissions). Leave both files alone — drift will create a fresh
+    // empty DB at the new location, and a future relaunch can retry.
+    appLogger.e('Legacy DB migration failed entirely', error: e, stackTrace: st);
+  }
 }

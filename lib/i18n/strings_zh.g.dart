@@ -49,6 +49,7 @@ class TranslationsZh extends Translations with BaseTranslations<AppLocale, Trans
 	@override late final _TranslationsHotkeysZh hotkeys = _TranslationsHotkeysZh._(_root);
 	@override late final _TranslationsFileInfoZh fileInfo = _TranslationsFileInfoZh._(_root);
 	@override late final _TranslationsMediaMenuZh mediaMenu = _TranslationsMediaMenuZh._(_root);
+	@override late final _TranslationsRateSheetZh rateSheet = _TranslationsRateSheetZh._(_root);
 	@override late final _TranslationsAccessibilityZh accessibility = _TranslationsAccessibilityZh._(_root);
 	@override late final _TranslationsTooltipsZh tooltips = _TranslationsTooltipsZh._(_root);
 	@override late final _TranslationsVideoControlsZh videoControls = _TranslationsVideoControlsZh._(_root);
@@ -108,16 +109,16 @@ class _TranslationsAuthZh extends TranslationsAuthEn {
 	@override String get authenticate => '验证';
 	@override String get authenticationTimeout => '验证超时。请重试。';
 	@override String get scanQRToSignIn => '扫描二维码登录';
-	@override String get waitingForAuth => '等待验证中...\n请在你的浏览器中完成登录。';
+	@override String get waitingForAuth => '正在等待认证...\n请在浏览器中登录。';
 	@override String get useBrowser => '使用浏览器';
 	@override String get or => '或';
 	@override String get connectToJellyfin => '连接到 Jellyfin';
 	@override String get useQuickConnect => '使用 Quick Connect';
 	@override String get quickConnectCode => 'Quick Connect 代码';
-	@override String get quickConnectInstructions => '在浏览器中打开你的 Jellyfin 服务器，登录后从用户菜单中选择 Quick Connect。输入此代码以批准登录。';
+	@override String get quickConnectInstructions => '在 Jellyfin 中打开 Quick Connect 并输入此代码。';
 	@override String get quickConnectWaiting => '等待批准…';
 	@override String get quickConnectCancel => '取消';
-	@override String get quickConnectExpired => 'Quick Connect 代码在批准前已过期。请重试。';
+	@override String get quickConnectExpired => 'Quick Connect 已过期。请重试。';
 }
 
 // Path: common
@@ -158,9 +159,6 @@ class _TranslationsCommonZh extends TranslationsCommonEn {
 	@override String get mute => '静音';
 	@override String get ok => '确定';
 	@override String get reconnect => '重新连接';
-	@override String get exitConfirmTitle => '退出应用？';
-	@override String get exitConfirmMessage => '确定要退出吗？';
-	@override String get dontAskAgain => '不再询问';
 	@override String get exit => '退出';
 	@override String get viewAll => '查看全部';
 	@override String get checkingNetwork => '正在检查网络...';
@@ -171,6 +169,7 @@ class _TranslationsCommonZh extends TranslationsCommonEn {
 	@override String get loading => '加载中...';
 	@override String get fullscreen => '全屏';
 	@override String get exitFullscreen => '退出全屏';
+	@override String get pressBackAgainToExit => '再按一次返回退出';
 }
 
 // Path: screens
@@ -241,21 +240,21 @@ class _TranslationsSettingsZh extends TranslationsSettingsEn {
 	@override String get listView => '列表视图';
 	@override String get showHeroSection => '显示主要精选区';
 	@override String get useGlobalHubs => '使用主页布局';
-	@override String get useGlobalHubsDescription => '像官方客户端一样显示主页中心。关闭后，改为显示每个资料库的推荐。';
+	@override String get useGlobalHubsDescription => '显示统一主页中心。否则使用资料库推荐。';
 	@override String get showServerNameOnHubs => '在推荐栏显示服务器名称';
-	@override String get showServerNameOnHubsDescription => '始终在推荐栏标题中显示服务器名称。关闭时仅在推荐栏名称重复时显示。';
+	@override String get showServerNameOnHubsDescription => '始终在中心标题中显示服务器名称。';
 	@override String get groupLibrariesByServer => '按服务器分组媒体库';
-	@override String get groupLibrariesByServerDescription => '当连接到多个服务器时，在侧边栏中显示每个媒体服务器的标题。';
+	@override String get groupLibrariesByServerDescription => '按媒体服务器分组侧边栏资料库。';
 	@override String get alwaysKeepSidebarOpen => '始终保持侧边栏展开';
 	@override String get alwaysKeepSidebarOpenDescription => '侧边栏保持展开状态，内容区域自动调整';
 	@override String get showUnwatchedCount => '显示未观看数量';
 	@override String get showUnwatchedCountDescription => '在剧集和季上显示未观看的集数';
 	@override String get showEpisodeNumberOnCards => '在卡片上显示集数';
-	@override String get showEpisodeNumberOnCardsDescription => '在剧集卡片上，季号旁同时显示集数（例如 S2 E3）';
+	@override String get showEpisodeNumberOnCardsDescription => '在剧集卡片上显示季和集编号';
 	@override String get showSeasonPostersOnTabs => '在选项卡上显示季海报';
-	@override String get showSeasonPostersOnTabsDescription => '在剧集详情页中，每个季选项卡的上方显示该季的海报';
+	@override String get showSeasonPostersOnTabsDescription => '在每季标签上方显示该季海报';
 	@override String get hideSpoilers => '隐藏未看剧集的剧透内容';
-	@override String get hideSpoilersDescription => '模糊未观看剧集的缩略图并隐藏其描述';
+	@override String get hideSpoilersDescription => '模糊未观看剧集的缩略图和描述';
 	@override String get playerBackend => '播放器引擎';
 	@override String get exoPlayer => 'ExoPlayer（推荐）';
 	@override String get mpv => 'mpv';
@@ -264,7 +263,7 @@ class _TranslationsSettingsZh extends TranslationsSettingsEn {
 	@override String get bufferSize => '缓冲区大小';
 	@override String bufferSizeMB({required Object size}) => '${size}MB';
 	@override String get bufferSizeAuto => '自动（推荐）';
-	@override String bufferSizeWarning({required Object heap, required Object size}) => '您的设备有 ${heap}MB 内存。${size}MB 的缓冲区可能导致播放问题。';
+	@override String bufferSizeWarning({required Object heap, required Object size}) => '可用内存 ${heap}MB。${size}MB 缓冲可能影响播放。';
 	@override String get defaultQualityTitle => '默认画质';
 	@override String get defaultQualityDescription => '开始播放时使用。较低的值可减少带宽。';
 	@override String get subtitleStyling => '字幕样式';
@@ -276,18 +275,18 @@ class _TranslationsSettingsZh extends TranslationsSettingsEn {
 	@override String get defaultSleepTimer => '默认睡眠定时器';
 	@override String minutesUnit({required Object minutes}) => '${minutes} 分钟';
 	@override String get rememberTrackSelections => '记住每个剧集/电影的音轨选择';
-	@override String get rememberTrackSelectionsDescription => '在播放过程中更改音轨时自动保存音频和字幕语言偏好';
+	@override String get rememberTrackSelectionsDescription => '记住每个标题的音频和字幕选择';
 	@override String get showChapterMarkersOnTimeline => '在进度条上显示章节标记';
 	@override String get showChapterMarkersOnTimelineDescription => '按章节边界分段显示进度条';
 	@override String get clickVideoTogglesPlayback => '点击视频可切换播放/暂停';
-	@override String get clickVideoTogglesPlaybackDescription => '如果启用此选项，点击视频播放器将播放或暂停视频。否则，点击将显示或隐藏播放控件';
+	@override String get clickVideoTogglesPlaybackDescription => '点击视频进行播放/暂停，而不是显示控制项。';
 	@override String get videoPlayerControls => '视频播放器控制';
 	@override String get keyboardShortcuts => '键盘快捷键';
 	@override String get keyboardShortcutsDescription => '自定义键盘快捷键';
 	@override String get videoPlayerNavigation => '视频播放器导航';
 	@override String get videoPlayerNavigationDescription => '使用方向键导航视频播放器控件';
 	@override String get watchTogetherRelay => '一起看中继服务器';
-	@override String get watchTogetherRelayDescription => '设置一起看的自定义中继服务器。所有参与者必须使用相同的服务器。';
+	@override String get watchTogetherRelayDescription => '设置自定义中继。所有人必须使用同一服务器。';
 	@override String get watchTogetherRelayHint => 'https://my-relay.example.com';
 	@override String get crashReporting => '崩溃报告';
 	@override String get crashReportingDescription => '发送崩溃报告以帮助改进应用';
@@ -296,10 +295,10 @@ class _TranslationsSettingsZh extends TranslationsSettingsEn {
 	@override String get viewLogs => '查看日志';
 	@override String get viewLogsDescription => '查看应用程序日志';
 	@override String get clearCache => '清除缓存';
-	@override String get clearCacheDescription => '这将清除所有缓存的图片和数据。清除缓存后，应用程序加载内容可能会变慢。';
+	@override String get clearCacheDescription => '清除缓存的图片和数据。内容加载可能变慢。';
 	@override String get clearCacheSuccess => '缓存清除成功';
 	@override String get resetSettings => '重置设置';
-	@override String get resetSettingsDescription => '这会将所有设置重置为其默认值。此操作无法撤销。';
+	@override String get resetSettingsDescription => '恢复默认设置。此操作无法撤销。';
 	@override String get resetSettingsSuccess => '设置重置成功';
 	@override String get backup => '备份';
 	@override String get exportSettings => '导出设置';
@@ -320,7 +319,7 @@ class _TranslationsSettingsZh extends TranslationsSettingsEn {
 	@override String get updateAvailable => '有可用更新';
 	@override String get checkForUpdates => '检查更新';
 	@override String get autoCheckUpdatesOnStartup => '启动时自动检查更新';
-	@override String get autoCheckUpdatesOnStartupDescription => '启动时如有新版本可用则显示通知';
+	@override String get autoCheckUpdatesOnStartupDescription => '启动时有可用更新则通知';
 	@override String get validationErrorEnterNumber => '请输入一个有效的数字';
 	@override String validationErrorDuration({required Object min, required Object max, required Object unit}) => '时长必须介于 ${min} 和 ${max} ${unit} 之间';
 	@override String shortcutAlreadyAssigned({required Object action}) => '快捷键已被分配给 ${action}';
@@ -331,7 +330,7 @@ class _TranslationsSettingsZh extends TranslationsSettingsEn {
 	@override String get autoSkipCredits => '自动跳过片尾';
 	@override String get autoSkipCreditsDescription => '自动跳过片尾并播放下一集';
 	@override String get forceSkipMarkerFallback => '强制使用备用标记';
-	@override String get forceSkipMarkerFallbackDescription => '即使 Plex 提供原生标记，也使用章节标题模式作为跳过标记';
+	@override String get forceSkipMarkerFallbackDescription => '即使 Plex 有标记，也使用章节标题模式';
 	@override String get autoSkipDelay => '自动跳过延迟';
 	@override String autoSkipDelayDescription({required Object seconds}) => '自动跳过前等待 ${seconds} 秒';
 	@override String get introPattern => '片头标记模式';
@@ -353,8 +352,8 @@ class _TranslationsSettingsZh extends TranslationsSettingsEn {
 	@override String get downloadOnWifiOnly => '仅在 WiFi 时下载';
 	@override String get downloadOnWifiOnlyDescription => '使用蜂窝数据时禁止下载';
 	@override String get autoRemoveWatchedDownloads => '自动移除已观看的下载';
-	@override String get autoRemoveWatchedDownloadsDescription => '当剧集和电影被标记为已观看时自动删除下载内容';
-	@override String get cellularDownloadBlocked => '蜂窝数据下已禁用下载。请连接 WiFi 或更改设置。';
+	@override String get autoRemoveWatchedDownloadsDescription => '自动删除已观看的下载';
+	@override String get cellularDownloadBlocked => '蜂窝网络下已阻止下载。请使用 WiFi 或更改设置。';
 	@override String get maxVolume => '最大音量';
 	@override String get maxVolumeDescription => '允许音量超过 100% 以适应安静的媒体';
 	@override String maxVolumePercent({required Object percent}) => '${percent}%';
@@ -367,22 +366,26 @@ class _TranslationsSettingsZh extends TranslationsSettingsEn {
 	@override String get companionRemoteServer => '配套遥控服务器';
 	@override String get companionRemoteServerDescription => '允许网络上的移动设备控制此应用';
 	@override String get autoPip => '自动画中画';
-	@override String get autoPipDescription => '在播放期间离开应用时自动进入画中画模式';
+	@override String get autoPipDescription => '播放时离开会进入画中画';
 	@override String get matchContentFrameRate => '匹配内容帧率';
-	@override String get matchContentFrameRateDescription => '调整显示刷新率以匹配视频内容，减少画面抖动并节省电量';
+	@override String get matchContentFrameRateDescription => '将显示刷新率匹配到视频内容';
 	@override String get matchRefreshRate => '匹配刷新率';
-	@override String get matchRefreshRateDescription => '全屏时切换显示刷新率以匹配视频内容';
+	@override String get matchRefreshRateDescription => '全屏时匹配显示刷新率';
 	@override String get matchDynamicRange => '匹配动态范围';
-	@override String get matchDynamicRangeDescription => '自动为HDR内容启用HDR，退出播放器时恢复为SDR';
+	@override String get matchDynamicRangeDescription => 'HDR 内容切换到 HDR，随后切回 SDR';
 	@override String get displaySwitchDelay => '显示切换延迟';
 	@override String get tunneledPlayback => '通道化播放';
-	@override String get tunneledPlaybackDescription => '使用硬件加速视频通道。如果在 HDR 内容上看到黑屏但有声音，请禁用此选项';
+	@override String get tunneledPlaybackDescription => '使用视频隧道。若 HDR 播放出现黑屏，请禁用。';
+	@override String get dvConversionMode => 'Dolby Vision 转换';
+	@override String get dvConversionModeDescription => '选择 ExoPlayer 如何处理 Dolby Vision Profile 7 文件。';
+	@override String get dvConversionAuto => '自动';
+	@override String get dvConversionNative => '原生 / 禁用';
+	@override String get dvConversionDv81 => 'P7 → P8.1';
+	@override String get dvConversionHevcStrip => 'P7 → HEVC';
 	@override String get requireProfileSelectionOnOpen => '打开应用时询问配置文件';
 	@override String get requireProfileSelectionOnOpenDescription => '每次打开应用时显示配置文件选择';
-	@override String get confirmExitOnBack => '退出前确认';
-	@override String get confirmExitOnBackDescription => '按返回键退出应用时显示确认对话框';
 	@override String get forceTvMode => '强制 TV 模式';
-	@override String get forceTvModeDescription => '无论自动检测结果如何都使用 TV 布局。适用于未报告 leanback 功能的 Android TV 设备。更改后将重启应用。';
+	@override String get forceTvModeDescription => '强制 TV 布局。适用于无法自动检测的设备。需要重启。';
 	@override String get startInFullscreen => '以全屏模式启动';
 	@override String get startInFullscreenDescription => '启动时以全屏模式打开 Plezy';
 	@override String get autoHidePerformanceOverlay => '自动隐藏性能叠加层';
@@ -476,13 +479,33 @@ class _TranslationsMediaMenuZh extends TranslationsMediaMenuEn {
 	@override String get shufflePlay => '随机播放';
 	@override String get fileInfo => '文件信息';
 	@override String get deleteFromServer => '从服务器删除';
-	@override String get confirmDelete => '这将永久删除此媒体及其文件。此操作无法撤销。';
+	@override String get confirmDelete => '要从服务器删除此媒体及其文件吗？';
 	@override String get deleteMultipleWarning => '这包括所有剧集及其文件。';
 	@override String get mediaDeletedSuccessfully => '媒体项已成功删除';
 	@override String get mediaFailedToDelete => '删除媒体项失败';
 	@override String get rate => '评分';
 	@override String get playFromBeginning => '从头播放';
 	@override String get playVersion => '播放版本...';
+}
+
+// Path: rateSheet
+class _TranslationsRateSheetZh extends TranslationsRateSheetEn {
+	_TranslationsRateSheetZh._(TranslationsZh root) : this._root = root, super.internal(root);
+
+	final TranslationsZh _root; // ignore: unused_field
+
+	// Translations
+	@override String get title => '评分';
+	@override String get server => '服务器';
+	@override String starValue({required Object rating}) => '${rating} / 5';
+	@override String scoreValue({required Object score}) => '${score} / 10';
+	@override String get setScore => '设置分数';
+	@override String get notRated => '未评分';
+	@override String get liked => '已喜欢';
+	@override String get notLiked => '未喜欢';
+	@override String get saved => '已保存';
+	@override String get notAvailable => '未找到匹配项';
+	@override String get noConnectedTrackers => '在设置中连接跟踪器即可在那里评分。';
 }
 
 // Path: accessibility
@@ -578,6 +601,7 @@ class _TranslationsVideoControlsZh extends TranslationsVideoControlsEn {
 	@override String endsAt({required Object time}) => '${time} 结束';
 	@override String get pipActive => '正在画中画模式中播放';
 	@override String get pipFailed => '画中画启动失败';
+	@override String get screenshotSaved => '截图已保存';
 	@override late final _TranslationsVideoControlsPipErrorsZh pipErrors = _TranslationsVideoControlsPipErrorsZh._(_root);
 	@override String get chapters => '章节';
 	@override String get noChaptersAvailable => '没有可用的章节';
@@ -647,7 +671,7 @@ class _TranslationsMessagesZh extends TranslationsMessagesEn {
 	@override String failedPlayback({required Object action, required Object error}) => '无法${action}: ${error}';
 	@override String get switchingToCompatiblePlayer => '正在切换到兼容的播放器...';
 	@override String get serverLimitTitle => '播放失败';
-	@override String get serverLimitBody => '服务器返回了错误 (HTTP 500)。这通常意味着服务器所有者设置了带宽或转码限制，正在拒绝你的会话。客户端无法解决此问题 — 需要服务器所有者调整其设置。';
+	@override String get serverLimitBody => '服务器错误 (HTTP 500)。带宽/转码限制可能拒绝了此会话。请让所有者调整。';
 	@override String get logsUploaded => '日志已上传';
 	@override String get logsUploadFailed => '上传日志失败';
 	@override String get logId => '日志 ID';
@@ -718,13 +742,13 @@ class _TranslationsProfilesZh extends TranslationsProfilesEn {
 	@override String get addPlezyProfile => '添加 Plezy 配置文件';
 	@override String get switchingProfile => '切换配置文件中…';
 	@override String get deleteThisProfileTitle => '删除此配置文件？';
-	@override String deleteThisProfileMessage({required Object displayName}) => '${displayName} 将被移除。连接本身不受影响。';
+	@override String deleteThisProfileMessage({required Object displayName}) => '移除 ${displayName}。连接不会受影响。';
 	@override String get active => '活跃';
 	@override String get manage => '管理';
 	@override String get delete => '删除';
 	@override String get signOut => '退出登录';
 	@override String get signOutPlexTitle => '退出 Plex 登录？';
-	@override String signOutPlexMessage({required Object displayName}) => '${displayName} 以及该账户下的所有 Plex Home 用户将从此设备移除。您可以随时重新登录。';
+	@override String signOutPlexMessage({required Object displayName}) => '要移除 ${displayName} 和所有 Plex Home 用户吗？可随时重新登录。';
 	@override String get signedOutPlex => '已退出 Plex 登录。';
 	@override String get signOutFailed => '退出登录失败。';
 	@override String get sectionTitle => '配置文件';
@@ -732,30 +756,44 @@ class _TranslationsProfilesZh extends TranslationsProfilesEn {
 	@override String summaryMultipleWithActive({required Object count, required Object activeName}) => '${count} 个配置文件 · 活跃：${activeName}';
 	@override String summaryMultiple({required Object count}) => '${count} 个配置文件';
 	@override String get removeConnectionTitle => '移除连接？';
-	@override String removeConnectionMessage({required Object displayName, required Object connectionLabel}) => '${displayName} 将失去对 ${connectionLabel} 的访问权限。连接本身仍可供其他配置文件使用。';
+	@override String removeConnectionMessage({required Object displayName, required Object connectionLabel}) => '移除 ${displayName} 对 ${connectionLabel} 的访问。其他个人资料仍保留。';
 	@override String get deleteProfileTitle => '删除配置文件？';
-	@override String deleteProfileMessage({required Object displayName}) => '这将从此设备中删除 ${displayName} 及其所有连接。底层的 Plex/Jellyfin 服务器不会受到影响。';
+	@override String deleteProfileMessage({required Object displayName}) => '移除 ${displayName} 及其连接。服务器仍可用。';
 	@override String get profileNameLabel => '配置文件名称';
 	@override String get pinProtectionLabel => 'PIN 保护';
 	@override String get pinManagedByPlex => 'PIN 由 Plex 管理。在 plex.tv 上编辑。';
 	@override String get noPinSetEditOnPlex => '未设置 PIN。如需要求 PIN，请在 plex.tv 上编辑 Home 用户。';
 	@override String get setPin => '设置 PIN';
+	@override String get setPinTitle => '设置 PIN';
+	@override String get confirmPinTitle => '确认 PIN';
+	@override String get pinSet => '已设置 PIN';
+	@override String get changePin => '更改';
+	@override String get removePin => '移除';
 	@override String get connectionsLabel => '连接';
 	@override String get add => '添加';
 	@override String get deleteProfileButton => '删除配置文件';
 	@override String get noConnectionsHint => '没有连接 — 添加一个以使用此配置文件。';
+	@override String get noConnections => '没有连接';
 	@override String get plexHomeAccount => 'Plex Home 账户';
 	@override String get connectionDefault => '默认';
+	@override String connectionAs({required Object displayName}) => '以 ${displayName} 身份';
 	@override String get makeDefault => '设为默认';
 	@override String get removeConnection => '移除';
+	@override String get profileRenamed => '个人资料已重命名。';
 	@override String borrowAddTo({required Object displayName}) => '添加到 ${displayName}';
-	@override String get borrowExplain => '从另一个配置文件借用连接。PIN 保护的源配置文件在共享前会要求输入 PIN。';
+	@override String get borrowExplain => '借用另一个个人资料的连接。受 PIN 保护的个人资料需要 PIN。';
 	@override String get borrowEmpty => '暂无可借用的内容。';
-	@override String get borrowEmptySubtitle => '请先将 Plex 账户或 Jellyfin 服务器连接到另一个配置文件，然后回到这里。';
+	@override String get borrowEmptySubtitle => '请先将 Plex 或 Jellyfin 连接到另一个个人资料。';
+	@override String borrowFromProfile({required Object displayName}) => '来自 ${displayName}';
+	@override String get borrowConnectionBorrowed => '已借用连接。';
+	@override String get borrowFailed => '无法借用连接。';
+	@override String get incorrectPin => 'PIN 不正确。';
+	@override String get sourceProfileMissingParentAccount => '源个人资料缺少其父账号。';
+	@override String get failedToVerifyPin => '无法验证 PIN。';
 	@override String get newProfile => '新建配置文件';
 	@override String get profileNameHint => '例如：访客、儿童、家庭房';
 	@override String get pinProtectionOptional => 'PIN 保护（可选）';
-	@override String get pinExplain => '切换到此配置文件需要 4 位 PIN。软屏障 — 任何能清除应用数据的人都可以绕过它。';
+	@override String get pinExplain => '切换个人资料需要 4 位 PIN。';
 	@override String get continueButton => '继续';
 	@override String get pinsDontMatch => 'PIN 不匹配';
 }
@@ -770,7 +808,7 @@ class _TranslationsConnectionsZh extends TranslationsConnectionsEn {
 	@override String get sectionTitle => '连接';
 	@override String get addConnection => '添加连接';
 	@override String get addConnectionSubtitleNoProfile => '使用 Plex 登录或连接 Jellyfin 服务器';
-	@override String addConnectionSubtitleScoped({required Object displayName}) => '添加到 ${displayName} — Plex 帐户、Jellyfin 服务器或从其他配置文件借用';
+	@override String addConnectionSubtitleScoped({required Object displayName}) => '添加到 ${displayName}: Plex、Jellyfin 或其他个人资料连接';
 	@override String sessionExpiredOne({required Object name}) => '${name} 的会话已过期';
 	@override String sessionExpiredMany({required Object count}) => '${count} 个服务器的会话已过期';
 	@override String get signInAgain => '重新登录';
@@ -898,7 +936,7 @@ class _TranslationsServerSelectionZh extends TranslationsServerSelectionEn {
 	final TranslationsZh _root; // ignore: unused_field
 
 	// Translations
-	@override String get allServerConnectionsFailed => '无法连接到任何服务器。请检查你的网络并重试。';
+	@override String get allServerConnectionsFailed => '无法连接到任何服务器。请检查网络。';
 	@override String noServersFoundForAccount({required Object username, required Object email}) => '未找到 ${username} (${email}) 的服务器';
 	@override String failedToLoadServers({required Object error}) => '无法加载服务器: ${error}';
 }
@@ -1033,7 +1071,7 @@ class _TranslationsCollectionsZh extends TranslationsCollectionsEn {
 	@override String get empty => '合集为空';
 	@override String get unknownLibrarySection => '无法删除：未知的媒体库分区';
 	@override String get deleteCollection => '删除合集';
-	@override String deleteConfirm({required Object title}) => '确定要删除"${title}"吗？此操作无法撤销。';
+	@override String deleteConfirm({required Object title}) => '要删除“${title}”吗？此操作无法撤销。';
 	@override String get deleted => '已删除合集';
 	@override String get deleteFailed => '删除合集失败';
 	@override String deleteFailedWithError({required Object error}) => '删除合集失败：${error}';
@@ -1131,11 +1169,11 @@ class _TranslationsWatchTogetherZh extends TranslationsWatchTogetherEn {
 	@override String get pasteFromClipboard => '从剪贴板粘贴';
 	@override String get pleaseEnterCode => '请输入会话代码';
 	@override String get codeMustBe5Chars => '会话代码必须是5个字符';
-	@override String get joinInstructions => '输入主持人分享的会话代码以加入他们的观看会话。';
+	@override String get joinInstructions => '输入主持人的会话代码以加入。';
 	@override String get failedToCreate => '创建会话失败';
 	@override String get failedToJoin => '加入会话失败';
 	@override String get sessionCodeCopied => '会话代码已复制到剪贴板';
-	@override String get relayUnreachable => '无法连接到中继服务器。这可能是由于您的网络运营商屏蔽了连接。您仍然可以尝试，但一起观看功能可能无法正常使用。';
+	@override String get relayUnreachable => '无法访问中继服务器。ISP 阻止可能导致 Watch Together 不可用。';
 	@override String get reconnectingToHost => '正在重新连接到主持人...';
 	@override String get currentPlayback => '当前播放';
 	@override String get joinCurrentPlayback => '加入当前播放';
@@ -1172,10 +1210,10 @@ class _TranslationsDownloadsZh extends TranslationsDownloadsEn {
 	@override String get deleteDownload => '删除下载';
 	@override String get retryDownload => '重试下载';
 	@override String get downloadQueued => '下载已排队';
-	@override String get serverErrorBitrate => '服务器错误 — 文件可能超出远程流媒体比特率限制';
+	@override String get serverErrorBitrate => '服务器错误：文件可能超过远程比特率限制';
 	@override String episodesQueued({required Object count}) => '${count} 集已加入下载队列';
 	@override String get downloadDeleted => '下载已删除';
-	@override String deleteConfirm({required Object title}) => '确定要删除 "${title}" 吗？下载的文件将从您的设备中删除。';
+	@override String deleteConfirm({required Object title}) => '要从此设备删除“${title}”吗？';
 	@override String deletingWithProgress({required Object title, required Object current, required Object total}) => '正在删除 ${title}... (${current}/${total})';
 	@override String get deleting => '正在删除...';
 	@override String get queuedTooltip => '已排队';
@@ -1285,7 +1323,7 @@ class _TranslationsExternalPlayerZh extends TranslationsExternalPlayerEn {
 	// Translations
 	@override String get title => '外部播放器';
 	@override String get useExternalPlayer => '使用外部播放器';
-	@override String get useExternalPlayerDescription => '在外部应用中打开视频，而不是使用内置播放器';
+	@override String get useExternalPlayerDescription => '在其他应用中打开视频';
 	@override String get selectPlayer => '选择播放器';
 	@override String get customPlayers => '自定义播放器';
 	@override String get systemDefault => '系统默认';
@@ -1393,7 +1431,7 @@ class _TranslationsMatchScreenZh extends TranslationsMatchScreenEn {
 	@override String get match => '匹配...';
 	@override String get fixMatch => '修正匹配...';
 	@override String get unmatch => '取消匹配';
-	@override String get unmatchConfirm => '清除此项目的当前匹配吗？在重新匹配之前，Plex 会将其视为未匹配。';
+	@override String get unmatchConfirm => '清除此匹配？在重新匹配前，Plex 会将其视为未匹配。';
 	@override String get unmatchSuccess => '已取消匹配';
 	@override String get unmatchFailed => '无法取消匹配';
 	@override String get matchApplied => '匹配已应用';
@@ -1427,7 +1465,7 @@ class _TranslationsTraktZh extends TranslationsTraktEn {
 	@override String get connected => '已连接';
 	@override String connectedAs({required Object username}) => '已以 @${username} 身份连接';
 	@override String get disconnectConfirm => '断开 Trakt 账户？';
-	@override String get disconnectConfirmBody => 'Plezy 将停止向 Trakt 发送播放事件。您随时可以重新连接。';
+	@override String get disconnectConfirmBody => 'Plezy 将停止向 Trakt 发送事件。你可随时重新连接。';
 	@override String get scrobble => '实时 Scrobble';
 	@override String get scrobbleDescription => '在播放时向 Trakt 发送播放、暂停和停止事件。';
 	@override String get watchedSync => '同步已观看状态';
@@ -1442,13 +1480,13 @@ class _TranslationsTrackersZh extends TranslationsTrackersEn {
 
 	// Translations
 	@override String get title => '追踪器';
-	@override String get hubSubtitle => '让你的观看进度与 Trakt 及其他服务保持同步。';
+	@override String get hubSubtitle => '与 Trakt 和其他服务同步观看进度。';
 	@override String get notConnected => '未连接';
 	@override String connectedAs({required Object username}) => '已以 @${username} 身份连接';
 	@override String get scrobble => '自动记录进度';
 	@override String get scrobbleDescription => '观看完一集或一部电影后更新你的列表。';
 	@override String disconnectConfirm({required Object service}) => '断开 ${service} 连接？';
-	@override String disconnectConfirmBody({required Object service}) => 'Plezy 将停止更新你的 ${service} 列表。你可以随时重新连接。';
+	@override String disconnectConfirmBody({required Object service}) => 'Plezy 将停止更新 ${service}。可随时重新连接。';
 	@override String connectFailed({required Object service}) => '无法连接到 ${service}。请重试。';
 	@override late final _TranslationsTrackersServicesZh services = _TranslationsTrackersServicesZh._(_root);
 	@override late final _TranslationsTrackersDeviceCodeZh deviceCode = _TranslationsTrackersDeviceCodeZh._(_root);
@@ -1464,7 +1502,7 @@ class _TranslationsAddServerZh extends TranslationsAddServerEn {
 
 	// Translations
 	@override String get addJellyfinTitle => '添加 Jellyfin 服务器';
-	@override String get jellyfinUrlIntro => '输入你的 Jellyfin 服务器 URL — 例如 `https://jellyfin.example.com`。可在之后登录。';
+	@override String get jellyfinUrlIntro => '输入服务器 URL，例如 `https://jellyfin.example.com`。';
 	@override String get serverUrl => '服务器 URL';
 	@override String get findServer => '查找服务器';
 	@override String get username => '用户名';
@@ -1476,25 +1514,25 @@ class _TranslationsAddServerZh extends TranslationsAddServerEn {
 	@override String signInFailed({required Object error}) => '登录失败: ${error}';
 	@override String quickConnectFailed({required Object error}) => 'Quick Connect 失败: ${error}';
 	@override String get addPlexTitle => '使用 Plex 登录';
-	@override String get plexAuthIntro => '选择登录 Plex 的方式。浏览器流程会打开 plex.tv 让你确认连接；QR 选项适合电视 / 远程设备。';
+	@override String get plexAuthIntro => '使用浏览器或二维码登录。';
 	@override String get plexQRPrompt => '扫描此 QR 码以登录。';
 	@override String get waitingForPlexConfirmation => '等待 plex.tv 确认登录…';
 	@override String get pinExpired => 'PIN 在登录前已过期。请重试。';
-	@override String get duplicatePlexAccount => '此设备已登录到一个 Plex 帐户。请在设置中退出登录以切换帐户。';
+	@override String get duplicatePlexAccount => '已登录 Plex。请退出登录以切换账号。';
 	@override String failedToRegisterAccount({required Object error}) => '注册帐户失败: ${error}';
 	@override String get enterJellyfinUrlError => '输入你的 Jellyfin 服务器 URL';
 	@override String get addConnectionTitle => '添加连接';
 	@override String addConnectionTitleScoped({required Object name}) => '添加到 ${name}';
-	@override String get addConnectionIntroGlobal => '添加另一台媒体服务器。你可以混合使用 Plex 帐户和 Jellyfin 服务器 — 所有已连接后端的项目会一起显示在主页。';
+	@override String get addConnectionIntroGlobal => '添加另一个媒体服务器。Plex 和 Jellyfin 会一起显示在主页。';
 	@override String get addConnectionIntroScoped => '添加新服务器，或从另一个配置文件借用。';
 	@override String get signInWithPlexCard => '使用 Plex 登录';
-	@override String get signInWithPlexCardSubtitle => '为你的 Plex 帐户授权此设备。与该帐户共享的服务器会自动加入。';
-	@override String get signInWithPlexCardSubtitleScoped => '授权一个新的 Plex 帐户。其 Home 用户会显示为配置文件。';
+	@override String get signInWithPlexCardSubtitle => '授权此设备。共享服务器会被添加。';
+	@override String get signInWithPlexCardSubtitleScoped => '授权一个 Plex 账号。Home 用户会成为个人资料。';
 	@override String get connectToJellyfinCard => '连接到 Jellyfin';
-	@override String get connectToJellyfinCardSubtitle => '输入你的 Jellyfin 服务器 URL，使用用户名 + 密码登录（Quick Connect 即将支持）。';
+	@override String get connectToJellyfinCardSubtitle => '输入服务器 URL、用户名和密码。';
 	@override String connectToJellyfinCardSubtitleScoped({required Object name}) => '登录到 Jellyfin 服务器。绑定到 ${name}。';
 	@override String get borrowFromAnotherProfile => '从另一个配置文件借用';
-	@override String get borrowFromAnotherProfileSubtitle => '重用已附加到另一个配置文件的连接。受 PIN 保护的来源配置文件会要求输入 PIN。';
+	@override String get borrowFromAnotherProfileSubtitle => '复用另一个个人资料的连接。受 PIN 保护的个人资料需要 PIN。';
 }
 
 // Path: hotkeys.actions
@@ -1525,6 +1563,7 @@ class _TranslationsHotkeysActionsZh extends TranslationsHotkeysActionsEn {
 	@override String get subSeekPrev => '跳转到上一字幕';
 	@override String get shaderToggle => '切换着色器';
 	@override String get skipMarker => '跳过片头/片尾';
+	@override String get screenshot => '截图';
 }
 
 // Path: videoControls.pipErrors
@@ -1536,7 +1575,7 @@ class _TranslationsVideoControlsPipErrorsZh extends TranslationsVideoControlsPip
 	// Translations
 	@override String get androidVersion => '需要 Android 8.0 或更高版本';
 	@override String get iosVersion => '需要 iOS 15.0 或更高版本';
-	@override String get permissionDisabled => '画中画权限已禁用。请在设置 > 应用 > Plezy > 画中画中启用';
+	@override String get permissionDisabled => '画中画已禁用。请在系统设置中启用。';
 	@override String get notSupported => '此设备不支持画中画模式';
 	@override String get voSwitchFailed => '无法切换画中画的视频输出';
 	@override String get failed => '画中画启动失败';
@@ -1596,8 +1635,18 @@ class _TranslationsLibrariesSortLabelsZh extends TranslationsLibrariesSortLabels
 	@override String get dateAdded => '添加日期';
 	@override String get releaseDate => '发行日期';
 	@override String get rating => '评分';
+	@override String get communityRating => '社区评分';
+	@override String get criticRating => '影评人评分';
 	@override String get lastPlayed => '最近播放';
+	@override String get datePlayed => '播放日期';
 	@override String get playCount => '播放次数';
+	@override String get productionYear => '制作年份';
+	@override String get runtime => '时长';
+	@override String get officialRating => '官方分级';
+	@override String get premiereDate => '首映日期';
+	@override String get startDate => '开始日期';
+	@override String get airTime => '播出时间';
+	@override String get studio => '工作室';
 	@override String get random => '随机';
 	@override String get dateShared => '共享日期';
 	@override String get latestEpisodeAirDate => '最新一集播出日期';
@@ -1616,7 +1665,7 @@ class _TranslationsCompanionRemoteSessionZh extends TranslationsCompanionRemoteS
 	@override String get connected => '已连接';
 	@override String get serverRunning => '远程服务器已启动';
 	@override String get serverStopped => '远程服务器已停止';
-	@override String get serverRunningDescription => '网络上的移动设备可以发现并连接到此应用';
+	@override String get serverRunningDescription => '网络上的移动设备可以连接到此应用';
 	@override String get serverStoppedDescription => '启动服务器以允许移动设备连接';
 	@override String get usePhoneToControl => '使用移动设备控制此应用';
 	@override String get startServer => '启动服务器';
@@ -1631,20 +1680,20 @@ class _TranslationsCompanionRemotePairingZh extends TranslationsCompanionRemoteP
 	final TranslationsZh _root; // ignore: unused_field
 
 	// Translations
-	@override String get discoveryDescription => '网络上使用相同Plex账户运行Plezy的设备将自动显示';
+	@override String get discoveryDescription => '使用同一 Plex 账号的 Plezy 设备会显示在这里';
 	@override String get hostAddressHint => '192.168.1.100:48632';
 	@override String get connecting => '正在连接...';
 	@override String get searchingForDevices => '正在搜索设备...';
 	@override String get noDevicesFound => '未在网络上找到设备';
-	@override String get noDevicesHint => '请确保桌面上已打开Plezy，且两台设备在同一WiFi网络上';
+	@override String get noDevicesHint => '在桌面端打开 Plezy 并使用同一 WiFi';
 	@override String get availableDevices => '可用设备';
 	@override String get manualConnection => '手动连接';
-	@override String get cryptoInitFailed => '无法初始化安全连接。请确保已登录Plex账户。';
+	@override String get cryptoInitFailed => '无法启动安全连接。请先登录 Plex。';
 	@override String get validationHostRequired => '请输入主机地址';
 	@override String get validationHostFormat => '格式必须为IP:端口（例如 192.168.1.100:48632）';
-	@override String get connectionTimedOut => '连接超时。请确保两台设备在同一网络上。';
-	@override String get sessionNotFound => '未找到设备。请确保Plezy正在主机上运行。';
-	@override String get authFailed => '认证失败。请确保两台设备使用相同的Plex账户。';
+	@override String get connectionTimedOut => '连接超时。请在两台设备上使用同一网络。';
+	@override String get sessionNotFound => '未找到设备。请确认 Plezy 正在主机上运行。';
+	@override String get authFailed => '认证失败。两台设备需要使用同一 Plex 账号。';
 	@override String failedToConnect({required Object error}) => '连接失败：${error}';
 }
 
@@ -1718,7 +1767,7 @@ class _TranslationsTrackersOauthProxyZh extends TranslationsTrackersOauthProxyEn
 
 	// Translations
 	@override String title({required Object service}) => '登录 ${service}';
-	@override String get body => '用手机扫描此二维码，或在任何带浏览器的设备上打开下方 URL。';
+	@override String get body => '扫描此二维码，或在任意设备上打开 URL。';
 	@override String openToSignIn({required Object service}) => '打开 ${service} 以登录';
 	@override String get urlCopied => 'URL 已复制';
 }
@@ -1759,16 +1808,16 @@ extension on TranslationsZh {
 			'auth.authenticate' => '验证',
 			'auth.authenticationTimeout' => '验证超时。请重试。',
 			'auth.scanQRToSignIn' => '扫描二维码登录',
-			'auth.waitingForAuth' => '等待验证中...\n请在你的浏览器中完成登录。',
+			'auth.waitingForAuth' => '正在等待认证...\n请在浏览器中登录。',
 			'auth.useBrowser' => '使用浏览器',
 			'auth.or' => '或',
 			'auth.connectToJellyfin' => '连接到 Jellyfin',
 			'auth.useQuickConnect' => '使用 Quick Connect',
 			'auth.quickConnectCode' => 'Quick Connect 代码',
-			'auth.quickConnectInstructions' => '在浏览器中打开你的 Jellyfin 服务器，登录后从用户菜单中选择 Quick Connect。输入此代码以批准登录。',
+			'auth.quickConnectInstructions' => '在 Jellyfin 中打开 Quick Connect 并输入此代码。',
 			'auth.quickConnectWaiting' => '等待批准…',
 			'auth.quickConnectCancel' => '取消',
-			'auth.quickConnectExpired' => 'Quick Connect 代码在批准前已过期。请重试。',
+			'auth.quickConnectExpired' => 'Quick Connect 已过期。请重试。',
 			'common.cancel' => '取消',
 			'common.save' => '保存',
 			'common.close' => '关闭',
@@ -1800,9 +1849,6 @@ extension on TranslationsZh {
 			'common.mute' => '静音',
 			'common.ok' => '确定',
 			'common.reconnect' => '重新连接',
-			'common.exitConfirmTitle' => '退出应用？',
-			'common.exitConfirmMessage' => '确定要退出吗？',
-			'common.dontAskAgain' => '不再询问',
 			'common.exit' => '退出',
 			'common.viewAll' => '查看全部',
 			'common.checkingNetwork' => '正在检查网络...',
@@ -1813,6 +1859,7 @@ extension on TranslationsZh {
 			'common.loading' => '加载中...',
 			'common.fullscreen' => '全屏',
 			'common.exitFullscreen' => '退出全屏',
+			'common.pressBackAgainToExit' => '再按一次返回退出',
 			'screens.licenses' => '许可证',
 			'screens.switchProfile' => '切换用户',
 			'screens.subtitleStyling' => '字幕样式',
@@ -1856,21 +1903,21 @@ extension on TranslationsZh {
 			'settings.listView' => '列表视图',
 			'settings.showHeroSection' => '显示主要精选区',
 			'settings.useGlobalHubs' => '使用主页布局',
-			'settings.useGlobalHubsDescription' => '像官方客户端一样显示主页中心。关闭后，改为显示每个资料库的推荐。',
+			'settings.useGlobalHubsDescription' => '显示统一主页中心。否则使用资料库推荐。',
 			'settings.showServerNameOnHubs' => '在推荐栏显示服务器名称',
-			'settings.showServerNameOnHubsDescription' => '始终在推荐栏标题中显示服务器名称。关闭时仅在推荐栏名称重复时显示。',
+			'settings.showServerNameOnHubsDescription' => '始终在中心标题中显示服务器名称。',
 			'settings.groupLibrariesByServer' => '按服务器分组媒体库',
-			'settings.groupLibrariesByServerDescription' => '当连接到多个服务器时，在侧边栏中显示每个媒体服务器的标题。',
+			'settings.groupLibrariesByServerDescription' => '按媒体服务器分组侧边栏资料库。',
 			'settings.alwaysKeepSidebarOpen' => '始终保持侧边栏展开',
 			'settings.alwaysKeepSidebarOpenDescription' => '侧边栏保持展开状态，内容区域自动调整',
 			'settings.showUnwatchedCount' => '显示未观看数量',
 			'settings.showUnwatchedCountDescription' => '在剧集和季上显示未观看的集数',
 			'settings.showEpisodeNumberOnCards' => '在卡片上显示集数',
-			'settings.showEpisodeNumberOnCardsDescription' => '在剧集卡片上，季号旁同时显示集数（例如 S2 E3）',
+			'settings.showEpisodeNumberOnCardsDescription' => '在剧集卡片上显示季和集编号',
 			'settings.showSeasonPostersOnTabs' => '在选项卡上显示季海报',
-			'settings.showSeasonPostersOnTabsDescription' => '在剧集详情页中，每个季选项卡的上方显示该季的海报',
+			'settings.showSeasonPostersOnTabsDescription' => '在每季标签上方显示该季海报',
 			'settings.hideSpoilers' => '隐藏未看剧集的剧透内容',
-			'settings.hideSpoilersDescription' => '模糊未观看剧集的缩略图并隐藏其描述',
+			'settings.hideSpoilersDescription' => '模糊未观看剧集的缩略图和描述',
 			'settings.playerBackend' => '播放器引擎',
 			'settings.exoPlayer' => 'ExoPlayer（推荐）',
 			'settings.mpv' => 'mpv',
@@ -1879,7 +1926,7 @@ extension on TranslationsZh {
 			'settings.bufferSize' => '缓冲区大小',
 			'settings.bufferSizeMB' => ({required Object size}) => '${size}MB',
 			'settings.bufferSizeAuto' => '自动（推荐）',
-			'settings.bufferSizeWarning' => ({required Object heap, required Object size}) => '您的设备有 ${heap}MB 内存。${size}MB 的缓冲区可能导致播放问题。',
+			'settings.bufferSizeWarning' => ({required Object heap, required Object size}) => '可用内存 ${heap}MB。${size}MB 缓冲可能影响播放。',
 			'settings.defaultQualityTitle' => '默认画质',
 			'settings.defaultQualityDescription' => '开始播放时使用。较低的值可减少带宽。',
 			'settings.subtitleStyling' => '字幕样式',
@@ -1891,18 +1938,18 @@ extension on TranslationsZh {
 			'settings.defaultSleepTimer' => '默认睡眠定时器',
 			'settings.minutesUnit' => ({required Object minutes}) => '${minutes} 分钟',
 			'settings.rememberTrackSelections' => '记住每个剧集/电影的音轨选择',
-			'settings.rememberTrackSelectionsDescription' => '在播放过程中更改音轨时自动保存音频和字幕语言偏好',
+			'settings.rememberTrackSelectionsDescription' => '记住每个标题的音频和字幕选择',
 			'settings.showChapterMarkersOnTimeline' => '在进度条上显示章节标记',
 			'settings.showChapterMarkersOnTimelineDescription' => '按章节边界分段显示进度条',
 			'settings.clickVideoTogglesPlayback' => '点击视频可切换播放/暂停',
-			'settings.clickVideoTogglesPlaybackDescription' => '如果启用此选项，点击视频播放器将播放或暂停视频。否则，点击将显示或隐藏播放控件',
+			'settings.clickVideoTogglesPlaybackDescription' => '点击视频进行播放/暂停，而不是显示控制项。',
 			'settings.videoPlayerControls' => '视频播放器控制',
 			'settings.keyboardShortcuts' => '键盘快捷键',
 			'settings.keyboardShortcutsDescription' => '自定义键盘快捷键',
 			'settings.videoPlayerNavigation' => '视频播放器导航',
 			'settings.videoPlayerNavigationDescription' => '使用方向键导航视频播放器控件',
 			'settings.watchTogetherRelay' => '一起看中继服务器',
-			'settings.watchTogetherRelayDescription' => '设置一起看的自定义中继服务器。所有参与者必须使用相同的服务器。',
+			'settings.watchTogetherRelayDescription' => '设置自定义中继。所有人必须使用同一服务器。',
 			'settings.watchTogetherRelayHint' => 'https://my-relay.example.com',
 			'settings.crashReporting' => '崩溃报告',
 			'settings.crashReportingDescription' => '发送崩溃报告以帮助改进应用',
@@ -1911,10 +1958,10 @@ extension on TranslationsZh {
 			'settings.viewLogs' => '查看日志',
 			'settings.viewLogsDescription' => '查看应用程序日志',
 			'settings.clearCache' => '清除缓存',
-			'settings.clearCacheDescription' => '这将清除所有缓存的图片和数据。清除缓存后，应用程序加载内容可能会变慢。',
+			'settings.clearCacheDescription' => '清除缓存的图片和数据。内容加载可能变慢。',
 			'settings.clearCacheSuccess' => '缓存清除成功',
 			'settings.resetSettings' => '重置设置',
-			'settings.resetSettingsDescription' => '这会将所有设置重置为其默认值。此操作无法撤销。',
+			'settings.resetSettingsDescription' => '恢复默认设置。此操作无法撤销。',
 			'settings.resetSettingsSuccess' => '设置重置成功',
 			'settings.backup' => '备份',
 			'settings.exportSettings' => '导出设置',
@@ -1935,7 +1982,7 @@ extension on TranslationsZh {
 			'settings.updateAvailable' => '有可用更新',
 			'settings.checkForUpdates' => '检查更新',
 			'settings.autoCheckUpdatesOnStartup' => '启动时自动检查更新',
-			'settings.autoCheckUpdatesOnStartupDescription' => '启动时如有新版本可用则显示通知',
+			'settings.autoCheckUpdatesOnStartupDescription' => '启动时有可用更新则通知',
 			'settings.validationErrorEnterNumber' => '请输入一个有效的数字',
 			'settings.validationErrorDuration' => ({required Object min, required Object max, required Object unit}) => '时长必须介于 ${min} 和 ${max} ${unit} 之间',
 			'settings.shortcutAlreadyAssigned' => ({required Object action}) => '快捷键已被分配给 ${action}',
@@ -1946,7 +1993,7 @@ extension on TranslationsZh {
 			'settings.autoSkipCredits' => '自动跳过片尾',
 			'settings.autoSkipCreditsDescription' => '自动跳过片尾并播放下一集',
 			'settings.forceSkipMarkerFallback' => '强制使用备用标记',
-			'settings.forceSkipMarkerFallbackDescription' => '即使 Plex 提供原生标记，也使用章节标题模式作为跳过标记',
+			'settings.forceSkipMarkerFallbackDescription' => '即使 Plex 有标记，也使用章节标题模式',
 			'settings.autoSkipDelay' => '自动跳过延迟',
 			'settings.autoSkipDelayDescription' => ({required Object seconds}) => '自动跳过前等待 ${seconds} 秒',
 			'settings.introPattern' => '片头标记模式',
@@ -1968,8 +2015,8 @@ extension on TranslationsZh {
 			'settings.downloadOnWifiOnly' => '仅在 WiFi 时下载',
 			'settings.downloadOnWifiOnlyDescription' => '使用蜂窝数据时禁止下载',
 			'settings.autoRemoveWatchedDownloads' => '自动移除已观看的下载',
-			'settings.autoRemoveWatchedDownloadsDescription' => '当剧集和电影被标记为已观看时自动删除下载内容',
-			'settings.cellularDownloadBlocked' => '蜂窝数据下已禁用下载。请连接 WiFi 或更改设置。',
+			'settings.autoRemoveWatchedDownloadsDescription' => '自动删除已观看的下载',
+			'settings.cellularDownloadBlocked' => '蜂窝网络下已阻止下载。请使用 WiFi 或更改设置。',
 			'settings.maxVolume' => '最大音量',
 			'settings.maxVolumeDescription' => '允许音量超过 100% 以适应安静的媒体',
 			'settings.maxVolumePercent' => ({required Object percent}) => '${percent}%',
@@ -1982,22 +2029,26 @@ extension on TranslationsZh {
 			'settings.companionRemoteServer' => '配套遥控服务器',
 			'settings.companionRemoteServerDescription' => '允许网络上的移动设备控制此应用',
 			'settings.autoPip' => '自动画中画',
-			'settings.autoPipDescription' => '在播放期间离开应用时自动进入画中画模式',
+			'settings.autoPipDescription' => '播放时离开会进入画中画',
 			'settings.matchContentFrameRate' => '匹配内容帧率',
-			'settings.matchContentFrameRateDescription' => '调整显示刷新率以匹配视频内容，减少画面抖动并节省电量',
+			'settings.matchContentFrameRateDescription' => '将显示刷新率匹配到视频内容',
 			'settings.matchRefreshRate' => '匹配刷新率',
-			'settings.matchRefreshRateDescription' => '全屏时切换显示刷新率以匹配视频内容',
+			'settings.matchRefreshRateDescription' => '全屏时匹配显示刷新率',
 			'settings.matchDynamicRange' => '匹配动态范围',
-			'settings.matchDynamicRangeDescription' => '自动为HDR内容启用HDR，退出播放器时恢复为SDR',
+			'settings.matchDynamicRangeDescription' => 'HDR 内容切换到 HDR，随后切回 SDR',
 			'settings.displaySwitchDelay' => '显示切换延迟',
 			'settings.tunneledPlayback' => '通道化播放',
-			'settings.tunneledPlaybackDescription' => '使用硬件加速视频通道。如果在 HDR 内容上看到黑屏但有声音，请禁用此选项',
+			'settings.tunneledPlaybackDescription' => '使用视频隧道。若 HDR 播放出现黑屏，请禁用。',
+			'settings.dvConversionMode' => 'Dolby Vision 转换',
+			'settings.dvConversionModeDescription' => '选择 ExoPlayer 如何处理 Dolby Vision Profile 7 文件。',
+			'settings.dvConversionAuto' => '自动',
+			'settings.dvConversionNative' => '原生 / 禁用',
+			'settings.dvConversionDv81' => 'P7 → P8.1',
+			'settings.dvConversionHevcStrip' => 'P7 → HEVC',
 			'settings.requireProfileSelectionOnOpen' => '打开应用时询问配置文件',
 			'settings.requireProfileSelectionOnOpenDescription' => '每次打开应用时显示配置文件选择',
-			'settings.confirmExitOnBack' => '退出前确认',
-			'settings.confirmExitOnBackDescription' => '按返回键退出应用时显示确认对话框',
 			'settings.forceTvMode' => '强制 TV 模式',
-			'settings.forceTvModeDescription' => '无论自动检测结果如何都使用 TV 布局。适用于未报告 leanback 功能的 Android TV 设备。更改后将重启应用。',
+			'settings.forceTvModeDescription' => '强制 TV 布局。适用于无法自动检测的设备。需要重启。',
 			'settings.startInFullscreen' => '以全屏模式启动',
 			'settings.startInFullscreenDescription' => '启动时以全屏模式打开 Plezy',
 			'settings.autoHidePerformanceOverlay' => '自动隐藏性能叠加层',
@@ -2042,6 +2093,7 @@ extension on TranslationsZh {
 			'hotkeys.actions.subSeekPrev' => '跳转到上一字幕',
 			'hotkeys.actions.shaderToggle' => '切换着色器',
 			'hotkeys.actions.skipMarker' => '跳过片头/片尾',
+			'hotkeys.actions.screenshot' => '截图',
 			'fileInfo.title' => '文件信息',
 			'fileInfo.video' => '视频',
 			'fileInfo.audio' => '音频',
@@ -2075,13 +2127,24 @@ extension on TranslationsZh {
 			'mediaMenu.shufflePlay' => '随机播放',
 			'mediaMenu.fileInfo' => '文件信息',
 			'mediaMenu.deleteFromServer' => '从服务器删除',
-			'mediaMenu.confirmDelete' => '这将永久删除此媒体及其文件。此操作无法撤销。',
+			'mediaMenu.confirmDelete' => '要从服务器删除此媒体及其文件吗？',
 			'mediaMenu.deleteMultipleWarning' => '这包括所有剧集及其文件。',
 			'mediaMenu.mediaDeletedSuccessfully' => '媒体项已成功删除',
 			'mediaMenu.mediaFailedToDelete' => '删除媒体项失败',
 			'mediaMenu.rate' => '评分',
 			'mediaMenu.playFromBeginning' => '从头播放',
 			'mediaMenu.playVersion' => '播放版本...',
+			'rateSheet.title' => '评分',
+			'rateSheet.server' => '服务器',
+			'rateSheet.starValue' => ({required Object rating}) => '${rating} / 5',
+			'rateSheet.scoreValue' => ({required Object score}) => '${score} / 10',
+			'rateSheet.setScore' => '设置分数',
+			'rateSheet.notRated' => '未评分',
+			'rateSheet.liked' => '已喜欢',
+			'rateSheet.notLiked' => '未喜欢',
+			'rateSheet.saved' => '已保存',
+			'rateSheet.notAvailable' => '未找到匹配项',
+			'rateSheet.noConnectedTrackers' => '在设置中连接跟踪器即可在那里评分。',
 			'accessibility.mediaCardMovie' => ({required Object title}) => '${title}, 电影',
 			'accessibility.mediaCardShow' => ({required Object title}) => '${title}, 电视剧',
 			'accessibility.mediaCardEpisode' => ({required Object title, required Object episodeInfo}) => '${title}, ${episodeInfo}',
@@ -2150,9 +2213,10 @@ extension on TranslationsZh {
 			'videoControls.endsAt' => ({required Object time}) => '${time} 结束',
 			'videoControls.pipActive' => '正在画中画模式中播放',
 			'videoControls.pipFailed' => '画中画启动失败',
+			'videoControls.screenshotSaved' => '截图已保存',
 			'videoControls.pipErrors.androidVersion' => '需要 Android 8.0 或更高版本',
 			'videoControls.pipErrors.iosVersion' => '需要 iOS 15.0 或更高版本',
-			'videoControls.pipErrors.permissionDisabled' => '画中画权限已禁用。请在设置 > 应用 > Plezy > 画中画中启用',
+			'videoControls.pipErrors.permissionDisabled' => '画中画已禁用。请在系统设置中启用。',
 			'videoControls.pipErrors.notSupported' => '此设备不支持画中画模式',
 			'videoControls.pipErrors.voSwitchFailed' => '无法切换画中画的视频输出',
 			'videoControls.pipErrors.failed' => '画中画启动失败',
@@ -2207,7 +2271,7 @@ extension on TranslationsZh {
 			'messages.failedPlayback' => ({required Object action, required Object error}) => '无法${action}: ${error}',
 			'messages.switchingToCompatiblePlayer' => '正在切换到兼容的播放器...',
 			'messages.serverLimitTitle' => '播放失败',
-			'messages.serverLimitBody' => '服务器返回了错误 (HTTP 500)。这通常意味着服务器所有者设置了带宽或转码限制，正在拒绝你的会话。客户端无法解决此问题 — 需要服务器所有者调整其设置。',
+			'messages.serverLimitBody' => '服务器错误 (HTTP 500)。带宽/转码限制可能拒绝了此会话。请让所有者调整。',
 			'messages.logsUploaded' => '日志已上传',
 			'messages.logsUploadFailed' => '上传日志失败',
 			'messages.logId' => '日志 ID',
@@ -2242,13 +2306,15 @@ extension on TranslationsZh {
 			'profiles.addPlezyProfile' => '添加 Plezy 配置文件',
 			'profiles.switchingProfile' => '切换配置文件中…',
 			'profiles.deleteThisProfileTitle' => '删除此配置文件？',
-			'profiles.deleteThisProfileMessage' => ({required Object displayName}) => '${displayName} 将被移除。连接本身不受影响。',
+			'profiles.deleteThisProfileMessage' => ({required Object displayName}) => '移除 ${displayName}。连接不会受影响。',
 			'profiles.active' => '活跃',
 			'profiles.manage' => '管理',
 			'profiles.delete' => '删除',
 			'profiles.signOut' => '退出登录',
 			'profiles.signOutPlexTitle' => '退出 Plex 登录？',
-			'profiles.signOutPlexMessage' => ({required Object displayName}) => '${displayName} 以及该账户下的所有 Plex Home 用户将从此设备移除。您可以随时重新登录。',
+			'profiles.signOutPlexMessage' => ({required Object displayName}) => '要移除 ${displayName} 和所有 Plex Home 用户吗？可随时重新登录。',
+			_ => null,
+		} ?? switch (path) {
 			'profiles.signedOutPlex' => '已退出 Plex 登录。',
 			'profiles.signOutFailed' => '退出登录失败。',
 			'profiles.sectionTitle' => '配置文件',
@@ -2256,38 +2322,50 @@ extension on TranslationsZh {
 			'profiles.summaryMultipleWithActive' => ({required Object count, required Object activeName}) => '${count} 个配置文件 · 活跃：${activeName}',
 			'profiles.summaryMultiple' => ({required Object count}) => '${count} 个配置文件',
 			'profiles.removeConnectionTitle' => '移除连接？',
-			'profiles.removeConnectionMessage' => ({required Object displayName, required Object connectionLabel}) => '${displayName} 将失去对 ${connectionLabel} 的访问权限。连接本身仍可供其他配置文件使用。',
+			'profiles.removeConnectionMessage' => ({required Object displayName, required Object connectionLabel}) => '移除 ${displayName} 对 ${connectionLabel} 的访问。其他个人资料仍保留。',
 			'profiles.deleteProfileTitle' => '删除配置文件？',
-			'profiles.deleteProfileMessage' => ({required Object displayName}) => '这将从此设备中删除 ${displayName} 及其所有连接。底层的 Plex/Jellyfin 服务器不会受到影响。',
+			'profiles.deleteProfileMessage' => ({required Object displayName}) => '移除 ${displayName} 及其连接。服务器仍可用。',
 			'profiles.profileNameLabel' => '配置文件名称',
 			'profiles.pinProtectionLabel' => 'PIN 保护',
 			'profiles.pinManagedByPlex' => 'PIN 由 Plex 管理。在 plex.tv 上编辑。',
 			'profiles.noPinSetEditOnPlex' => '未设置 PIN。如需要求 PIN，请在 plex.tv 上编辑 Home 用户。',
 			'profiles.setPin' => '设置 PIN',
-			_ => null,
-		} ?? switch (path) {
+			'profiles.setPinTitle' => '设置 PIN',
+			'profiles.confirmPinTitle' => '确认 PIN',
+			'profiles.pinSet' => '已设置 PIN',
+			'profiles.changePin' => '更改',
+			'profiles.removePin' => '移除',
 			'profiles.connectionsLabel' => '连接',
 			'profiles.add' => '添加',
 			'profiles.deleteProfileButton' => '删除配置文件',
 			'profiles.noConnectionsHint' => '没有连接 — 添加一个以使用此配置文件。',
+			'profiles.noConnections' => '没有连接',
 			'profiles.plexHomeAccount' => 'Plex Home 账户',
 			'profiles.connectionDefault' => '默认',
+			'profiles.connectionAs' => ({required Object displayName}) => '以 ${displayName} 身份',
 			'profiles.makeDefault' => '设为默认',
 			'profiles.removeConnection' => '移除',
+			'profiles.profileRenamed' => '个人资料已重命名。',
 			'profiles.borrowAddTo' => ({required Object displayName}) => '添加到 ${displayName}',
-			'profiles.borrowExplain' => '从另一个配置文件借用连接。PIN 保护的源配置文件在共享前会要求输入 PIN。',
+			'profiles.borrowExplain' => '借用另一个个人资料的连接。受 PIN 保护的个人资料需要 PIN。',
 			'profiles.borrowEmpty' => '暂无可借用的内容。',
-			'profiles.borrowEmptySubtitle' => '请先将 Plex 账户或 Jellyfin 服务器连接到另一个配置文件，然后回到这里。',
+			'profiles.borrowEmptySubtitle' => '请先将 Plex 或 Jellyfin 连接到另一个个人资料。',
+			'profiles.borrowFromProfile' => ({required Object displayName}) => '来自 ${displayName}',
+			'profiles.borrowConnectionBorrowed' => '已借用连接。',
+			'profiles.borrowFailed' => '无法借用连接。',
+			'profiles.incorrectPin' => 'PIN 不正确。',
+			'profiles.sourceProfileMissingParentAccount' => '源个人资料缺少其父账号。',
+			'profiles.failedToVerifyPin' => '无法验证 PIN。',
 			'profiles.newProfile' => '新建配置文件',
 			'profiles.profileNameHint' => '例如：访客、儿童、家庭房',
 			'profiles.pinProtectionOptional' => 'PIN 保护（可选）',
-			'profiles.pinExplain' => '切换到此配置文件需要 4 位 PIN。软屏障 — 任何能清除应用数据的人都可以绕过它。',
+			'profiles.pinExplain' => '切换个人资料需要 4 位 PIN。',
 			'profiles.continueButton' => '继续',
 			'profiles.pinsDontMatch' => 'PIN 不匹配',
 			'connections.sectionTitle' => '连接',
 			'connections.addConnection' => '添加连接',
 			'connections.addConnectionSubtitleNoProfile' => '使用 Plex 登录或连接 Jellyfin 服务器',
-			'connections.addConnectionSubtitleScoped' => ({required Object displayName}) => '添加到 ${displayName} — Plex 帐户、Jellyfin 服务器或从其他配置文件借用',
+			'connections.addConnectionSubtitleScoped' => ({required Object displayName}) => '添加到 ${displayName}: Plex、Jellyfin 或其他个人资料连接',
 			'connections.sessionExpiredOne' => ({required Object name}) => '${name} 的会话已过期',
 			'connections.sessionExpiredMany' => ({required Object count}) => '${count} 个服务器的会话已过期',
 			'connections.signInAgain' => '重新登录',
@@ -2380,8 +2458,18 @@ extension on TranslationsZh {
 			'libraries.sortLabels.dateAdded' => '添加日期',
 			'libraries.sortLabels.releaseDate' => '发行日期',
 			'libraries.sortLabels.rating' => '评分',
+			'libraries.sortLabels.communityRating' => '社区评分',
+			'libraries.sortLabels.criticRating' => '影评人评分',
 			'libraries.sortLabels.lastPlayed' => '最近播放',
+			'libraries.sortLabels.datePlayed' => '播放日期',
 			'libraries.sortLabels.playCount' => '播放次数',
+			'libraries.sortLabels.productionYear' => '制作年份',
+			'libraries.sortLabels.runtime' => '时长',
+			'libraries.sortLabels.officialRating' => '官方分级',
+			'libraries.sortLabels.premiereDate' => '首映日期',
+			'libraries.sortLabels.startDate' => '开始日期',
+			'libraries.sortLabels.airTime' => '播出时间',
+			'libraries.sortLabels.studio' => '工作室',
 			'libraries.sortLabels.random' => '随机',
 			'libraries.sortLabels.dateShared' => '共享日期',
 			'libraries.sortLabels.latestEpisodeAirDate' => '最新一集播出日期',
@@ -2390,7 +2478,7 @@ extension on TranslationsZh {
 			'about.versionLabel' => ({required Object version}) => '版本 ${version}',
 			'about.appDescription' => '一款精美的 Flutter Plex 和 Jellyfin 客户端',
 			'about.viewLicensesDescription' => '查看第三方库的许可证',
-			'serverSelection.allServerConnectionsFailed' => '无法连接到任何服务器。请检查你的网络并重试。',
+			'serverSelection.allServerConnectionsFailed' => '无法连接到任何服务器。请检查网络。',
 			'serverSelection.noServersFoundForAccount' => ({required Object username, required Object email}) => '未找到 ${username} (${email}) 的服务器',
 			'serverSelection.failedToLoadServers' => ({required Object error}) => '无法加载服务器: ${error}',
 			'hubDetail.title' => '标题',
@@ -2471,7 +2559,7 @@ extension on TranslationsZh {
 			'collections.empty' => '合集为空',
 			'collections.unknownLibrarySection' => '无法删除：未知的媒体库分区',
 			'collections.deleteCollection' => '删除合集',
-			'collections.deleteConfirm' => ({required Object title}) => '确定要删除"${title}"吗？此操作无法撤销。',
+			'collections.deleteConfirm' => ({required Object title}) => '要删除“${title}”吗？此操作无法撤销。',
 			'collections.deleted' => '已删除合集',
 			'collections.deleteFailed' => '删除合集失败',
 			'collections.deleteFailedWithError' => ({required Object error}) => '删除合集失败：${error}',
@@ -2551,11 +2639,11 @@ extension on TranslationsZh {
 			'watchTogether.pasteFromClipboard' => '从剪贴板粘贴',
 			'watchTogether.pleaseEnterCode' => '请输入会话代码',
 			'watchTogether.codeMustBe5Chars' => '会话代码必须是5个字符',
-			'watchTogether.joinInstructions' => '输入主持人分享的会话代码以加入他们的观看会话。',
+			'watchTogether.joinInstructions' => '输入主持人的会话代码以加入。',
 			'watchTogether.failedToCreate' => '创建会话失败',
 			'watchTogether.failedToJoin' => '加入会话失败',
 			'watchTogether.sessionCodeCopied' => '会话代码已复制到剪贴板',
-			'watchTogether.relayUnreachable' => '无法连接到中继服务器。这可能是由于您的网络运营商屏蔽了连接。您仍然可以尝试，但一起观看功能可能无法正常使用。',
+			'watchTogether.relayUnreachable' => '无法访问中继服务器。ISP 阻止可能导致 Watch Together 不可用。',
 			'watchTogether.reconnectingToHost' => '正在重新连接到主持人...',
 			'watchTogether.currentPlayback' => '当前播放',
 			'watchTogether.joinCurrentPlayback' => '加入当前播放',
@@ -2583,10 +2671,10 @@ extension on TranslationsZh {
 			'downloads.deleteDownload' => '删除下载',
 			'downloads.retryDownload' => '重试下载',
 			'downloads.downloadQueued' => '下载已排队',
-			'downloads.serverErrorBitrate' => '服务器错误 — 文件可能超出远程流媒体比特率限制',
+			'downloads.serverErrorBitrate' => '服务器错误：文件可能超过远程比特率限制',
 			'downloads.episodesQueued' => ({required Object count}) => '${count} 集已加入下载队列',
 			'downloads.downloadDeleted' => '下载已删除',
-			'downloads.deleteConfirm' => ({required Object title}) => '确定要删除 "${title}" 吗？下载的文件将从您的设备中删除。',
+			'downloads.deleteConfirm' => ({required Object title}) => '要从此设备删除“${title}”吗？',
 			'downloads.deletingWithProgress' => ({required Object title, required Object current, required Object total}) => '正在删除 ${title}... (${current}/${total})',
 			'downloads.deleting' => '正在删除...',
 			'downloads.queuedTooltip' => '已排队',
@@ -2651,26 +2739,26 @@ extension on TranslationsZh {
 			'companionRemote.session.connected' => '已连接',
 			'companionRemote.session.serverRunning' => '远程服务器已启动',
 			'companionRemote.session.serverStopped' => '远程服务器已停止',
-			'companionRemote.session.serverRunningDescription' => '网络上的移动设备可以发现并连接到此应用',
+			'companionRemote.session.serverRunningDescription' => '网络上的移动设备可以连接到此应用',
 			'companionRemote.session.serverStoppedDescription' => '启动服务器以允许移动设备连接',
 			'companionRemote.session.usePhoneToControl' => '使用移动设备控制此应用',
 			'companionRemote.session.startServer' => '启动服务器',
 			'companionRemote.session.stopServer' => '停止服务器',
 			'companionRemote.session.minimize' => '最小化',
-			'companionRemote.pairing.discoveryDescription' => '网络上使用相同Plex账户运行Plezy的设备将自动显示',
+			'companionRemote.pairing.discoveryDescription' => '使用同一 Plex 账号的 Plezy 设备会显示在这里',
 			'companionRemote.pairing.hostAddressHint' => '192.168.1.100:48632',
 			'companionRemote.pairing.connecting' => '正在连接...',
 			'companionRemote.pairing.searchingForDevices' => '正在搜索设备...',
 			'companionRemote.pairing.noDevicesFound' => '未在网络上找到设备',
-			'companionRemote.pairing.noDevicesHint' => '请确保桌面上已打开Plezy，且两台设备在同一WiFi网络上',
+			'companionRemote.pairing.noDevicesHint' => '在桌面端打开 Plezy 并使用同一 WiFi',
 			'companionRemote.pairing.availableDevices' => '可用设备',
 			'companionRemote.pairing.manualConnection' => '手动连接',
-			'companionRemote.pairing.cryptoInitFailed' => '无法初始化安全连接。请确保已登录Plex账户。',
+			'companionRemote.pairing.cryptoInitFailed' => '无法启动安全连接。请先登录 Plex。',
 			'companionRemote.pairing.validationHostRequired' => '请输入主机地址',
 			'companionRemote.pairing.validationHostFormat' => '格式必须为IP:端口（例如 192.168.1.100:48632）',
-			'companionRemote.pairing.connectionTimedOut' => '连接超时。请确保两台设备在同一网络上。',
-			'companionRemote.pairing.sessionNotFound' => '未找到设备。请确保Plezy正在主机上运行。',
-			'companionRemote.pairing.authFailed' => '认证失败。请确保两台设备使用相同的Plex账户。',
+			'companionRemote.pairing.connectionTimedOut' => '连接超时。请在两台设备上使用同一网络。',
+			'companionRemote.pairing.sessionNotFound' => '未找到设备。请确认 Plezy 正在主机上运行。',
+			'companionRemote.pairing.authFailed' => '认证失败。两台设备需要使用同一 Plex 账号。',
 			'companionRemote.pairing.failedToConnect' => ({required Object error}) => '连接失败：${error}',
 			'companionRemote.remote.disconnectConfirm' => '是否要断开远程会话的连接？',
 			'companionRemote.remote.reconnecting' => '重新连接中...',
@@ -2711,7 +2799,7 @@ extension on TranslationsZh {
 			'videoSettings.audioNormalization' => '响度标准化',
 			'externalPlayer.title' => '外部播放器',
 			'externalPlayer.useExternalPlayer' => '使用外部播放器',
-			'externalPlayer.useExternalPlayerDescription' => '在外部应用中打开视频，而不是使用内置播放器',
+			'externalPlayer.useExternalPlayerDescription' => '在其他应用中打开视频',
 			'externalPlayer.selectPlayer' => '选择播放器',
 			'externalPlayer.customPlayers' => '自定义播放器',
 			'externalPlayer.systemDefault' => '系统默认',
@@ -2739,6 +2827,8 @@ extension on TranslationsZh {
 			'metadataEdit.summary' => '简介',
 			'metadataEdit.poster' => '海报',
 			'metadataEdit.background' => '背景',
+			_ => null,
+		} ?? switch (path) {
 			'metadataEdit.logo' => '标志',
 			'metadataEdit.squareArt' => '方形图片',
 			'metadataEdit.selectPoster' => '选择海报',
@@ -2778,8 +2868,6 @@ extension on TranslationsZh {
 			'metadataEdit.episodeOrdering' => '剧集排列顺序',
 			'metadataEdit.tmdbAiring' => 'The Movie Database（播出顺序）',
 			'metadataEdit.tvdbAiring' => 'TheTVDB（播出顺序）',
-			_ => null,
-		} ?? switch (path) {
 			'metadataEdit.tvdbAbsolute' => 'TheTVDB（绝对顺序）',
 			'metadataEdit.metadataLanguage' => '元数据语言',
 			'metadataEdit.useOriginalTitle' => '使用原始标题',
@@ -2803,7 +2891,7 @@ extension on TranslationsZh {
 			'matchScreen.match' => '匹配...',
 			'matchScreen.fixMatch' => '修正匹配...',
 			'matchScreen.unmatch' => '取消匹配',
-			'matchScreen.unmatchConfirm' => '清除此项目的当前匹配吗？在重新匹配之前，Plex 会将其视为未匹配。',
+			'matchScreen.unmatchConfirm' => '清除此匹配？在重新匹配前，Plex 会将其视为未匹配。',
 			'matchScreen.unmatchSuccess' => '已取消匹配',
 			'matchScreen.unmatchFailed' => '无法取消匹配',
 			'matchScreen.matchApplied' => '匹配已应用',
@@ -2819,19 +2907,19 @@ extension on TranslationsZh {
 			'trakt.connected' => '已连接',
 			'trakt.connectedAs' => ({required Object username}) => '已以 @${username} 身份连接',
 			'trakt.disconnectConfirm' => '断开 Trakt 账户？',
-			'trakt.disconnectConfirmBody' => 'Plezy 将停止向 Trakt 发送播放事件。您随时可以重新连接。',
+			'trakt.disconnectConfirmBody' => 'Plezy 将停止向 Trakt 发送事件。你可随时重新连接。',
 			'trakt.scrobble' => '实时 Scrobble',
 			'trakt.scrobbleDescription' => '在播放时向 Trakt 发送播放、暂停和停止事件。',
 			'trakt.watchedSync' => '同步已观看状态',
 			'trakt.watchedSyncDescription' => '在 Plezy 中将内容标记为已观看时，也会在 Trakt 上标记为已观看。',
 			'trackers.title' => '追踪器',
-			'trackers.hubSubtitle' => '让你的观看进度与 Trakt 及其他服务保持同步。',
+			'trackers.hubSubtitle' => '与 Trakt 和其他服务同步观看进度。',
 			'trackers.notConnected' => '未连接',
 			'trackers.connectedAs' => ({required Object username}) => '已以 @${username} 身份连接',
 			'trackers.scrobble' => '自动记录进度',
 			'trackers.scrobbleDescription' => '观看完一集或一部电影后更新你的列表。',
 			'trackers.disconnectConfirm' => ({required Object service}) => '断开 ${service} 连接？',
-			'trackers.disconnectConfirmBody' => ({required Object service}) => 'Plezy 将停止更新你的 ${service} 列表。你可以随时重新连接。',
+			'trackers.disconnectConfirmBody' => ({required Object service}) => 'Plezy 将停止更新 ${service}。可随时重新连接。',
 			'trackers.connectFailed' => ({required Object service}) => '无法连接到 ${service}。请重试。',
 			'trackers.services.mal' => 'MyAnimeList',
 			'trackers.services.anilist' => 'AniList',
@@ -2842,7 +2930,7 @@ extension on TranslationsZh {
 			'trackers.deviceCode.waitingForAuthorization' => '等待授权…',
 			'trackers.deviceCode.codeCopied' => '代码已复制',
 			'trackers.oauthProxy.title' => ({required Object service}) => '登录 ${service}',
-			'trackers.oauthProxy.body' => '用手机扫描此二维码，或在任何带浏览器的设备上打开下方 URL。',
+			'trackers.oauthProxy.body' => '扫描此二维码，或在任意设备上打开 URL。',
 			'trackers.oauthProxy.openToSignIn' => ({required Object service}) => '打开 ${service} 以登录',
 			'trackers.oauthProxy.urlCopied' => 'URL 已复制',
 			'trackers.libraryFilter.title' => '媒体库筛选',
@@ -2858,7 +2946,7 @@ extension on TranslationsZh {
 			'trackers.libraryFilter.libraries' => '媒体库',
 			'trackers.libraryFilter.noLibraries' => '没有可用的媒体库',
 			'addServer.addJellyfinTitle' => '添加 Jellyfin 服务器',
-			'addServer.jellyfinUrlIntro' => '输入你的 Jellyfin 服务器 URL — 例如 `https://jellyfin.example.com`。可在之后登录。',
+			'addServer.jellyfinUrlIntro' => '输入服务器 URL，例如 `https://jellyfin.example.com`。',
 			'addServer.serverUrl' => '服务器 URL',
 			'addServer.findServer' => '查找服务器',
 			'addServer.username' => '用户名',
@@ -2870,25 +2958,25 @@ extension on TranslationsZh {
 			'addServer.signInFailed' => ({required Object error}) => '登录失败: ${error}',
 			'addServer.quickConnectFailed' => ({required Object error}) => 'Quick Connect 失败: ${error}',
 			'addServer.addPlexTitle' => '使用 Plex 登录',
-			'addServer.plexAuthIntro' => '选择登录 Plex 的方式。浏览器流程会打开 plex.tv 让你确认连接；QR 选项适合电视 / 远程设备。',
+			'addServer.plexAuthIntro' => '使用浏览器或二维码登录。',
 			'addServer.plexQRPrompt' => '扫描此 QR 码以登录。',
 			'addServer.waitingForPlexConfirmation' => '等待 plex.tv 确认登录…',
 			'addServer.pinExpired' => 'PIN 在登录前已过期。请重试。',
-			'addServer.duplicatePlexAccount' => '此设备已登录到一个 Plex 帐户。请在设置中退出登录以切换帐户。',
+			'addServer.duplicatePlexAccount' => '已登录 Plex。请退出登录以切换账号。',
 			'addServer.failedToRegisterAccount' => ({required Object error}) => '注册帐户失败: ${error}',
 			'addServer.enterJellyfinUrlError' => '输入你的 Jellyfin 服务器 URL',
 			'addServer.addConnectionTitle' => '添加连接',
 			'addServer.addConnectionTitleScoped' => ({required Object name}) => '添加到 ${name}',
-			'addServer.addConnectionIntroGlobal' => '添加另一台媒体服务器。你可以混合使用 Plex 帐户和 Jellyfin 服务器 — 所有已连接后端的项目会一起显示在主页。',
+			'addServer.addConnectionIntroGlobal' => '添加另一个媒体服务器。Plex 和 Jellyfin 会一起显示在主页。',
 			'addServer.addConnectionIntroScoped' => '添加新服务器，或从另一个配置文件借用。',
 			'addServer.signInWithPlexCard' => '使用 Plex 登录',
-			'addServer.signInWithPlexCardSubtitle' => '为你的 Plex 帐户授权此设备。与该帐户共享的服务器会自动加入。',
-			'addServer.signInWithPlexCardSubtitleScoped' => '授权一个新的 Plex 帐户。其 Home 用户会显示为配置文件。',
+			'addServer.signInWithPlexCardSubtitle' => '授权此设备。共享服务器会被添加。',
+			'addServer.signInWithPlexCardSubtitleScoped' => '授权一个 Plex 账号。Home 用户会成为个人资料。',
 			'addServer.connectToJellyfinCard' => '连接到 Jellyfin',
-			'addServer.connectToJellyfinCardSubtitle' => '输入你的 Jellyfin 服务器 URL，使用用户名 + 密码登录（Quick Connect 即将支持）。',
+			'addServer.connectToJellyfinCardSubtitle' => '输入服务器 URL、用户名和密码。',
 			'addServer.connectToJellyfinCardSubtitleScoped' => ({required Object name}) => '登录到 Jellyfin 服务器。绑定到 ${name}。',
 			'addServer.borrowFromAnotherProfile' => '从另一个配置文件借用',
-			'addServer.borrowFromAnotherProfileSubtitle' => '重用已附加到另一个配置文件的连接。受 PIN 保护的来源配置文件会要求输入 PIN。',
+			'addServer.borrowFromAnotherProfileSubtitle' => '复用另一个个人资料的连接。受 PIN 保护的个人资料需要 PIN。',
 			_ => null,
 		};
 	}

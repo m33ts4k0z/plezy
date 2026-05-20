@@ -336,6 +336,7 @@ class DesktopVideoControlsState extends State<DesktopVideoControls> {
     widget.onContentStripVisibilityChanged?.call(true);
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
       _contentStripKey.currentState?.requestInitialFocus();
     });
   }
@@ -349,6 +350,7 @@ class DesktopVideoControlsState extends State<DesktopVideoControls> {
 
     // Return focus to the last focused button (or play/pause as fallback)
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
       final target = _lastFocusedButtonNode;
       if (target != null && target.context != null) {
         target.requestFocus();
@@ -849,7 +851,7 @@ class DesktopVideoControlsState extends State<DesktopVideoControls> {
                     ),
                   ),
                 ],
-                // Finish time (hidden for live TV and when too narrow to fit)
+                // Finish time (hidden for live TV, faded when too narrow)
                 if (_isLive)
                   const Spacer()
                 else
@@ -881,20 +883,15 @@ class DesktopVideoControlsState extends State<DesktopVideoControls> {
                                 );
                                 const style = TextStyle(color: Colors.white70, fontSize: 13);
 
-                                return LayoutBuilder(
-                                  builder: (context, constraints) {
-                                    final tp = TextPainter(
-                                      text: TextSpan(text: text, style: style),
-                                      textDirection: TextDirection.ltr,
-                                    )..layout();
-                                    final textWidth = tp.width + 8;
-                                    tp.dispose();
-                                    if (textWidth > constraints.maxWidth) return const SizedBox.shrink();
-                                    return Padding(
-                                      padding: const EdgeInsets.only(left: 8),
-                                      child: Text(text, style: style),
-                                    );
-                                  },
+                                return Padding(
+                                  padding: const EdgeInsets.only(left: 8),
+                                  child: Text(
+                                    text,
+                                    style: style,
+                                    maxLines: 1,
+                                    softWrap: false,
+                                    overflow: TextOverflow.fade,
+                                  ),
                                 );
                               },
                             );

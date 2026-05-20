@@ -2,6 +2,7 @@ import 'dart:io' show Platform;
 
 import 'package:flutter/services.dart';
 
+import '../../media/media_display_criteria.dart';
 import '../models.dart';
 import 'player_base.dart';
 
@@ -104,6 +105,9 @@ class PlayerNative extends PlayerBase {
   }) async {
     if (disposed) return;
     await _ensureInitialized();
+    final startPosition = media.start ?? Duration.zero;
+    clearTracks();
+    resetPlaybackProgress(startPosition);
     setSeekable(false);
 
     await setVisible(true);
@@ -114,8 +118,8 @@ class PlayerNative extends PlayerBase {
     }
 
     // 'start' must be set before loadfile.
-    if (media.start != null && media.start!.inSeconds > 0) {
-      await setProperty('start', media.start!.inSeconds.toString());
+    if (startPosition.inSeconds > 0) {
+      await setProperty('start', (startPosition.inMilliseconds / 1000.0).toString());
     } else {
       await setProperty('start', 'none');
     }
@@ -156,7 +160,7 @@ class PlayerNative extends PlayerBase {
 
   @override
   Future<void> seek(Duration position) async {
-    await runSeek(() => command(['seek', (position.inMilliseconds / 1000.0).toString(), 'absolute']));
+    await runSeek(position, () => command(['seek', (position.inMilliseconds / 1000.0).toString(), 'absolute']));
   }
 
   @override
@@ -185,6 +189,7 @@ class PlayerNative extends PlayerBase {
   @override
   Future<void> setVolume(double volume) async {
     await setProperty('volume', volume.toString());
+    if (!disposed) setVolumeState(volume);
   }
 
   @override
@@ -216,6 +221,13 @@ class PlayerNative extends PlayerBase {
     if (disposed) return;
     await _ensureInitialized();
     await invoke('command', {'args': args});
+  }
+
+  @override
+  Future<void> setDisplayCriteria(MediaDisplayCriteria? criteria) async {
+    if (disposed || !Platform.isIOS) return;
+    await _ensureInitialized();
+    await invoke('setDisplayCriteria', {'criteria': criteria?.toJson()});
   }
 
   @override

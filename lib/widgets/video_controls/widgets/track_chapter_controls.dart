@@ -16,7 +16,6 @@ import '../../../models/transcode_quality_preset.dart';
 import '../sheets/chapter_sheet.dart';
 import '../sheets/queue_sheet.dart';
 import '../sheets/track_sheet.dart';
-import '../sheets/version_quality_sheet.dart';
 import '../sheets/video_settings_sheet.dart';
 import '../../../services/shader_service.dart';
 import '../helpers/track_filter_helper.dart';
@@ -154,7 +153,6 @@ class TrackChapterControls extends StatelessWidget {
     required IconData icon,
     required String semanticLabel,
     required VoidCallback? onPressed,
-    required Tracks? tracks,
     required bool isMobile,
     required bool isDesktop,
     String? tooltip,
@@ -167,8 +165,7 @@ class TrackChapterControls extends StatelessWidget {
       isActive: isActive,
       focusNode: focusNodes != null && focusNodes!.length > buttonIndex ? focusNodes![buttonIndex] : null,
       onKeyEvent: focusNodes != null
-          ? (node, event) =>
-                _handleButtonKeyEvent(node, event, buttonIndex, _getButtonCount(tracks, isMobile, isDesktop))
+          ? (node, event) => _handleButtonKeyEvent(node, event, buttonIndex, _getButtonCount(isMobile, isDesktop))
           : null,
       onFocusChange: onFocusChange,
       onPressed: onPressed,
@@ -204,7 +201,6 @@ class TrackChapterControls extends StatelessWidget {
                 isActive: isActive,
                 tooltip: t.videoControls.settingsButton,
                 semanticLabel: t.videoControls.settingsButton,
-                tracks: tracks,
                 isMobile: isMobile,
                 isDesktop: isDesktop,
                 onPressed: () {
@@ -217,6 +213,13 @@ class TrackChapterControls extends StatelessWidget {
                           subtitleSyncOffset: subtitleSyncOffset,
                           canControl: canControl,
                           isLive: isLive,
+                          availableVersions: availableVersions,
+                          selectedMediaIndex: selectedMediaIndex,
+                          selectedQualityPreset: selectedQualityPreset,
+                          serverSupportsTranscoding: serverSupportsTranscoding,
+                          sourceDurationMs: trackControlsState.sourceDurationMs,
+                          onVersionSelected: onSwitchVersion == null ? null : (i) => onSwitchVersion!(i),
+                          onQualitySelected: onSwitchQualityPreset,
                           shaderService: shaderService,
                           onShaderChanged: onShaderChanged,
                           isAmbientLightingEnabled: isAmbientLightingEnabled,
@@ -253,7 +256,6 @@ class TrackChapterControls extends StatelessWidget {
               icon: icon,
               tooltip: t.videoControls.tracksButton,
               semanticLabel: t.videoControls.tracksButton,
-              tracks: tracks,
               isMobile: isMobile,
               isDesktop: isDesktop,
               onPressed: () {
@@ -292,7 +294,6 @@ class TrackChapterControls extends StatelessWidget {
               icon: Symbols.bookmarks_rounded,
               tooltip: t.videoControls.chaptersButton,
               semanticLabel: t.videoControls.chaptersButton,
-              tracks: tracks,
               isMobile: isMobile,
               isDesktop: isDesktop,
               onPressed: () {
@@ -323,58 +324,12 @@ class TrackChapterControls extends StatelessWidget {
               icon: Symbols.queue_rounded,
               tooltip: t.videoControls.queue,
               semanticLabel: t.videoControls.queue,
-              tracks: tracks,
               isMobile: isMobile,
               isDesktop: isDesktop,
               onPressed: () {
                 onCancelAutoHide?.call();
                 OverlaySheetController.of(context)
                     .show(builder: (_) => QueueSheet(onItemSelected: onQueueItemSelected!))
-                    .whenComplete(() => onStartAutoHide?.call());
-              },
-            ),
-          );
-          buttonIndex++;
-        }
-
-        // Version & Quality button
-        final showVersionQuality =
-            (availableVersions.length > 1 || serverSupportsTranscoding) &&
-            (onSwitchVersion != null || onSwitchQualityPreset != null);
-        if (showVersionQuality) {
-          final currentIndex = buttonIndex;
-          // Tooltip narrows to whichever column the sheet will actually
-          // render — Jellyfin items only show the version list, so calling
-          // the button "Version & Quality" implies a quality picker that
-          // isn't there.
-          final buttonLabel = serverSupportsTranscoding
-              ? (availableVersions.length > 1
-                    ? t.videoControls.versionQualityButton
-                    : t.videoControls.qualityColumnHeader)
-              : t.videoControls.versionColumnHeader;
-          buttons.add(
-            _buildTrackButton(
-              buttonIndex: currentIndex,
-              icon: Symbols.video_settings_rounded,
-              tooltip: buttonLabel,
-              semanticLabel: buttonLabel,
-              tracks: tracks,
-              isMobile: isMobile,
-              isDesktop: isDesktop,
-              onPressed: () {
-                onCancelAutoHide?.call();
-                OverlaySheetController.of(context)
-                    .show(
-                      builder: (_) => VersionQualitySheet(
-                        availableVersions: availableVersions,
-                        selectedMediaIndex: selectedMediaIndex,
-                        selectedQualityPreset: selectedQualityPreset,
-                        serverSupportsTranscoding: serverSupportsTranscoding,
-                        sourceDurationMs: trackControlsState.sourceDurationMs,
-                        onVersionSelected: (i) => onSwitchVersion?.call(i),
-                        onQualitySelected: (p) => onSwitchQualityPreset?.call(p),
-                      ),
-                    )
                     .whenComplete(() => onStartAutoHide?.call());
               },
             ),
@@ -391,7 +346,6 @@ class TrackChapterControls extends StatelessWidget {
               icon: Symbols.picture_in_picture_alt,
               tooltip: t.videoControls.pipButton,
               semanticLabel: t.videoControls.pipButton,
-              tracks: tracks,
               isMobile: isMobile,
               isDesktop: isDesktop,
               onPressed: onTogglePIPMode,
@@ -409,7 +363,6 @@ class TrackChapterControls extends StatelessWidget {
               icon: _getBoxFitIcon(boxFitMode),
               tooltip: _getBoxFitTooltip(boxFitMode),
               semanticLabel: t.videoControls.aspectRatioButton,
-              tracks: tracks,
               isMobile: isMobile,
               isDesktop: isDesktop,
               onPressed: onCycleBoxFitMode,
@@ -427,7 +380,6 @@ class TrackChapterControls extends StatelessWidget {
               icon: isRotationLocked ? Symbols.screen_lock_rotation_rounded : Symbols.screen_rotation_rounded,
               tooltip: isRotationLocked ? t.videoControls.unlockRotation : t.videoControls.lockRotation,
               semanticLabel: t.videoControls.rotationLockButton,
-              tracks: tracks,
               isMobile: isMobile,
               isDesktop: isDesktop,
               onPressed: onToggleRotationLock,
@@ -445,7 +397,6 @@ class TrackChapterControls extends StatelessWidget {
               icon: Symbols.lock_rounded,
               tooltip: t.videoControls.lockScreen,
               semanticLabel: t.videoControls.screenLockButton,
-              tracks: tracks,
               isMobile: isMobile,
               isDesktop: isDesktop,
               onPressed: onToggleScreenLock,
@@ -464,7 +415,6 @@ class TrackChapterControls extends StatelessWidget {
               tooltip: t.videoControls.alwaysOnTopButton,
               semanticLabel: t.videoControls.alwaysOnTopButton,
               isActive: isAlwaysOnTop,
-              tracks: tracks,
               isMobile: isMobile,
               isDesktop: isDesktop,
               onPressed: onToggleAlwaysOnTop,
@@ -482,7 +432,6 @@ class TrackChapterControls extends StatelessWidget {
               icon: isFullscreen ? Symbols.fullscreen_exit_rounded : Symbols.fullscreen_rounded,
               tooltip: isFullscreen ? t.videoControls.exitFullscreenButton : t.videoControls.fullscreenButton,
               semanticLabel: isFullscreen ? t.videoControls.exitFullscreenButton : t.videoControls.fullscreenButton,
-              tracks: tracks,
               isMobile: isMobile,
               isDesktop: isDesktop,
               onPressed: onToggleFullscreen,
@@ -498,15 +447,11 @@ class TrackChapterControls extends StatelessWidget {
   }
 
   /// Calculate total button count for navigation
-  int _getButtonCount(Tracks? tracks, bool isMobile, bool isDesktop) {
+  int _getButtonCount(bool isMobile, bool isDesktop) {
     int count = 1; // Settings button always shown
     count++; // Audio & subtitles button always shown
     if (chapters.isNotEmpty && !hideChaptersAndQueue) count++;
     if (showQueueButton && onQueueItemSelected != null && !hideChaptersAndQueue) count++;
-    if ((availableVersions.length > 1 || serverSupportsTranscoding) &&
-        (onSwitchVersion != null || onSwitchQualityPreset != null)) {
-      count++;
-    }
     if (onTogglePIPMode != null) count++;
     if (onCycleBoxFitMode != null) count++;
     if (isMobile && !PlatformDetector.isTV()) count++; // Rotation lock (not on TV)

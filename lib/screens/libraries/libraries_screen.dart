@@ -401,6 +401,7 @@ class _LibrariesScreenState extends State<LibrariesScreen>
         suppressAutoFocus: suppressAutoFocus,
         onDataLoaded: () => _handleTabDataLoaded(tabIndex),
         onBack: focusTabBar,
+        onNavigateToChrome: focusTabBar,
       ),
       LibraryTabType.browse => LibraryBrowseTab(
         key: _browseTabKey,
@@ -525,16 +526,14 @@ class _LibrariesScreenState extends State<LibrariesScreen>
     _initializeWithLibraries();
   }
 
-  // Refresh the currently active tab
-  void _refreshCurrentTab() {
-    if (tabController.index < 0 || tabController.index >= _visibleTabs.length) return;
-    final key = switch (_visibleTabs[tabController.index]) {
-      LibraryTabType.recommended => _recommendedTabKey,
-      LibraryTabType.browse => _browseTabKey,
-      LibraryTabType.collections => _collectionsTabKey,
-      LibraryTabType.playlists => _playlistsTabKey,
-    };
-    (key.currentState as dynamic)?.refresh();
+  // Refresh every loaded tab for the selected library.
+  void _refreshSelectedLibraryTabs() {
+    for (var i = 0; i < _visibleTabs.length; i++) {
+      final Object? tabState = _getTabState(i);
+      if (tabState is Refreshable) {
+        tabState.refresh();
+      }
+    }
   }
 
   // Public method to fully reload all content (for profile switches)
@@ -1023,7 +1022,11 @@ class _LibrariesScreenState extends State<LibrariesScreen>
         ? allLibraries.where((lib) => lib.globalKey == _selectedLibraryGlobalKey).firstOrNull
         : null;
 
-    final showMobileTabsRow = selectedLibrary != null && !PlatformDetector.shouldUseSideNavigation(context);
+    final useSideNavigation = PlatformDetector.shouldUseSideNavigation(context);
+    final showMobileTabsRow = selectedLibrary != null && !useSideNavigation;
+    final currentTabIndex = _visibleTabs.isEmpty ? 0 : tabController.index.clamp(0, _visibleTabs.length - 1).toInt();
+    final currentTabType = _visibleTabs.isEmpty ? null : _visibleTabs[currentTabIndex];
+    final useTvRecommendedBackdrop = PlatformDetector.isTV() && currentTabType == LibraryTabType.recommended;
 
     Widget appBar({required bool floating}) => DesktopSliverAppBar(
       title: _buildAppBarTitle(visibleLibraries, selectedLibrary, groupByServer: groupByServerSetting),
@@ -1033,7 +1036,7 @@ class _LibrariesScreenState extends State<LibrariesScreen>
       pinned: !floating,
       floating: floating,
       snap: floating,
-      backgroundColor: Theme.of(context).scaffoldBackgroundColor,
+      backgroundColor: useTvRecommendedBackdrop ? Colors.transparent : Theme.of(context).scaffoldBackgroundColor,
       surfaceTintColor: Colors.transparent,
       shadowColor: Colors.transparent,
       scrolledUnderElevation: 0,
@@ -1049,7 +1052,11 @@ class _LibrariesScreenState extends State<LibrariesScreen>
                 tooltip: t.libraries.manageLibraries,
                 onPressed: _showLibraryManagementSheet,
               ),
-            FocusableAction(icon: Symbols.refresh_rounded, tooltip: t.common.refresh, onPressed: _refreshCurrentTab),
+            FocusableAction(
+              icon: Symbols.refresh_rounded,
+              tooltip: t.common.refresh,
+              onPressed: _refreshSelectedLibraryTabs,
+            ),
           ],
         ),
       ],
@@ -1062,6 +1069,41 @@ class _LibrariesScreenState extends State<LibrariesScreen>
           appBar(floating: false),
           SliverFillRemaining(child: body),
         ],
+      );
+    }
+
+    Widget buildTransparentTvTopBar() {
+      return SafeArea(
+        bottom: false,
+        child: AppBar(
+          primary: false,
+          backgroundColor: Colors.transparent,
+          surfaceTintColor: Colors.transparent,
+          shadowColor: Colors.transparent,
+          elevation: 0,
+          scrolledUnderElevation: 0,
+          title: _buildAppBarTitle(visibleLibraries, selectedLibrary, groupByServer: groupByServerSetting),
+          actions: [
+            FocusableActionBar(
+              key: _actionBarKey,
+              onNavigateLeft: () => getTabChipFocusNode(_visibleTabs.length - 1).requestFocus(),
+              onNavigateDown: _focusCurrentTab,
+              actions: [
+                if (allLibraries.isNotEmpty)
+                  FocusableAction(
+                    icon: Symbols.edit_rounded,
+                    tooltip: t.libraries.manageLibraries,
+                    onPressed: _showLibraryManagementSheet,
+                  ),
+                FocusableAction(
+                  icon: Symbols.refresh_rounded,
+                  tooltip: t.common.refresh,
+                  onPressed: _refreshSelectedLibraryTabs,
+                ),
+              ],
+            ),
+          ],
+        ),
       );
     }
 
@@ -1092,67 +1134,94 @@ class _LibrariesScreenState extends State<LibrariesScreen>
               ),
       );
     } else if (selectedLibrary != null) {
-      body = NestedScrollView(
-        controller: _outerScrollController,
-        floatHeaderSlivers: true,
-        headerSliverBuilder: (context, innerBoxIsScrolled) => [
-          SliverOverlapAbsorber(
-            handle: NestedScrollView.sliverOverlapAbsorberHandleFor(context),
-            sliver: appBar(floating: true),
+      Widget buildTab(int index) {
+        return ClipRect(
+          child: _buildTabContent(
+            _visibleTabs[index],
+            library: selectedLibrary,
+            isActive: tabController.index == index,
+            tabIndex: index,
           ),
-          if (showMobileTabsRow)
-            SliverToBoxAdapter(
-              child: Container(
-                color: Theme.of(context).scaffoldBackgroundColor,
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                child: SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  child: Row(
-                    children: [
-                      for (int i = 0; i < _visibleTabs.length; i++) ...[
-                        if (i > 0) const SizedBox(width: 8),
-                        buildTabChip(
-                          _getTabLabel(_visibleTabs[i]),
-                          i,
-                          onSelectWhenActive: _focusCurrentTab,
-                          onNavigateDown: _focusCurrentTabFromTabBar,
-                          onNavigateRightFromLast: () => _actionBarKey.currentState?.requestFocusOnFirst(),
-                        ),
+        );
+      }
+
+      Widget buildTabs({bool activeOnly = false}) {
+        if (activeOnly) return buildTab(currentTabIndex);
+
+        final children = [for (int i = 0; i < _visibleTabs.length; i++) buildTab(i)];
+
+        return TabBarView(
+          key: ValueKey(_selectedLibraryGlobalKey),
+          controller: tabController,
+          // Disable swipe on desktop/TV - trackpad and d-pad scroll actions can trigger accidental tab switches.
+          // See: https://github.com/flutter/flutter/issues/11132
+          physics: useSideNavigation ? const NeverScrollableScrollPhysics() : null,
+          // Wrap each tab in ClipRect so horizontal overflow (e.g. hub rows
+          // with Clip.none) doesn't bleed into adjacent tabs during swipe transitions.
+          children: children,
+        );
+      }
+
+      if (useTvRecommendedBackdrop) {
+        body = Focus(
+          canRequestFocus: false,
+          skipTraversal: true,
+          onKeyEvent: (_, event) => event.logicalKey.isDpadDirection ? KeyEventResult.handled : KeyEventResult.ignored,
+          child: Stack(
+            fit: StackFit.expand,
+            children: [
+              buildTabs(activeOnly: true),
+              Positioned(top: 0, left: 0, right: 0, child: ExcludeFocusTraversal(child: buildTransparentTvTopBar())),
+            ],
+          ),
+        );
+      } else {
+        body = NestedScrollView(
+          controller: _outerScrollController,
+          floatHeaderSlivers: true,
+          headerSliverBuilder: (context, innerBoxIsScrolled) => [
+            SliverOverlapAbsorber(
+              handle: NestedScrollView.sliverOverlapAbsorberHandleFor(context),
+              sliver: appBar(floating: true),
+            ),
+            if (showMobileTabsRow)
+              SliverToBoxAdapter(
+                child: Container(
+                  color: Theme.of(context).scaffoldBackgroundColor,
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                  child: SingleChildScrollView(
+                    scrollDirection: Axis.horizontal,
+                    child: Row(
+                      children: [
+                        for (int i = 0; i < _visibleTabs.length; i++) ...[
+                          if (i > 0) const SizedBox(width: 8),
+                          buildTabChip(
+                            _getTabLabel(_visibleTabs[i]),
+                            i,
+                            onSelectWhenActive: _focusCurrentTab,
+                            onNavigateDown: _focusCurrentTabFromTabBar,
+                            onNavigateRightFromLast: () => _actionBarKey.currentState?.requestFocusOnFirst(),
+                          ),
+                        ],
                       ],
-                    ],
+                    ),
                   ),
                 ),
               ),
-            ),
-        ],
-        body: TabBarView(
-          key: ValueKey(_selectedLibraryGlobalKey),
-          controller: tabController,
-          // Disable swipe on desktop - trackpad scrolling triggers accidental tab switches
-          // See: https://github.com/flutter/flutter/issues/11132
-          physics: PlatformDetector.isDesktop(context) ? const NeverScrollableScrollPhysics() : null,
-          // Wrap each tab in ClipRect so horizontal overflow (e.g. hub rows
-          // with Clip.none) doesn't bleed into adjacent tabs during swipe transitions.
-          children: [
-            for (int i = 0; i < _visibleTabs.length; i++)
-              ClipRect(
-                child: _buildTabContent(
-                  _visibleTabs[i],
-                  library: selectedLibrary,
-                  isActive: tabController.index == i,
-                  tabIndex: i,
-                ),
-              ),
           ],
-        ),
-      );
+          body: buildTabs(),
+        );
+      }
     } else {
       body = buildSimpleScroll(body: const SizedBox.shrink());
     }
 
-    return Scaffold(
-      body: ScrollConfiguration(behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false), child: body),
+    final scrollBody = ScrollConfiguration(
+      behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
+      child: body,
     );
+
+    return Scaffold(body: scrollBody);
   }
 }
 
@@ -1358,9 +1427,6 @@ class _LibraryManagementSheetState extends State<_LibraryManagementSheet> {
 
   void _reorderLibraries(int oldIndex, int newIndex) {
     setState(() {
-      if (newIndex > oldIndex) {
-        newIndex -= 1;
-      }
       final library = _tempLibraries.removeAt(oldIndex);
       _tempLibraries.insert(newIndex, library);
     });
@@ -1502,7 +1568,7 @@ class _LibraryManagementSheetState extends State<_LibraryManagementSheet> {
 
     return ReorderableListView.builder(
       scrollController: _dialogScrollController,
-      onReorder: _reorderLibraries,
+      onReorderItem: _reorderLibraries,
       itemCount: _tempLibraries.length,
       padding: const EdgeInsets.symmetric(vertical: 8),
       buildDefaultDragHandles: false,
@@ -1532,7 +1598,7 @@ class _LibraryManagementSheetState extends State<_LibraryManagementSheet> {
 
     return ReorderableListView.builder(
       scrollController: scrollController,
-      onReorder: _reorderLibraries,
+      onReorderItem: _reorderLibraries,
       itemCount: _tempLibraries.length,
       padding: const EdgeInsets.symmetric(vertical: 8),
       buildDefaultDragHandles: false,
@@ -1583,58 +1649,53 @@ class _LibraryManagementSheetState extends State<_LibraryManagementSheet> {
     return Opacity(
       key: ValueKey(library.globalKey),
       opacity: isHidden ? 0.5 : 1.0,
-      child: Container(
-        decoration: BoxDecoration(color: tileColor),
-        child: ListTile(
-          leading: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              ReorderableDragStartListener(
-                index: index,
-                child: AppIcon(
-                  isMoving ? Symbols.swap_vert_rounded : Symbols.drag_indicator_rounded,
-                  fill: 1,
-                  color: isMoving ? colorScheme.primary : IconTheme.of(context).color?.withValues(alpha: 0.5),
-                ),
+      child: ListTile(
+        tileColor: tileColor,
+        leading: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ReorderableDragStartListener(
+              index: index,
+              child: AppIcon(
+                isMoving ? Symbols.swap_vert_rounded : Symbols.drag_indicator_rounded,
+                fill: 1,
+                color: isMoving ? colorScheme.primary : IconTheme.of(context).color?.withValues(alpha: 0.5),
               ),
-              const SizedBox(width: 8),
-              AppIcon(ContentTypeHelper.getLibraryIcon(library.kind.id), fill: 1),
-            ],
-          ),
-          title: Text(library.title),
-          subtitle: showServerName
-              ? Text(
-                  library.serverName!,
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: Theme.of(context).textTheme.bodySmall?.color?.withValues(alpha: 0.6),
-                  ),
-                )
-              : null,
-          trailing: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                decoration: FocusTheme.focusBackgroundDecoration(
-                  isFocused: isVisibilityButtonFocused,
-                  borderRadius: 20,
+            ),
+            const SizedBox(width: 8),
+            AppIcon(ContentTypeHelper.getLibraryIcon(library.kind.id), fill: 1),
+          ],
+        ),
+        title: Text(library.title),
+        subtitle: showServerName
+            ? Text(
+                library.serverName!,
+                style: TextStyle(
+                  fontSize: 11,
+                  color: Theme.of(context).textTheme.bodySmall?.color?.withValues(alpha: 0.6),
                 ),
-                child: IconButton(
-                  icon: AppIcon(isHidden ? Symbols.visibility_off_rounded : Symbols.visibility_rounded, fill: 1),
-                  tooltip: isHidden ? t.libraries.showLibrary : t.libraries.hideLibrary,
-                  onPressed: () => widget.onToggleVisibility(library),
-                ),
+              )
+            : null,
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              decoration: FocusTheme.focusBackgroundDecoration(isFocused: isVisibilityButtonFocused, borderRadius: 20),
+              child: IconButton(
+                icon: AppIcon(isHidden ? Symbols.visibility_off_rounded : Symbols.visibility_rounded, fill: 1),
+                tooltip: isHidden ? t.libraries.showLibrary : t.libraries.hideLibrary,
+                onPressed: () => widget.onToggleVisibility(library),
               ),
-              Container(
-                decoration: FocusTheme.focusBackgroundDecoration(isFocused: isOptionsButtonFocused, borderRadius: 20),
-                child: IconButton(
-                  icon: const AppIcon(Symbols.more_vert_rounded, fill: 1),
-                  tooltip: t.libraries.libraryOptions,
-                  onPressed: () => _showLibraryMenuBottomSheet(context, library),
-                ),
+            ),
+            Container(
+              decoration: FocusTheme.focusBackgroundDecoration(isFocused: isOptionsButtonFocused, borderRadius: 20),
+              child: IconButton(
+                icon: const AppIcon(Symbols.more_vert_rounded, fill: 1),
+                tooltip: t.libraries.libraryOptions,
+                onPressed: () => _showLibraryMenuBottomSheet(context, library),
               ),
-            ],
-          ),
+            ),
+          ],
         ),
       ),
     );

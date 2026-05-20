@@ -47,12 +47,13 @@ class AppearanceSettingsScreen extends StatelessWidget {
         ),
 
         SettingsSectionHeader(t.settings.homeScreen),
-        SettingSwitchTile(
-          pref: SettingsService.showHeroSection,
-          icon: Symbols.featured_play_list_rounded,
-          title: t.settings.showHeroSection,
-          subtitle: t.settings.showHeroSectionDescription,
-        ),
+        if (!PlatformDetector.isTV())
+          SettingSwitchTile(
+            pref: SettingsService.showHeroSection,
+            icon: Symbols.featured_play_list_rounded,
+            title: t.settings.showHeroSection,
+            subtitle: t.settings.showHeroSectionDescription,
+          ),
         SettingSwitchTile(
           pref: SettingsService.useGlobalHubs,
           icon: Symbols.home_rounded,
@@ -130,13 +131,6 @@ class AppearanceSettingsScreen extends StatelessWidget {
           subtitle: t.settings.hideSpoilersDescription,
         ),
         _requireProfileSelection(),
-        if (PlatformDetector.isTV())
-          SettingSwitchTile(
-            pref: SettingsService.confirmExitOnBack,
-            icon: Symbols.exit_to_app_rounded,
-            title: t.settings.confirmExitOnBack,
-            subtitle: t.settings.confirmExitOnBackDescription,
-          ),
         SettingSwitchTile(
           pref: SettingsService.autoHidePerformanceOverlay,
           icon: Symbols.speed_rounded,

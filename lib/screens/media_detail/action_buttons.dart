@@ -2,8 +2,11 @@ part of '../media_detail_screen.dart';
 
 extension _MediaDetailActionButtons on _MediaDetailScreenState {
   Widget _buildActionButtons(MediaItem metadata) {
+    final isTv = PlatformDetector.isTV();
+    final tvScale = TvLayoutConstants.scaleOf(context);
+    final actionSize = isTv ? _tvDetailActionSize * tvScale : 48.0;
     final playButtonLabel = _getPlayButtonLabel(metadata);
-    final playButtonIcon = AppIcon(_getPlayButtonIcon(metadata), fill: 1, size: 20);
+    final playButtonIcon = AppIcon(_getPlayButtonIcon(metadata), fill: 1, size: isTv ? 22 * tvScale : 20);
 
     Future<void> onPlayPressed() async {
       // For TV shows, play the OnDeck episode if available
@@ -56,6 +59,7 @@ extension _MediaDetailActionButtons on _MediaDetailScreenState {
     final focusBg = colorScheme.inverseSurface;
     final focusFg = colorScheme.onInverseSurface;
     final tonalBg = colorScheme.secondaryContainer;
+    final idleBg = isTv ? tonalBg.withValues(alpha: 0.38) : tonalBg;
     final tonalFg = colorScheme.onSecondaryContainer;
     final noOverlay = WidgetStateProperty.resolveWith((states) {
       if (states.contains(WidgetState.focused)) return Colors.transparent;
@@ -63,7 +67,7 @@ extension _MediaDetailActionButtons on _MediaDetailScreenState {
     });
 
     ButtonStyle actionButtonStyle({Color? foregroundColor, EdgeInsetsGeometry? padding}) {
-      if (!isKeyboardMode) {
+      if (!isKeyboardMode && !isTv) {
         if (padding != null) {
           return FilledButton.styleFrom(padding: padding);
         }
@@ -75,12 +79,15 @@ extension _MediaDetailActionButtons on _MediaDetailScreenState {
       }
       return ButtonStyle(
         padding: padding != null ? WidgetStatePropertyAll(padding) : null,
-        minimumSize: padding == null ? const WidgetStatePropertyAll(Size(48, 48)) : null,
-        maximumSize: padding == null ? const WidgetStatePropertyAll(Size(48, 48)) : null,
+        minimumSize: WidgetStatePropertyAll(padding == null ? Size.square(actionSize) : Size(0, actionSize)),
+        maximumSize: padding == null ? WidgetStatePropertyAll(Size.square(actionSize)) : null,
+        fixedSize: padding == null ? WidgetStatePropertyAll(Size.square(actionSize)) : null,
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        visualDensity: VisualDensity.compact,
         overlayColor: noOverlay,
         backgroundColor: WidgetStateProperty.resolveWith((states) {
           if (states.contains(WidgetState.focused)) return focusBg;
-          return tonalBg;
+          return idleBg;
         }),
         foregroundColor: WidgetStateProperty.resolveWith((states) {
           if (states.contains(WidgetState.focused)) return focusFg;
@@ -91,29 +98,37 @@ extension _MediaDetailActionButtons on _MediaDetailScreenState {
 
     return Focus(
       skipTraversal: true,
+      onFocusChange: (hasFocus) {
+        if (isTv) _setTvDetailActionRowFocus(hasFocus);
+      },
       onKeyEvent: _handlePlayButtonKeyEvent,
       child: Row(
         children: [
           SizedBox(
-            height: 48,
+            height: actionSize,
             child: FilledButton(
               focusNode: _playButtonFocusNode,
               autofocus: isKeyboardMode,
               onPressed: onPlayPressed,
-              style: actionButtonStyle(padding: const EdgeInsets.symmetric(horizontal: 16)),
+              style: actionButtonStyle(
+                padding: EdgeInsets.symmetric(horizontal: isTv ? 17 * tvScale : 16, vertical: isTv ? 9 * tvScale : 0),
+              ),
               child: playButtonLabel.isNotEmpty
                   ? Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         playButtonIcon,
-                        const SizedBox(width: 8),
-                        Text(playButtonLabel, style: const TextStyle(fontSize: 16)),
+                        SizedBox(width: isTv ? 7 * tvScale : 8),
+                        Text(
+                          playButtonLabel,
+                          style: TextStyle(fontSize: isTv ? 17 * tvScale : 16, fontWeight: FontWeight.w700),
+                        ),
                       ],
                     )
                   : playButtonIcon,
             ),
           ),
-          const SizedBox(width: 12),
+          SizedBox(width: isTv ? 8 * tvScale : 12),
           // Trailer button (only if trailer is available)
           if (primaryTrailer != null) ...[
             IconButton.filledTonal(
@@ -122,10 +137,10 @@ extension _MediaDetailActionButtons on _MediaDetailScreenState {
               },
               icon: const AppIcon(Symbols.theaters_rounded, fill: 1),
               tooltip: t.tooltips.playTrailer,
-              iconSize: 20,
+              iconSize: isTv ? 21 * tvScale : 20,
               style: actionButtonStyle(),
             ),
-            const SizedBox(width: 12),
+            SizedBox(width: isTv ? 8 * tvScale : 12),
           ],
           // Shuffle button (only for shows and seasons)
           if (metadata.isShow || metadata.isSeason) ...[
@@ -135,19 +150,23 @@ extension _MediaDetailActionButtons on _MediaDetailScreenState {
               },
               icon: const AppIcon(Symbols.shuffle_rounded, fill: 1),
               tooltip: t.tooltips.shufflePlay,
-              iconSize: 20,
+              iconSize: isTv ? 21 * tvScale : 20,
               style: actionButtonStyle(),
             ),
-            const SizedBox(width: 12),
+            SizedBox(width: isTv ? 8 * tvScale : 12),
           ],
           // Download button (hide in offline mode - already downloaded,
           // and on Apple TV where there's no user file storage).
-          if (!widget.isOffline && !PlatformDetector.isAppleTV()) _buildDownloadButton(metadata, actionButtonStyle),
-          const SizedBox(width: 12),
+          if (!widget.isOffline && !PlatformDetector.isAppleTV())
+            _buildDownloadButton(metadata, actionButtonStyle, tvScale),
+          SizedBox(width: isTv ? 8 * tvScale : 12),
           // Mark as watched/unwatched toggle (works offline too)
-          _buildWatchedToggleButton(metadata, actionButtonStyle),
+          _buildWatchedToggleButton(metadata, actionButtonStyle, tvScale),
           // Three-dots menu button (hidden in offline mode)
-          if (!widget.isOffline) ...[const SizedBox(width: 12), _buildMoreActionsButton(metadata, actionButtonStyle)],
+          if (!widget.isOffline) ...[
+            SizedBox(width: isTv ? 8 * tvScale : 12),
+            _buildMoreActionsButton(metadata, actionButtonStyle, tvScale),
+          ],
         ],
       ),
     );
@@ -156,6 +175,7 @@ extension _MediaDetailActionButtons on _MediaDetailScreenState {
   Widget _buildWatchedToggleButton(
     MediaItem metadata,
     ButtonStyle Function({Color? foregroundColor, EdgeInsetsGeometry? padding}) actionButtonStyle,
+    double tvScale,
   ) {
     return IconButton.filledTonal(
       onPressed: () async {
@@ -174,8 +194,6 @@ extension _MediaDetailActionButtons on _MediaDetailScreenState {
                 context,
                 isWatched ? t.messages.markedAsUnwatchedOffline : t.messages.markedAsWatchedOffline,
               );
-              unawaited(_updateWatchStateOffline());
-              unawaited(_loadOfflineOnDeckEpisode());
             }
           } else {
             // Online mode: dispatch via the right backend's neutral method so
@@ -187,8 +205,10 @@ extension _MediaDetailActionButtons on _MediaDetailScreenState {
 
             if (isWatched) {
               await client.markUnwatched(metadata);
+              unawaited(TrackerCoordinator.instance.markUnwatched(metadata, client));
             } else {
               await client.markWatched(metadata);
+              unawaited(TrackerCoordinator.instance.markWatched(metadata, client));
             }
             if (mounted) {
               _watchStateChanged = true;
@@ -203,7 +223,7 @@ extension _MediaDetailActionButtons on _MediaDetailScreenState {
       },
       icon: AppIcon(metadata.isWatched ? Symbols.remove_done_rounded : Symbols.check_rounded, fill: 1),
       tooltip: metadata.isWatched ? t.tooltips.markAsUnwatched : t.tooltips.markAsWatched,
-      iconSize: 20,
+      iconSize: PlatformDetector.isTV() ? 21 * tvScale : 20,
       style: actionButtonStyle(),
     );
   }
@@ -211,11 +231,12 @@ extension _MediaDetailActionButtons on _MediaDetailScreenState {
   Widget _buildMoreActionsButton(
     MediaItem metadata,
     ButtonStyle Function({Color? foregroundColor, EdgeInsetsGeometry? padding}) actionButtonStyle,
+    double tvScale,
   ) {
     return MediaContextMenu(
       key: _contextMenuKey,
       item: metadata,
-      onRefresh: (_) => _loadFullMetadata(),
+      onRefresh: (itemId) => unawaited(_refreshItemInPlace(itemId)),
       child: Builder(
         builder: (buttonContext) => IconButton.filledTonal(
           onPressed: () {
@@ -226,7 +247,7 @@ extension _MediaDetailActionButtons on _MediaDetailScreenState {
             }
           },
           icon: const AppIcon(Symbols.more_vert_rounded, fill: 1),
-          iconSize: 20,
+          iconSize: PlatformDetector.isTV() ? 21 * tvScale : 20,
           style: actionButtonStyle(),
         ),
       ),
@@ -236,9 +257,11 @@ extension _MediaDetailActionButtons on _MediaDetailScreenState {
   Widget _buildDownloadButton(
     MediaItem metadata,
     ButtonStyle Function({Color? foregroundColor, EdgeInsetsGeometry? padding}) actionButtonStyle,
+    double tvScale,
   ) {
     return Consumer<DownloadProvider>(
       builder: (context, downloadProvider, _) {
+        final iconSize = PlatformDetector.isTV() ? 21.0 * tvScale : 20.0;
         final globalKey = metadata.globalKey;
         final ruleKey = _syncRuleKeyForMetadata(context, downloadProvider, metadata);
         final progress = downloadProvider.getProgress(globalKey);
@@ -253,8 +276,8 @@ extension _MediaDetailActionButtons on _MediaDetailScreenState {
         if (isQueueing) {
           return IconButton.filledTonal(
             onPressed: null,
-            icon: const LoadingIndicatorBox(size: 20),
-            iconSize: 20,
+            icon: LoadingIndicatorBox(size: iconSize),
+            iconSize: iconSize,
             style: actionButtonStyle(),
           );
         }
@@ -270,7 +293,7 @@ extension _MediaDetailActionButtons on _MediaDetailScreenState {
             onPressed: null,
             tooltip: tooltip,
             icon: const AppIcon(Symbols.schedule_rounded, fill: 1),
-            iconSize: 20,
+            iconSize: iconSize,
             style: actionButtonStyle(),
           );
         }
@@ -287,7 +310,7 @@ extension _MediaDetailActionButtons on _MediaDetailScreenState {
             onPressed: null,
             tooltip: tooltip,
             icon: _buildRadialProgress(progress?.progressPercent),
-            iconSize: 20,
+            iconSize: iconSize,
             style: actionButtonStyle(),
           );
         }
@@ -305,7 +328,7 @@ extension _MediaDetailActionButtons on _MediaDetailScreenState {
             },
             icon: const AppIcon(Symbols.pause_circle_outline_rounded, fill: 1),
             tooltip: 'Resume download',
-            iconSize: 20,
+            iconSize: iconSize,
             style: actionButtonStyle(foregroundColor: Colors.amber),
           );
         }
@@ -335,7 +358,7 @@ extension _MediaDetailActionButtons on _MediaDetailScreenState {
             },
             icon: const AppIcon(Symbols.error_outline_rounded, fill: 1),
             tooltip: 'Retry download',
-            iconSize: 20,
+            iconSize: iconSize,
             style: actionButtonStyle(foregroundColor: Colors.red),
           );
         }
@@ -380,7 +403,7 @@ extension _MediaDetailActionButtons on _MediaDetailScreenState {
             },
             icon: const AppIcon(Symbols.cancel_rounded, fill: 1),
             tooltip: 'Cancelled download',
-            iconSize: 20,
+            iconSize: iconSize,
             style: actionButtonStyle(foregroundColor: Colors.grey),
           );
         }
@@ -408,7 +431,7 @@ extension _MediaDetailActionButtons on _MediaDetailScreenState {
               ),
               tooltip: tooltip,
               icon: AppIcon(isEnabled ? Symbols.sync_rounded : Symbols.sync_disabled_rounded, fill: 1),
-              iconSize: 20,
+              iconSize: iconSize,
               style: actionButtonStyle(foregroundColor: isEnabled ? Colors.teal : Colors.grey),
             );
           }
@@ -436,7 +459,7 @@ extension _MediaDetailActionButtons on _MediaDetailScreenState {
             },
             tooltip: tooltip,
             icon: const AppIcon(Symbols.downloading_rounded, fill: 1),
-            iconSize: 20,
+            iconSize: iconSize,
             style: actionButtonStyle(foregroundColor: Colors.orange),
           );
         }
@@ -459,7 +482,7 @@ extension _MediaDetailActionButtons on _MediaDetailScreenState {
               ),
               icon: AppIcon(isEnabled ? Symbols.sync_rounded : Symbols.sync_disabled_rounded, fill: 1),
               tooltip: t.downloads.keepNUnwatched(count: syncRule?.episodeCount.toString() ?? '?'),
-              iconSize: 20,
+              iconSize: iconSize,
               style: actionButtonStyle(foregroundColor: isEnabled ? Colors.teal : Colors.grey),
             );
           }
@@ -482,7 +505,7 @@ extension _MediaDetailActionButtons on _MediaDetailScreenState {
             },
             icon: const AppIcon(Symbols.file_download_done_rounded, fill: 1),
             tooltip: t.downloads.deleteDownload,
-            iconSize: 20,
+            iconSize: iconSize,
             style: actionButtonStyle(foregroundColor: Colors.green),
           );
         }
@@ -511,7 +534,7 @@ extension _MediaDetailActionButtons on _MediaDetailScreenState {
           },
           icon: const AppIcon(Symbols.download_rounded, fill: 1),
           tooltip: t.downloads.downloadNow,
-          iconSize: 20,
+          iconSize: iconSize,
           style: actionButtonStyle(),
         );
       },

@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
@@ -10,6 +12,24 @@ import 'package:window_manager/window_manager.dart';
 import '../utils/app_logger.dart';
 import '../utils/key_event_simulator.dart' as key_sim;
 import '../utils/platform_detector.dart';
+
+String _describeGamepadKeyEvent(KeyEvent event) {
+  return 'type=${event.runtimeType} logical=${event.logicalKey.keyLabel}/${event.logicalKey.keyId} '
+      'physical=${event.physicalKey.usbHidUsage} deviceType=${event.deviceType} character=${event.character}';
+}
+
+String _describeGamepadButton(GamepadButtonEvent event) {
+  return 'button=${event.button} pressed=${event.pressed} value=${event.value} gamepad=${event.gamepadId}';
+}
+
+String _describeGamepadAxis(GamepadAxisEvent event) {
+  return 'axis=${event.axis} value=${event.value} gamepad=${event.gamepadId}';
+}
+
+void _logGamepadDiag(String message) {
+  if (!PlatformDetector.isTV()) return;
+  appLogger.i('TextInputDiag GamepadService: $message');
+}
 
 /// Suppresses synthetic gamepad key events when the OS has just delivered an
 /// equivalent native key event, which happens with Steam Input on Windows.
@@ -149,6 +169,10 @@ class GamepadService with WindowListener {
   // Whether the app window is currently focused — ignore gamepad input when false
   bool _windowFocused = true;
   bool _nativeKeyHandlerRegistered = false;
+  bool _nativeTextInputFocused = false;
+
+  @visibleForTesting
+  static Future<void> Function(bool focused)? debugNativeTextInputFocusHandler;
 
   GamepadService._({GamepadDuplicateInputGuard? duplicateInputGuard})
     : _duplicateInputGuard = duplicateInputGuard ?? GamepadDuplicateInputGuard(enabled: () => Platform.isWindows);
@@ -156,6 +180,10 @@ class GamepadService with WindowListener {
   static GamepadService get instance {
     _instance ??= GamepadService._();
     return _instance!;
+  }
+
+  static Future<void> setNativeTextInputFocused(bool focused) {
+    return instance._setNativeTextInputFocused(focused);
   }
 
   /// Start listening to gamepad events.
@@ -254,10 +282,50 @@ class GamepadService with WindowListener {
     return _duplicateInputGuard.handleNativeKeyEvent(event);
   }
 
+  Future<void> _setNativeTextInputFocused(bool focused) async {
+    _logGamepadDiag('setNativeTextInputFocused requested focused=$focused current=$_nativeTextInputFocused');
+    if (_nativeTextInputFocused == focused) {
+      _logGamepadDiag('setNativeTextInputFocused no-op focused=$focused');
+      return;
+    }
+    _nativeTextInputFocused = focused;
+
+    if (focused) {
+      _logGamepadDiag('native text input focused; clearing repeat/buttons/duplicate guard before pause');
+      _stopDirectionRepeat();
+      _pressedButtons.clear();
+      _suppressedButtons.clear();
+      _duplicateInputGuard.clear();
+    }
+
+    final debugHandler = debugNativeTextInputFocusHandler;
+    if (debugHandler != null) {
+      _logGamepadDiag('setNativeTextInputFocused using debug handler focused=$focused');
+      await debugHandler(focused);
+      return;
+    }
+
+    try {
+      if (focused) {
+        _logGamepadDiag('calling Gamepad.pause for native text input');
+        await Gamepad.instance.pause();
+        _logGamepadDiag('Gamepad.pause completed for native text input');
+      } else {
+        _logGamepadDiag('calling Gamepad.resume after native text input');
+        await Gamepad.instance.resume();
+        _logGamepadDiag('Gamepad.resume completed after native text input');
+      }
+    } catch (e) {
+      appLogger.e('GamepadService: Failed to ${focused ? "pause" : "resume"} for native text input', error: e);
+    }
+  }
+
   void _handleGamepadEvent(GamepadEvent event) {
+    _logGamepadDiag('event received type=${event.runtimeType} nativeTextInputFocused=$_nativeTextInputFocused');
     switch (event) {
       case final GamepadConnectionEvent e:
         appLogger.i('GamepadService: Gamepad ${e.connected ? "connected" : "disconnected"}: ${e.info.name}');
+        _logGamepadDiag('connection connected=${e.connected} info=${e.info.name}/${e.info.id}');
       case final GamepadButtonEvent e:
         _handleButton(e);
       case final GamepadAxisEvent e:
@@ -266,7 +334,13 @@ class GamepadService with WindowListener {
   }
 
   void _handleButton(GamepadButtonEvent event) {
-    if (!_windowFocused) return;
+    _logGamepadDiag(
+      'button received ${_describeGamepadButton(event)} windowFocused=$_windowFocused nativeTextInputFocused=$_nativeTextInputFocused',
+    );
+    if (!_windowFocused) {
+      _logGamepadDiag('button ignored because window is not focused ${_describeGamepadButton(event)}');
+      return;
+    }
 
     // Switch to keyboard mode on any button press
     if (event.pressed) {
@@ -284,6 +358,7 @@ class GamepadService with WindowListener {
     if (event.pressed && !wasPressed) {
       _pressedButtons.add(event.button);
       if (_shouldSuppressButton(event.button)) {
+        _logGamepadDiag('button suppressed by duplicate guard ${_describeGamepadButton(event)}');
         _suppressedButtons.add(event.button);
         return;
       }
@@ -291,25 +366,32 @@ class GamepadService with WindowListener {
       // D-pad — navigate with auto-repeat while held
       switch (event.button) {
         case GamepadButton.dpadUp:
+          _logGamepadDiag('button starts direction repeat up ${_describeGamepadButton(event)}');
           _startDirectionRepeat(TraversalDirection.up);
           return;
         case GamepadButton.dpadDown:
+          _logGamepadDiag('button starts direction repeat down ${_describeGamepadButton(event)}');
           _startDirectionRepeat(TraversalDirection.down);
           return;
         case GamepadButton.dpadLeft:
+          _logGamepadDiag('button starts direction repeat left ${_describeGamepadButton(event)}');
           _startDirectionRepeat(TraversalDirection.left);
           return;
         case GamepadButton.dpadRight:
+          _logGamepadDiag('button starts direction repeat right ${_describeGamepadButton(event)}');
           _startDirectionRepeat(TraversalDirection.right);
           return;
         // Face buttons — send KeyDown on press, KeyUp on release
         // so widget-level long-press timers work naturally
         case GamepadButton.a:
+          _logGamepadDiag('button simulates key down enter ${_describeGamepadButton(event)}');
           _simulateKeyDown(LogicalKeyboardKey.enter);
         case GamepadButton.x:
+          _logGamepadDiag('button simulates key down context/menu ${_describeGamepadButton(event)}');
           _simulateKeyDown(LogicalKeyboardKey.gameButtonX);
         // Immediate actions on press
         case GamepadButton.b:
+          _logGamepadDiag('button simulates key press escape ${_describeGamepadButton(event)}');
           _simulateKeyPress(LogicalKeyboardKey.escape);
         case GamepadButton.leftShoulder:
           onL1Pressed?.call();
@@ -320,7 +402,10 @@ class GamepadService with WindowListener {
       }
     } else if (!event.pressed && wasPressed) {
       _pressedButtons.remove(event.button);
-      if (_suppressedButtons.remove(event.button)) return;
+      if (_suppressedButtons.remove(event.button)) {
+        _logGamepadDiag('button release consumed by suppressed set ${_describeGamepadButton(event)}');
+        return;
+      }
 
       // D-pad release — stop repeat
       switch (event.button) {
@@ -328,11 +413,14 @@ class GamepadService with WindowListener {
         case GamepadButton.dpadDown:
         case GamepadButton.dpadLeft:
         case GamepadButton.dpadRight:
+          _logGamepadDiag('button stops direction repeat ${_describeGamepadButton(event)}');
           _stopDirectionRepeat();
         // Face button release — send KeyUp
         case GamepadButton.a:
+          _logGamepadDiag('button simulates key up enter ${_describeGamepadButton(event)}');
           _simulateKeyUp(LogicalKeyboardKey.enter);
         case GamepadButton.x:
+          _logGamepadDiag('button simulates key up context/menu ${_describeGamepadButton(event)}');
           _simulateKeyUp(LogicalKeyboardKey.gameButtonX);
         default:
           break;
@@ -342,11 +430,19 @@ class GamepadService with WindowListener {
 
   bool _shouldSuppressButton(GamepadButton button) {
     final syntheticKey = _syntheticKeyByButton[button];
-    return syntheticKey != null && _duplicateInputGuard.shouldSuppressSyntheticKey(syntheticKey);
+    final suppressed = syntheticKey != null && _duplicateInputGuard.shouldSuppressSyntheticKey(syntheticKey);
+    _logGamepadDiag('duplicate guard button=$button syntheticKey=$syntheticKey suppressed=$suppressed');
+    return suppressed;
   }
 
   void _handleAxis(GamepadAxisEvent event) {
-    if (!_windowFocused) return;
+    _logGamepadDiag(
+      'axis received ${_describeGamepadAxis(event)} windowFocused=$_windowFocused nativeTextInputFocused=$_nativeTextInputFocused',
+    );
+    if (!_windowFocused) {
+      _logGamepadDiag('axis ignored because window is not focused ${_describeGamepadAxis(event)}');
+      return;
+    }
 
     // Switch to keyboard mode on significant axis input
     if (event.value.abs() > 0.3) {
@@ -369,11 +465,15 @@ class GamepadService with WindowListener {
     // Convert direction to arrow key and simulate a key press
     // This allows widgets like HubSection that intercept key events to handle navigation
     final logicalKey = _directionToKey(direction);
+    _logGamepadDiag(
+      'moveFocus direction=$direction logicalKey=${logicalKey.keyLabel}/${logicalKey.keyId} nativeTextInputFocused=$_nativeTextInputFocused',
+    );
     _simulateKeyPress(logicalKey);
   }
 
   /// Fire [direction] immediately, then auto-repeat after an initial delay.
   void _startDirectionRepeat(TraversalDirection direction) {
+    _logGamepadDiag('startDirectionRepeat direction=$direction');
     _stopDirectionRepeat();
     _moveFocus(direction);
     _repeatTimer = Timer(_repeatInitialDelay, () {
@@ -384,6 +484,9 @@ class GamepadService with WindowListener {
   }
 
   void _stopDirectionRepeat() {
+    if (_repeatTimer != null) {
+      _logGamepadDiag('stopDirectionRepeat');
+    }
     _repeatTimer?.cancel();
     _repeatTimer = null;
   }
@@ -425,32 +528,45 @@ class GamepadService with WindowListener {
   }
 
   void _dispatchKeyDown(LogicalKeyboardKey logicalKey) {
+    _logGamepadDiag('dispatchKeyDown logical=${logicalKey.keyLabel}/${logicalKey.keyId}');
     _dispatchKeyEvent(
       KeyDownEvent(
         physicalKey: _getPhysicalKey(logicalKey),
         logicalKey: logicalKey,
         timeStamp: Duration(milliseconds: DateTime.now().millisecondsSinceEpoch),
+        deviceType: ui.KeyEventDeviceType.gamepad,
       ),
     );
   }
 
   void _dispatchKeyUp(LogicalKeyboardKey logicalKey) {
+    _logGamepadDiag('dispatchKeyUp logical=${logicalKey.keyLabel}/${logicalKey.keyId}');
     _dispatchKeyEvent(
       KeyUpEvent(
         physicalKey: _getPhysicalKey(logicalKey),
         logicalKey: logicalKey,
         timeStamp: Duration(milliseconds: DateTime.now().millisecondsSinceEpoch),
+        deviceType: ui.KeyEventDeviceType.gamepad,
       ),
     );
   }
 
   void _dispatchKeyEvent(KeyEvent event) {
     FocusNode? node = FocusManager.instance.primaryFocus;
+    _logGamepadDiag('dispatch start focus=${node?.debugLabel} key=(${_describeGamepadKeyEvent(event)})');
     while (node != null) {
       if (node.onKeyEvent != null) {
-        if (node.onKeyEvent!(node, event) == KeyEventResult.handled) break;
+        final result = node.onKeyEvent!(node, event);
+        _logGamepadDiag('dispatch node=${node.debugLabel} result=$result key=(${_describeGamepadKeyEvent(event)})');
+        if (result != KeyEventResult.ignored) {
+          _logGamepadDiag('dispatch stopped node=${node.debugLabel} result=$result');
+          break;
+        }
       }
       node = node.parent;
+    }
+    if (node == null) {
+      _logGamepadDiag('dispatch reached root ignored key=(${_describeGamepadKeyEvent(event)})');
     }
   }
 

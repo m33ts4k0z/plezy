@@ -1,6 +1,51 @@
 part of '../../video_player_screen.dart';
 
 extension _VideoPlayerBuildMethods on VideoPlayerScreenState {
+  static const double _videoLayoutSizeTolerance = 0.1;
+
+  bool _isSameVideoLayoutSize(Size a, Size b) {
+    return (a.width - b.width).abs() <= _videoLayoutSizeTolerance &&
+        (a.height - b.height).abs() <= _videoLayoutSizeTolerance;
+  }
+
+  void _scheduleVideoLayoutUpdate(Size newSize) {
+    final currentPlayer = player;
+    if (currentPlayer == null) return;
+
+    final lastSize = _lastVideoLayoutSize;
+    if (_lastVideoLayoutPlayer == currentPlayer && lastSize != null && _isSameVideoLayoutSize(lastSize, newSize)) {
+      return;
+    }
+
+    _pendingVideoLayoutSize = newSize;
+    if (_videoLayoutUpdateScheduled) return;
+    _videoLayoutUpdateScheduled = true;
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _videoLayoutUpdateScheduled = false;
+      if (!mounted) return;
+
+      final pendingSize = _pendingVideoLayoutSize;
+      final currentPlayer = player;
+      _pendingVideoLayoutSize = null;
+      if (pendingSize == null || currentPlayer == null) return;
+
+      final lastSize = _lastVideoLayoutSize;
+      if (_lastVideoLayoutPlayer == currentPlayer &&
+          lastSize != null &&
+          _isSameVideoLayoutSize(lastSize, pendingSize)) {
+        return;
+      }
+
+      _lastVideoLayoutSize = pendingSize;
+      _lastVideoLayoutPlayer = currentPlayer;
+      _videoFilterManager?.updatePlayerSize(pendingSize);
+      _videoPIPManager?.updatePlayerSize(pendingSize);
+      _updateAmbientLightingOnResize(pendingSize);
+      unawaited(currentPlayer.updateFrame());
+    });
+  }
+
   Widget _buildLoadingSpinner() {
     return const Scaffold(
       backgroundColor: Colors.black,
@@ -30,7 +75,7 @@ extension _VideoPlayerBuildMethods on VideoPlayerScreenState {
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    FilledButton(
+                    FocusableButton(
                       autofocus: true,
                       onPressed: () {
                         final playerToDispose = player;
@@ -42,10 +87,28 @@ extension _VideoPlayerBuildMethods on VideoPlayerScreenState {
                         });
                         unawaited(_initializePlayer());
                       },
-                      child: Text(t.common.retry),
+                      child: FilledButton(
+                        onPressed: () {
+                          final playerToDispose = player;
+                          player = null;
+                          if (playerToDispose != null) unawaited(playerToDispose.dispose());
+                          _setPlayerState(() {
+                            _playerInitializationError = null;
+                            _isPlayerInitialized = false;
+                          });
+                          unawaited(_initializePlayer());
+                        },
+                        child: Text(t.common.retry),
+                      ),
                     ),
                     const SizedBox(width: 12),
-                    OutlinedButton(onPressed: () => unawaited(_handleBackButton()), child: Text(t.common.back)),
+                    FocusableButton(
+                      onPressed: () => unawaited(_handleBackButton()),
+                      child: OutlinedButton(
+                        onPressed: () => unawaited(_handleBackButton()),
+                        child: Text(t.common.back),
+                      ),
+                    ),
                   ],
                 ),
               ],
@@ -110,20 +173,8 @@ extension _VideoPlayerBuildMethods on VideoPlayerScreenState {
               Center(
                 child: LayoutBuilder(
                   builder: (context, constraints) {
-                    // Update player size when layout changes
                     final newSize = Size(constraints.maxWidth, constraints.maxHeight);
-
-                    // Update player size in video filter manager, PiP manager, and native layer
-                    WidgetsBinding.instance.addPostFrameCallback((_) {
-                      if (mounted && player != null) {
-                        _videoFilterManager?.updatePlayerSize(newSize);
-                        _videoPIPManager?.updatePlayerSize(newSize);
-                        // Update ambient lighting shader if active (output aspect changed)
-                        _updateAmbientLightingOnResize(newSize);
-                        // Update Metal layer frame on iOS/macOS for rotation
-                        player!.updateFrame();
-                      }
-                    });
+                    _scheduleVideoLayoutUpdate(newSize);
 
                     // Compute canControl from Watch Together provider (reactive)
                     bool canControl = true;
@@ -159,6 +210,7 @@ extension _VideoPlayerBuildMethods on VideoPlayerScreenState {
                         onPrevious: onPrevious,
                         availableVersions: _availableVersions,
                         selectedMediaIndex: widget.selectedMediaIndex,
+                        selectedMediaSourceId: widget.selectedMediaSourceId,
                         selectedQualityPreset: _selectedQualityPreset,
                         serverSupportsTranscoding: _serverSupportsTranscoding,
                         isTranscoding: _isTranscoding,
@@ -194,7 +246,9 @@ extension _VideoPlayerBuildMethods on VideoPlayerScreenState {
                         onLiveSeek: _captureBuffer != null ? _seekLivePosition : null,
                         onJumpToLive: _captureBuffer != null && !_isAtLiveEdge ? _jumpToLiveEdge : null,
                         isAmbientLightingEnabled: _ambientLightingService?.isEnabled ?? false,
-                        onToggleAmbientLighting: _toggleAmbientLighting,
+                        onToggleAmbientLighting: _ambientLightingService?.isSupported == true
+                            ? _toggleAmbientLighting
+                            : null,
                         toastController: _toastController,
                       ),
                     );

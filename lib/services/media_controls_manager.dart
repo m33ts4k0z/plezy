@@ -32,6 +32,7 @@ class MediaControlsManager {
   bool? _lastCanGoNext;
   bool? _lastCanGoPrevious;
   bool? _lastCanSeek;
+  bool _updatesSuspended = false;
 
   /// Cached metadata snapshot — needed to push the home-screen notification
   /// (which requires title/artist/artwork together) on every state change.
@@ -95,6 +96,8 @@ class MediaControlsManager {
   /// shape (Plex's `/photo/:/transcode` proxy vs. Jellyfin's
   /// self-authenticated image URL).
   Future<void> updateMetadata({required MediaItem metadata, MediaServerClient? client, Duration? duration}) async {
+    if (_updatesSuspended) return;
+
     try {
       String? artworkUrl;
       Uint8List? artworkBytes;
@@ -176,6 +179,8 @@ class MediaControlsManager {
     required double speed,
     bool force = false,
   }) async {
+    if (_updatesSuspended) return;
+
     final params = _PlaybackStateParams(isPlaying: isPlaying, position: position, speed: speed);
 
     if (force) {
@@ -213,6 +218,8 @@ class MediaControlsManager {
   /// - Playlist items: Enable based on playlist position
   /// - Movies: Usually disabled
   Future<void> setControlsEnabled({bool canGoNext = false, bool canGoPrevious = false, bool canSeek = false}) async {
+    if (_updatesSuspended) return;
+
     try {
       final controlsToEnable = <MediaControl>[];
       final controlsToDisable = <MediaControl>[];
@@ -268,6 +275,19 @@ class MediaControlsManager {
     } catch (e) {
       appLogger.w('Failed to clear media controls', error: e);
     }
+  }
+
+  void suspendUpdates() {
+    if (_updatesSuspended) return;
+    _updatesSuspended = true;
+    _throttledUpdate.cancel();
+    appLogger.d('Media controls updates suspended');
+  }
+
+  void resumeUpdates() {
+    if (!_updatesSuspended) return;
+    _updatesSuspended = false;
+    appLogger.d('Media controls updates resumed');
   }
 
   /// Dispose resources

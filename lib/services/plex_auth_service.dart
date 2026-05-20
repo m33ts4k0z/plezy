@@ -1,7 +1,10 @@
 import 'dart:async';
-import 'dart:io' show InternetAddress, InternetAddressType;
+import 'dart:io' show InternetAddress, InternetAddressType, Platform;
+import 'package:flutter/foundation.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'storage_service.dart';
 import 'plex_client.dart';
+import '../exceptions/media_server_exceptions.dart';
 import '../models/plex/plex_user_profile.dart';
 import '../models/plex/plex_home.dart';
 import '../models/user_switch_response.dart';
@@ -47,8 +50,18 @@ class PlexAuthService {
 
   final MediaServerHttpClient _http;
   final String _clientIdentifier;
+  final String _appVersion;
+  final String _platformVersion;
 
-  PlexAuthService._(this._http, this._clientIdentifier);
+  PlexAuthService._(this._http, this._clientIdentifier, this._appVersion, this._platformVersion);
+
+  @visibleForTesting
+  PlexAuthService.forTesting({
+    required MediaServerHttpClient http,
+    String clientIdentifier = 'test-client',
+    String appVersion = 'test',
+    String platformVersion = 'test',
+  }) : this._(http, clientIdentifier, appVersion, platformVersion);
 
   /// Close the underlying HTTP client. Call when the service is short-lived
   /// (created for a single API call) to avoid leaking sockets.
@@ -61,7 +74,8 @@ class PlexAuthService {
       receiveTimeout: MediaServerTimeouts.plexTvReceive,
     );
     final clientIdentifier = await storage.getOrCreateClientIdentifier();
-    return PlexAuthService._(http, clientIdentifier);
+    final packageInfo = await PackageInfo.fromPlatform();
+    return PlexAuthService._(http, clientIdentifier, packageInfo.version, Platform.operatingSystemVersion);
   }
 
   String get clientIdentifier => _clientIdentifier;
@@ -90,14 +104,23 @@ class PlexAuthService {
 
   void _checkStatus(MediaServerResponse response) => throwIfHttpError(response);
 
+  Future<MediaServerResponse> _getClientsApi(String path, {Map<String, String>? headers, Duration? timeout}) async {
+    try {
+      return await _http.get('$_clientsApi$path', headers: headers, timeout: timeout);
+    } on MediaServerHttpException catch (e) {
+      if (!e.isTransient) rethrow;
+      appLogger.w('Plex clients API request failed; retrying via plex.tv', error: {'path': path, 'type': e.type.name});
+      return _http.get('$_plexApiBase$path', headers: headers, timeout: timeout);
+    }
+  }
+
   /// Verify if a plex.tv token is valid
   Future<bool> verifyToken(String authToken) async {
-    try {
-      final response = await _getUser(authToken);
-      return response.statusCode == 200;
-    } catch (e) {
-      return false;
-    }
+    final response = await _getUser(authToken);
+    if (response.statusCode == 200) return true;
+    if (response.statusCode == 401 || response.statusCode == 403) return false;
+    _checkStatus(response);
+    return false;
   }
 
   /// Create a PIN for authentication
@@ -124,18 +147,22 @@ class PlexAuthService {
 
   /// Poll the PIN to check if it has been claimed
   Future<String?> checkPin(int pinId) async {
-    try {
-      final response = await _http.get(
-        '$_plexApiBase/pins/$pinId',
-        headers: _getCommonHeaders(),
-        timeout: MediaServerTimeouts.plexTvReceive,
-      );
+    final response = await _http.get(
+      '$_plexApiBase/pins/$pinId',
+      headers: _getCommonHeaders(),
+      timeout: MediaServerTimeouts.plexTvReceive,
+    );
 
-      final data = response.data as Map<String, dynamic>;
-      return data['authToken'] as String?;
-    } catch (e) {
-      return null;
+    if (response.statusCode == 404 || response.statusCode == 410) {
+      throw const MediaServerPinExpiredException();
     }
+    if (response.statusCode == 401 || response.statusCode == 403) {
+      throw MediaServerAuthException('Plex PIN check rejected', statusCode: response.statusCode);
+    }
+    _checkStatus(response);
+
+    final data = response.data as Map<String, dynamic>;
+    return data['authToken'] as String?;
   }
 
   /// Poll the PIN until it's claimed or timeout.
@@ -156,8 +183,8 @@ class PlexAuthService {
 
   /// Fetch available Plex servers for the authenticated user
   Future<List<PlexServer>> fetchServers(String authToken) async {
-    final response = await _http.get(
-      '$_clientsApi/resources?includeHttps=1&includeRelay=1&includeIPv6=1',
+    final response = await _getClientsApi(
+      '/resources?includeHttps=1&includeRelay=1&includeIPv6=1',
       headers: _getCommonHeaders(authToken: authToken),
     );
 
@@ -201,14 +228,14 @@ class PlexAuthService {
 
   /// Get user profile with preferences (audio/subtitle settings)
   Future<PlexUserProfile> getUserProfile(String authToken) async {
-    final response = await _http.get('$_clientsApi/user', headers: _getCommonHeaders(authToken: authToken));
+    final response = await _getClientsApi('/user', headers: _getCommonHeaders(authToken: authToken));
     _checkStatus(response);
     return PlexUserProfile.fromJson(response.data as Map<String, dynamic>);
   }
 
   /// Get home users for the authenticated user
   Future<PlexHome> getHomeUsers(String authToken) async {
-    final response = await _http.get('$_clientsApi/home/users', headers: _getCommonHeaders(authToken: authToken));
+    final response = await _getClientsApi('/home/users', headers: _getCommonHeaders(authToken: authToken));
     _checkStatus(response);
     return PlexHome.fromJson(response.data as Map<String, dynamic>);
   }
@@ -221,10 +248,10 @@ class PlexAuthService {
       'includeSettings': '1',
       'includeSharedSettings': '1',
       'X-Plex-Product': _appName,
-      'X-Plex-Version': '1.1.0',
+      'X-Plex-Version': _appVersion,
       'X-Plex-Client-Identifier': _clientIdentifier,
       'X-Plex-Platform': 'Flutter',
-      'X-Plex-Platform-Version': '3.8.1',
+      'X-Plex-Platform-Version': _platformVersion,
       'X-Plex-Token': currentToken,
       'X-Plex-Language': 'en',
       'pin': ?pin,
@@ -364,6 +391,20 @@ class PlexServer {
       'lastSeenAt': lastSeenAt?.toIso8601String(),
       'presence': presence,
     };
+  }
+
+  PlexServer withAccessToken(String token) {
+    return PlexServer(
+      name: name,
+      clientIdentifier: clientIdentifier,
+      accessToken: token,
+      connections: connections,
+      owned: owned,
+      product: product,
+      platform: platform,
+      lastSeenAt: lastSeenAt,
+      presence: presence,
+    );
   }
 
   /// Check if server is online using the presence field
@@ -922,7 +963,11 @@ class PlexServer {
     if (address != null) return _isPrivateOrLocalAddress(address);
 
     if (host == 'localhost' || !host.contains('.')) return true;
-    if (host.endsWith('.local') || host.endsWith('.lan') || host.endsWith('.home.arpa') || host.endsWith('.internal')) {
+    if (host.endsWith('.local') ||
+        host.endsWith('.lan') ||
+        host.endsWith('.home.arpa') ||
+        host.endsWith('.internal') ||
+        host.endsWith('.ts.net')) {
       return true;
     }
 
@@ -936,6 +981,7 @@ class PlexServer {
       final b = bytes[1];
       return a == 0 ||
           a == 10 ||
+          (a == 100 && b >= 64 && b <= 127) ||
           a == 127 ||
           (a == 169 && b == 254) ||
           (a == 172 && b >= 16 && b <= 31) ||

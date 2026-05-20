@@ -51,7 +51,7 @@ void main() {
 
       expect(info.audioTracks.length, 2);
       expect(info.subtitleTracks.length, 1);
-      expect(info.frameRate, closeTo(23.976, 0.001));
+      expect(info.displayCriteria?.fps, closeTo(23.976, 0.001));
       // Plex partId is null on Jellyfin because Jellyfin persists selected
       // stream indexes through playback progress reports instead.
       expect(info.getPartId(), isNull);
@@ -85,11 +85,64 @@ void main() {
       expect(sub.key, '/Videos/src-1/Subtitles/3/Stream.srt');
     });
 
+    test('maps display criteria from Jellyfin video stream metadata', () {
+      final info = jellyfinMediaSourceToMediaSourceInfo({
+        'Id': 'src-1',
+        'MediaStreams': [
+          {
+            'Index': 0,
+            'Type': 'Video',
+            'RealFrameRate': 23.976025,
+            'Width': 3840,
+            'Height': 2160,
+            'VideoRangeType': 'DOVIWithHDR10Plus',
+            'DvProfile': 8,
+            'DvLevel': 10,
+            'DvBlSignalCompatibilityId': 1,
+          },
+        ],
+      });
+
+      final criteria = info.displayCriteria;
+      expect(criteria, isNotNull);
+      expect(criteria!.fps, closeTo(23.976, 0.001));
+      expect(criteria.width, 3840);
+      expect(criteria.height, 2160);
+      expect(criteria.doviProfile, 8);
+      expect(criteria.doviLevel, 10);
+      expect(criteria.doviCompatibilityId, 1);
+      expect(criteria.transfer, 'smpte2084');
+      expect(criteria.primaries, 'bt2020');
+      expect(criteria.matrix, 'bt2020nc');
+    });
+
+    test('fills missing HDR color tags from partial Jellyfin transfer metadata', () {
+      final info = jellyfinMediaSourceToMediaSourceInfo({
+        'Id': 'src-1',
+        'MediaStreams': [
+          {
+            'Index': 0,
+            'Type': 'Video',
+            'RealFrameRate': 23.976,
+            'Width': 3840,
+            'Height': 2160,
+            'ColorTransfer': 'smpte2084',
+          },
+        ],
+      });
+
+      final criteria = info.displayCriteria;
+      expect(criteria, isNotNull);
+      expect(criteria!.transfer, 'smpte2084');
+      expect(criteria.primaries, 'bt2020');
+      expect(criteria.matrix, 'bt2020nc');
+    });
+
     test('handles missing MediaStreams gracefully', () {
       final info = jellyfinMediaSourceToMediaSourceInfo({'Id': 'x'});
       expect(info.audioTracks, isEmpty);
       expect(info.subtitleTracks, isEmpty);
-      expect(info.frameRate, isNull);
+      expect(info.displayCriteria, isNull);
     });
 
     test('uses Jellyfin default stream indexes over per-stream default flags', () {
@@ -161,6 +214,28 @@ void main() {
       final sub = info.subtitleTracks.single;
       expect(sub.key, '/Videos/item-1/src-1/Subtitles/2/Stream.srt');
       expect(sub.isExternal, isTrue);
+    });
+
+    test('preserves external Jellyfin audio streams', () {
+      final info = jellyfinMediaSourceToMediaSourceInfo({
+        'MediaStreams': [
+          {'Index': 1, 'Type': 'Audio', 'Codec': 'aac', 'Language': 'eng'},
+          {
+            'Index': 2,
+            'Type': 'Audio',
+            'Codec': 'flac',
+            'Language': 'jpn',
+            'DeliveryMethod': 'External',
+            'DeliveryUrl': '/Videos/item-1/src-1/Audio/2/Stream.flac',
+          },
+          {'Index': 3, 'Type': 'Audio', 'Codec': 'aac', 'Language': 'spa', 'IsExternal': true},
+        ],
+      });
+
+      expect(info.audioTracks.map((track) => track.isExternal), [false, true, true]);
+      expect(info.audioTracks[1].id, 2);
+      expect(info.audioTracks[1].codec, 'flac');
+      expect(info.audioTracks[2].id, 3);
     });
 
     test('external subtitle without DeliveryUrl remains external for URL fallback', () {
@@ -284,6 +359,7 @@ void main() {
         },
       ]);
       expect(versions, hasLength(1));
+      expect(versions.single.id, 'src-1');
       expect(versions.single.parts.single.streamPath, 'src-1');
       expect(versions.single.videoResolution, '4k');
       expect(versions.single.videoCodec, 'hevc');
@@ -319,6 +395,8 @@ void main() {
       expect(versions, hasLength(2));
       expect(versions[0].name, 'Theatrical Cut');
       expect(versions[1].name, "Director's Cut");
+      expect(versions[0].id, 'src-theatrical');
+      expect(versions[1].id, 'src-directors');
       expect(versions[0].parts.single.streamPath, 'src-theatrical');
       expect(versions[1].parts.single.streamPath, 'src-directors');
       // displayLabel prefixes the name for disambiguation.
@@ -348,6 +426,28 @@ void main() {
       expect(versions[0].name, isNull);
       expect(versions[1].name, isNull);
       expect(versions[0].videoResolution, '720');
+      expect(versions[1].videoResolution, '1080');
+    });
+
+    test('uses width for scope-cropped 4k and 1080p labels', () {
+      final versions = jellyfinSourcesToVersions([
+        {
+          'Id': 'scope-4k',
+          'Container': 'mkv',
+          'MediaStreams': [
+            {'Type': 'Video', 'Codec': 'hevc', 'Height': 1608, 'Width': 3840},
+          ],
+        },
+        {
+          'Id': 'scope-1080',
+          'Container': 'mkv',
+          'MediaStreams': [
+            {'Type': 'Video', 'Codec': 'h264', 'Height': 804, 'Width': 1920},
+          ],
+        },
+      ]);
+
+      expect(versions[0].videoResolution, '4k');
       expect(versions[1].videoResolution, '1080');
     });
 

@@ -1,3 +1,4 @@
+import AVFoundation
 import Foundation
 import Libmpv
 import QuartzCore
@@ -6,6 +7,7 @@ import QuartzCore
   import UIKit
 #elseif os(macOS)
   import Cocoa
+  import Metal
 #endif
 
 protocol MpvPlayerDelegate: AnyObject {
@@ -13,35 +15,19 @@ protocol MpvPlayerDelegate: AnyObject {
   func onEvent(name: String, data: [String: Any]?)
 }
 
-// Workaround for MoltenVK problems that cause flicker.
-// https://github.com/mpv-player/mpv/pull/13651
-class MpvMetalLayer: CAMetalLayer {
-  override var drawableSize: CGSize {
-    get { super.drawableSize }
-    set {
-      if newValue == .zero || (Int(newValue.width) > 1 && Int(newValue.height) > 1) {
-        super.drawableSize = newValue
-      }
-    }
-  }
-
-  #if os(iOS)
-    // wantsExtendedDynamicRangeContent is unavailable on tvOS as of SDK 26.4,
-    // so this override only applies to iOS / macOS.
-    @available(iOS 16.0, *)
-    override var wantsExtendedDynamicRangeContent: Bool {
-      get { super.wantsExtendedDynamicRangeContent }
+#if os(macOS)
+  // Workaround for MoltenVK problems that cause flicker.
+  // https://github.com/mpv-player/mpv/pull/13651
+  class MpvMetalLayer: CAMetalLayer {
+    override var drawableSize: CGSize {
+      get { super.drawableSize }
       set {
-        if Thread.isMainThread {
-          super.wantsExtendedDynamicRangeContent = newValue
-        } else {
-          DispatchQueue.main.sync {
-            super.wantsExtendedDynamicRangeContent = newValue
-          }
+        if newValue == .zero || (Int(newValue.width) > 1 && Int(newValue.height) > 1) {
+          super.drawableSize = newValue
         }
       }
     }
-  #elseif os(macOS)
+
     override var wantsExtendedDynamicRangeContent: Bool {
       get { super.wantsExtendedDynamicRangeContent }
       set {
@@ -54,8 +40,10 @@ class MpvMetalLayer: CAMetalLayer {
         }
       }
     }
-  #endif
-}
+  }
+#else
+  class MpvVideoLayer: AVSampleBufferDisplayLayer {}
+#endif
 
 /// Safely convert a C string to Swift String with UTF-8 validation.
 /// Falls back to Latin-1 decoding if the bytes are not valid UTF-8.
@@ -74,30 +62,91 @@ func safeString(_ cstr: UnsafePointer<CChar>) -> String {
   return String(buffer.map { Character(Unicode.Scalar($0)) })
 }
 
+struct ServerDisplayCriteria {
+  let doviProfile: Int64
+  let doviLevel: Int64
+  let doviCompatibilityId: Int64?
+  let fps: Double
+  let width: Int32
+  let height: Int32
+  let gamma: String?
+  let primaries: String?
+  let colorMatrix: String?
+}
+
 class MpvPlayerCoreBase: NSObject {
   weak var delegate: MpvPlayerDelegate?
 
-  var metalLayer: MpvMetalLayer?
+  #if os(macOS)
+    var metalLayer: MpvMetalLayer?
+  #else
+    var videoLayer: MpvVideoLayer?
+  #endif
   var mpv: OpaquePointer?
   var isInitialized = false
   var isDisposing = false
   var isPipActive = false
   var isBackgrounded = false
-  var hdrEnabled = true
-  var lastSigPeak = 0.0
+  private var wakeupCallbackContext: UnsafeMutableRawPointer?
+  private var cachedHDREnabled = true
+  private var cachedLastSigPeak = 0.0
+  private var cachedDoviProfile: Int64 = 0
+  private var cachedDoviLevel: Int64 = 0
+  private var cachedContainerFps: Double = 0
+  private var cachedVideoGamma: String?
+  private var cachedVideoPrimaries: String?
+  private var cachedVideoColorMatrix: String?
+  private var serverDisplayCriteriaActive = false
+  var hdrEnabled: Bool {
+    cacheLock.lock()
+    defer { cacheLock.unlock() }
+    return cachedHDREnabled
+  }
+  var lastSigPeak: Double {
+    cacheLock.lock()
+    defer { cacheLock.unlock() }
+    return cachedLastSigPeak
+  }
+  var doviProfile: Int64 {
+    cacheLock.lock()
+    defer { cacheLock.unlock() }
+    return cachedDoviProfile
+  }
+  var doviLevel: Int64 {
+    cacheLock.lock()
+    defer { cacheLock.unlock() }
+    return cachedDoviLevel
+  }
+  var containerFps: Double {
+    cacheLock.lock()
+    defer { cacheLock.unlock() }
+    return cachedContainerFps
+  }
 
   /// Properties that must still flow to Dart while backgrounded (state-critical).
   private static let criticalProperties: Set<String> = [
-    "pause", "eof-reached", "paused-for-cache",
+    "pause", "eof-reached", "paused-for-cache", "time-pos", "duration", "seekable",
   ]
 
   private static let internalSigPeakObserverId: UInt64 = UInt64.max - 1
   private static let internalWidthObserverId: UInt64 = UInt64.max - 2
   private static let internalHeightObserverId: UInt64 = UInt64.max - 3
+  private static let internalDoviProfileObserverId: UInt64 = UInt64.max - 4
+  private static let internalDoviLevelObserverId: UInt64 = UInt64.max - 5
+  private static let internalContainerFpsObserverId: UInt64 = UInt64.max - 6
+  private static let internalVideoGammaObserverId: UInt64 = UInt64.max - 7
+  private static let internalVideoPrimariesObserverId: UInt64 = UInt64.max - 8
+  private static let internalVideoColorMatrixObserverId: UInt64 = UInt64.max - 9
   private static let internalObserverIds: Set<UInt64> = [
     internalSigPeakObserverId,
     internalWidthObserverId,
     internalHeightObserverId,
+    internalDoviProfileObserverId,
+    internalDoviLevelObserverId,
+    internalContainerFpsObserverId,
+    internalVideoGammaObserverId,
+    internalVideoPrimariesObserverId,
+    internalVideoColorMatrixObserverId,
   ]
 
   let queue = DispatchQueue(label: "mpv", qos: .userInitiated)
@@ -118,6 +167,8 @@ class MpvPlayerCoreBase: NSObject {
   private var cachedTimePos = 0.0
   private var cachedWidth = 0.0
   private var cachedHeight = 0.0
+  private var currentPanscan = 0.0
+  private var aspectOverrideActive = false
 
   override init() {
     super.init()
@@ -128,8 +179,110 @@ class MpvPlayerCoreBase: NSObject {
 
   func updateEDRMode(sigPeak: Double) {}
 
+  @discardableResult
+  func updateDisplayCriteria(
+    doviProfile: Int64,
+    doviLevel: Int64,
+    doviCompatibilityId: Int64?,
+    fps: Double,
+    width: Int32,
+    height: Int32,
+    sigPeak: Double,
+    gamma: String?,
+    primaries: String?,
+    colorMatrix: String?
+  ) -> Bool { false }
+
+  func scheduleDisplayCriteriaUpdate() {
+    cacheLock.lock()
+    if serverDisplayCriteriaActive {
+      cacheLock.unlock()
+      return
+    }
+    let profile = cachedDoviProfile
+    let level = cachedDoviLevel
+    let fps = cachedContainerFps
+    let width = Int32(cachedWidth)
+    let height = Int32(cachedHeight)
+    let sigPeak = cachedLastSigPeak
+    let gamma = cachedVideoGamma
+    let primaries = cachedVideoPrimaries
+    let colorMatrix = cachedVideoColorMatrix
+    cacheLock.unlock()
+
+    DispatchQueue.main.async { [weak self] in
+      self?.updateDisplayCriteria(
+        doviProfile: profile,
+        doviLevel: level,
+        doviCompatibilityId: nil,
+        fps: fps,
+        width: width,
+        height: height,
+        sigPeak: sigPeak,
+        gamma: gamma,
+        primaries: primaries,
+        colorMatrix: colorMatrix
+      )
+    }
+  }
+
+  func setServerDisplayCriteria(_ criteria: ServerDisplayCriteria?) {
+    cacheLock.lock()
+    serverDisplayCriteriaActive = criteria != nil
+    cacheLock.unlock()
+
+    let apply = { [weak self] in
+      guard let self else { return }
+      guard let criteria else {
+        _ = self.updateDisplayCriteria(
+          doviProfile: 0,
+          doviLevel: 0,
+          doviCompatibilityId: nil,
+          fps: 0,
+          width: 0,
+          height: 0,
+          sigPeak: 0,
+          gamma: nil,
+          primaries: nil,
+          colorMatrix: nil
+        )
+        return
+      }
+
+      let applied = self.updateDisplayCriteria(
+        doviProfile: criteria.doviProfile,
+        doviLevel: criteria.doviLevel,
+        doviCompatibilityId: criteria.doviCompatibilityId,
+        fps: criteria.fps,
+        width: criteria.width,
+        height: criteria.height,
+        sigPeak: 0,
+        gamma: criteria.gamma,
+        primaries: criteria.primaries,
+        colorMatrix: criteria.colorMatrix
+      )
+      if !applied {
+        self.cacheLock.lock()
+        self.serverDisplayCriteriaActive = false
+        self.cacheLock.unlock()
+        self.scheduleDisplayCriteriaUpdate()
+      }
+    }
+
+    if Thread.isMainThread {
+      apply()
+    } else {
+      DispatchQueue.main.async(execute: apply)
+    }
+  }
+
   func setupMpv() -> Bool {
-    guard let metalLayer else { return false }
+    #if os(macOS)
+      guard let renderLayer = metalLayer else { return false }
+      configureMoltenVKPlacementHeaps()
+    #else
+      guard let renderLayer = videoLayer else { return false }
+    #endif
 
     mpv = mpv_create()
     guard let mpv else {
@@ -143,7 +296,7 @@ class MpvPlayerCoreBase: NSObject {
       checkError(mpv_request_log_messages(mpv, "warn"))
     #endif
 
-    var layer = Int64(Int(bitPattern: Unmanaged.passUnretained(metalLayer).toOpaque()))
+    var layer = Int64(Int(bitPattern: Unmanaged.passUnretained(renderLayer).toOpaque()))
     checkError(mpv_set_option(mpv, "wid", MPV_FORMAT_INT64, &layer))
     applySharedMpvOptions()
     configurePlatformMpvOptions()
@@ -156,6 +309,11 @@ class MpvPlayerCoreBase: NSObject {
       return false
     }
 
+    // mpv stores this context without retaining it. Retain manually so the
+    // Swift core cannot deallocate while mpv can still fire wakeup callbacks.
+    let wakeupContext = Unmanaged.passRetained(self).toOpaque()
+    wakeupCallbackContext = wakeupContext
+
     mpv_set_wakeup_callback(
       mpv,
       { context in
@@ -163,12 +321,26 @@ class MpvPlayerCoreBase: NSObject {
         let core = Unmanaged<MpvPlayerCoreBase>.fromOpaque(context).takeUnretainedValue()
         core.readEvents()
       },
-      UnsafeMutableRawPointer(Unmanaged.passUnretained(self).toOpaque())
+      wakeupContext
     )
 
     mpv_observe_property(mpv, Self.internalSigPeakObserverId, "video-params/sig-peak", MPV_FORMAT_DOUBLE)
     mpv_observe_property(mpv, Self.internalWidthObserverId, "width", MPV_FORMAT_DOUBLE)
     mpv_observe_property(mpv, Self.internalHeightObserverId, "height", MPV_FORMAT_DOUBLE)
+    mpv_observe_property(
+      mpv, Self.internalDoviProfileObserverId,
+      "current-tracks/video/dolby-vision-profile", MPV_FORMAT_INT64)
+    mpv_observe_property(
+      mpv, Self.internalDoviLevelObserverId,
+      "current-tracks/video/dolby-vision-level", MPV_FORMAT_INT64)
+    mpv_observe_property(
+      mpv, Self.internalContainerFpsObserverId,
+      "container-fps", MPV_FORMAT_DOUBLE)
+    mpv_observe_property(mpv, Self.internalVideoGammaObserverId, "video-params/gamma", MPV_FORMAT_STRING)
+    mpv_observe_property(mpv, Self.internalVideoPrimariesObserverId, "video-params/primaries", MPV_FORMAT_STRING)
+    mpv_observe_property(
+      mpv, Self.internalVideoColorMatrixObserverId,
+      "video-params/colormatrix", MPV_FORMAT_STRING)
     return true
   }
 
@@ -186,6 +358,24 @@ class MpvPlayerCoreBase: NSObject {
     value: String,
     completion: @escaping (Result<Void, Error>) -> Void
   ) {
+    #if targetEnvironment(simulator)
+      if name == "hwdec" {
+        if value != "no" {
+          print("[MpvPlayerCore] Simulator does not support hardware decoding; forcing hwdec=no")
+        }
+        setRawStringPropertyAsync(name, value: "no", completion: completion)
+        return
+      }
+    #endif
+
+    if isManagedRendererProperty(name) {
+      print("[MpvPlayerCore] Ignoring managed renderer property: \(name)=\(value)")
+      completion(.success(()))
+      return
+    }
+
+    updateVideoGravityIfNeeded(name: name, value: value)
+
     if name == "pause" {
       setCachedPaused(value == "yes" || value == "true" || value == "1")
     }
@@ -219,8 +409,8 @@ class MpvPlayerCoreBase: NSObject {
 
   func setHDREnabled(_ enabled: Bool, completion: ((Result<Void, Error>) -> Void)? = nil) {
     cacheLock.lock()
-    hdrEnabled = enabled
-    let sigPeak = lastSigPeak
+    cachedHDREnabled = enabled
+    let sigPeak = cachedLastSigPeak
     cacheLock.unlock()
 
     print("[MpvPlayerCore] HDR enabled: \(enabled)")
@@ -344,13 +534,29 @@ class MpvPlayerCoreBase: NSObject {
     isDisposing = true
     cancelPendingRequests()
 
+    cacheLock.lock()
+    cachedDoviProfile = 0
+    cachedDoviLevel = 0
+    cachedContainerFps = 0
+    cachedLastSigPeak = 0
+    cachedVideoGamma = nil
+    cachedVideoPrimaries = nil
+    cachedVideoColorMatrix = nil
+    serverDisplayCriteriaActive = false
+    cacheLock.unlock()
+
     let mpvHandle = mpv
+    let callbackContext = wakeupCallbackContext
     mpv = nil
+    wakeupCallbackContext = nil
 
     let destroy = {
       if let mpvHandle {
         mpv_set_wakeup_callback(mpvHandle, nil, nil)
         mpv_terminate_destroy(mpvHandle)
+      }
+      if let callbackContext {
+        Unmanaged<MpvPlayerCoreBase>.fromOpaque(callbackContext).release()
       }
     }
 
@@ -365,20 +571,78 @@ class MpvPlayerCoreBase: NSObject {
     }
   }
 
-  func applyGpuNextOptions() {
-    guard mpv != nil else { return }
-    setProperty("gpu-api", value: "vulkan")
-    setProperty("gpu-context", value: "moltenvk")
-    setProperty("vo", value: "gpu-next")
-  }
-
   private func applySharedMpvOptions() {
     guard let mpv else { return }
-    checkError(mpv_set_option_string(mpv, "vo", "gpu-next"))
-    checkError(mpv_set_option_string(mpv, "gpu-api", "vulkan"))
-    checkError(mpv_set_option_string(mpv, "gpu-context", "moltenvk"))
-    checkError(mpv_set_option_string(mpv, "hwdec", "videotoolbox"))
+    #if os(macOS)
+      checkError(mpv_set_option_string(mpv, "vo", "gpu-next"))
+      checkError(mpv_set_option_string(mpv, "gpu-api", "vulkan"))
+      checkError(mpv_set_option_string(mpv, "gpu-context", "moltenvk"))
+      checkError(mpv_set_option_string(mpv, "hwdec", "videotoolbox"))
+    #else
+      checkError(mpv_set_option_string(mpv, "vo", "avfoundation"))
+      #if targetEnvironment(simulator)
+        checkError(mpv_set_option_string(mpv, "avfoundation-composite-osd", "no"))
+        checkError(mpv_set_option_string(mpv, "hwdec", "no"))
+      #elseif os(tvOS)
+        // tvOS HDR is HDMI mode switching, not EDR — an SDR sibling layer
+        // doesn't dim the video, so skip the per-frame CI composite that
+        // round-trips BT.2020/PQ through linear P3.
+        checkError(mpv_set_option_string(mpv, "avfoundation-composite-osd", "no"))
+        checkError(mpv_set_option_string(mpv, "hwdec", "videotoolbox"))
+      #else
+        checkError(mpv_set_option_string(mpv, "avfoundation-composite-osd", "no"))
+        checkError(mpv_set_option_string(mpv, "hwdec", "videotoolbox"))
+      #endif
+    #endif
+    checkError(mpv_set_option_string(mpv, "hwdec-codecs", "all"))
+    checkError(mpv_set_option_string(mpv, "hwdec-software-fallback", "yes"))
     checkError(mpv_set_option_string(mpv, "target-colorspace-hint", "yes"))
+  }
+
+  #if os(macOS)
+    private func configureMoltenVKPlacementHeaps() {
+      guard let device = MTLCreateSystemDefaultDevice() else { return }
+      let supportsPlacementHeaps = device.supportsFamily(.apple2) || device.supportsFamily(.mac2)
+      if !supportsPlacementHeaps {
+        setenv("MVK_CONFIG_USE_MTLHEAP", "0", 1)
+      }
+    }
+  #endif
+
+  private func isManagedRendererProperty(_ name: String) -> Bool {
+    name == "vo" || name == "wid" || name == "gpu-api" || name == "gpu-context"
+      || name == "avfoundation-composite-osd"
+  }
+
+  private func updateVideoGravityIfNeeded(name: String, value: String) {
+    #if os(macOS)
+      return
+    #else
+      let gravity: AVLayerVideoGravity
+      cacheLock.lock()
+      switch name {
+      case "panscan":
+        currentPanscan = Double(value) ?? 0
+      case "video-aspect-override":
+        aspectOverrideActive = value != "no" && value != "-1" && value != "0"
+      default:
+        cacheLock.unlock()
+        return
+      }
+
+      if aspectOverrideActive {
+        gravity = .resize
+      } else if currentPanscan > 0 {
+        gravity = .resizeAspectFill
+      } else {
+        gravity = .resizeAspect
+      }
+      cacheLock.unlock()
+
+      DispatchQueue.main.async { [weak self] in
+        self?.videoLayer?.videoGravity = gravity
+      }
+    #endif
   }
 
   private func cancelPendingRequests() {
@@ -571,6 +835,11 @@ class MpvPlayerCoreBase: NSObject {
         value = data.assumingMemoryBound(to: Double.self).pointee
       }
 
+    case MPV_FORMAT_INT64:
+      if let data = property.data {
+        value = data.assumingMemoryBound(to: Int64.self).pointee
+      }
+
     case MPV_FORMAT_FLAG:
       if let data = property.data {
         value = data.assumingMemoryBound(to: Int32.self).pointee != 0
@@ -596,11 +865,49 @@ class MpvPlayerCoreBase: NSObject {
 
     if name == "video-params/sig-peak", let sigPeak = value as? Double {
       cacheLock.lock()
-      lastSigPeak = sigPeak
+      cachedLastSigPeak = sigPeak
       cacheLock.unlock()
       DispatchQueue.main.async {
         self.updateEDRMode(sigPeak: sigPeak)
       }
+      scheduleDisplayCriteriaUpdate()
+    }
+
+    switch name {
+    case "current-tracks/video/dolby-vision-profile":
+      cacheLock.lock()
+      cachedDoviProfile = (value as? Int64) ?? 0
+      cacheLock.unlock()
+      scheduleDisplayCriteriaUpdate()
+    case "current-tracks/video/dolby-vision-level":
+      cacheLock.lock()
+      cachedDoviLevel = (value as? Int64) ?? 0
+      cacheLock.unlock()
+      scheduleDisplayCriteriaUpdate()
+    case "container-fps":
+      cacheLock.lock()
+      cachedContainerFps = (value as? Double) ?? 0
+      cacheLock.unlock()
+      scheduleDisplayCriteriaUpdate()
+    case "video-params/gamma":
+      cacheLock.lock()
+      cachedVideoGamma = value as? String
+      cacheLock.unlock()
+      scheduleDisplayCriteriaUpdate()
+    case "video-params/primaries":
+      cacheLock.lock()
+      cachedVideoPrimaries = value as? String
+      cacheLock.unlock()
+      scheduleDisplayCriteriaUpdate()
+    case "video-params/colormatrix":
+      cacheLock.lock()
+      cachedVideoColorMatrix = value as? String
+      cacheLock.unlock()
+      scheduleDisplayCriteriaUpdate()
+    case "width", "height":
+      scheduleDisplayCriteriaUpdate()
+    default:
+      break
     }
 
     if Self.internalObserverIds.contains(replyUserdata) { return }

@@ -22,6 +22,7 @@ import '../../services/pip_service.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../../mixins/settings_effect_mixin.dart';
+import '../../mixins/mounted_set_state_mixin.dart';
 import '../../mpv/mpv.dart';
 import '../overlay_sheet.dart';
 import '../../focus/dpad_navigator.dart';
@@ -83,6 +84,7 @@ Widget plexVideoControlsBuilder(
   VoidCallback? onPrevious,
   List<MediaVersion>? availableVersions,
   int? selectedMediaIndex,
+  String? selectedMediaSourceId,
   TranscodeQualityPreset selectedQualityPreset = TranscodeQualityPreset.original,
   bool serverSupportsTranscoding = false,
   bool isTranscoding = false,
@@ -127,6 +129,7 @@ Widget plexVideoControlsBuilder(
     onPrevious: onPrevious,
     availableVersions: availableVersions ?? [],
     selectedMediaIndex: selectedMediaIndex ?? 0,
+    selectedMediaSourceId: selectedMediaSourceId,
     selectedQualityPreset: selectedQualityPreset,
     serverSupportsTranscoding: serverSupportsTranscoding,
     isTranscoding: isTranscoding,
@@ -208,6 +211,7 @@ class PlexVideoControls extends StatefulWidget {
   final VoidCallback? onPrevious;
   final List<MediaVersion> availableVersions;
   final int selectedMediaIndex;
+  final String? selectedMediaSourceId;
   final TranscodeQualityPreset selectedQualityPreset;
   final bool serverSupportsTranscoding;
   final bool isTranscoding;
@@ -297,6 +301,7 @@ class PlexVideoControls extends StatefulWidget {
     this.onPrevious,
     this.availableVersions = const [],
     this.selectedMediaIndex = 0,
+    this.selectedMediaSourceId,
     this.selectedQualityPreset = TranscodeQualityPreset.original,
     this.serverSupportsTranscoding = false,
     this.isTranscoding = false,
@@ -337,7 +342,8 @@ class PlexVideoControls extends StatefulWidget {
   State<PlexVideoControls> createState() => _PlexVideoControlsState();
 }
 
-class _PlexVideoControlsState extends State<PlexVideoControls> with WindowListener, SettingsEffectMixin {
+class _PlexVideoControlsState extends State<PlexVideoControls>
+    with WindowListener, SettingsEffectMixin, MountedSetStateMixin {
   bool _showControls = true;
   bool _forceShowControls = false;
   bool _isLoadingExtras = false;
@@ -411,6 +417,9 @@ class _PlexVideoControlsState extends State<PlexVideoControls> with WindowListen
   bool _subtitlesVisible = true;
   // Skip marker button focus node (for TV D-pad navigation)
   late final FocusNode _skipMarkerFocusNode;
+  final ValueNotifier<bool> _fallbackHasFirstFrame = ValueNotifier<bool>(true);
+  final Stopwatch _pointerActivityStopwatch = Stopwatch()..start();
+  int _lastPointerActivityMs = -1000;
   double? _rateBeforeLongPress;
   bool _showSpeedIndicator = false;
   StreamSubscription<double>? _rateSubscription;
@@ -467,6 +476,10 @@ class _PlexVideoControlsState extends State<PlexVideoControls> with WindowListen
     _checkPipSupport();
     // Add window listener for tracking fullscreen state (for button icon)
     if (PlatformDetector.isDesktopOS()) {
+      if (Platform.isMacOS) {
+        _isFullscreen = FullscreenStateManager().isFullscreen;
+        FullscreenStateManager().addListener(_onFullscreenStateChanged);
+      }
       windowManager.addListener(this);
       _initAlwaysOnTopState();
     }
@@ -494,7 +507,7 @@ class _PlexVideoControlsState extends State<PlexVideoControls> with WindowListen
     });
   }
 
-  void _setControlsState(VoidCallback fn) => setState(fn);
+  void _setControlsState(VoidCallback fn) => setStateIfMounted(fn);
 
   @override
   void dispose() {
@@ -514,6 +527,7 @@ class _PlexVideoControlsState extends State<PlexVideoControls> with WindowListen
     _rateSubscription?.cancel();
     _focusNode.dispose();
     _skipMarkerFocusNode.dispose();
+    _fallbackHasFirstFrame.dispose();
     // Restore original rate if long-press was active when disposed
     if (_isLongPressing && _rateBeforeLongPress != null) {
       widget.player.setRate(_rateBeforeLongPress!);
@@ -526,11 +540,21 @@ class _PlexVideoControlsState extends State<PlexVideoControls> with WindowListen
       }
     }
     if (Platform.isMacOS) {
+      FullscreenStateManager().removeListener(_onFullscreenStateChanged);
       _pipService.isPipActive.removeListener(_onMacPipChanged);
       _trafficLightVisibilityGeneration++;
       unawaited(MacOSWindowService.setTrafficLightsVisible(true));
     }
     super.dispose();
+  }
+
+  void _onFullscreenStateChanged() {
+    final isFullscreen = FullscreenStateManager().isFullscreen;
+    if (!mounted || _isFullscreen == isFullscreen) return;
+    setState(() {
+      _isFullscreen = isFullscreen;
+    });
+    _updateTrafficLightVisibility();
   }
 
   @override
@@ -590,7 +614,6 @@ class _PlexVideoControlsState extends State<PlexVideoControls> with WindowListen
           onKeyEvent: (node, event) => _handleControlsKeyEvent(event, isMobile),
           child: Listener(
             behavior: HitTestBehavior.translucent,
-            onPointerHover: (_) => _showControlsFromPointerActivity(),
             onPointerSignal: _handlePointerSignal,
             child: MouseRegion(
               cursor: (_showControls || _forceShowControls) ? SystemMouseCursors.basic : SystemMouseCursors.none,
@@ -632,16 +655,16 @@ class _PlexVideoControlsState extends State<PlexVideoControls> with WindowListen
                         child: AnimatedOpacity(
                           opacity: (_showControls || _forceShowControls) ? 1.0 : 0.0,
                           duration: const Duration(milliseconds: 200),
-                          child: LayoutBuilder(
-                            builder: (context, constraints) {
+                          child: Builder(
+                            builder: (context) {
                               return GestureDetector(
-                                onTapUp: (details) => _handleControlsOverlayTap(details, constraints),
+                                onTapUp: (details) => _handleControlsOverlayTap(details, _sizeOf(context)),
                                 onLongPressStart: (_) => _handleLongPressStart(),
                                 onLongPressEnd: (_) => _handleLongPressEnd(),
                                 onLongPressCancel: _handleLongPressCancel,
                                 behavior: HitTestBehavior.deferToChild,
                                 child: ValueListenableBuilder<bool>(
-                                  valueListenable: widget.hasFirstFrame ?? ValueNotifier(true),
+                                  valueListenable: widget.hasFirstFrame ?? _fallbackHasFirstFrame,
                                   builder: (context, hasFrame, child) {
                                     return Container(
                                       decoration: BoxDecoration(
@@ -768,7 +791,9 @@ class _PlexVideoControlsState extends State<PlexVideoControls> with WindowListen
                     ),
                   ),
                   // Skip intro/credits button (auto-dismisses after 7s, then only shows with controls)
-                  if (_currentMarker != null && (!_skipButtonDismissed || _showControls))
+                  if (_currentMarker != null &&
+                      widget.playNextFocusNode == null &&
+                      (!_skipButtonDismissed || _showControls))
                     AnimatedPositioned(
                       duration: const Duration(milliseconds: 200),
                       curve: Curves.easeInOut,
@@ -788,7 +813,7 @@ class _PlexVideoControlsState extends State<PlexVideoControls> with WindowListen
                     AnimatedPositioned(
                       duration: const Duration(milliseconds: 200),
                       curve: Curves.easeInOut,
-                      top: _showControls && isMobile ? 80.0 : 16.0,
+                      top: _showControls ? (isMobile ? 100.0 : 60.0) : 16.0,
                       left: 16,
                       child: AnimatedOpacity(
                         opacity: (!_autoHidePerformanceOverlay || _showControls || _forceShowControls) ? 1.0 : 0.0,

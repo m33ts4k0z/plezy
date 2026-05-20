@@ -13,7 +13,11 @@ PlexHome _$PlexHomeFromJson(Map<String, dynamic> json) => PlexHome(
   guestUserUUID: json['guestUserUUID'] as String? ?? '',
   guestEnabled: json['guestEnabled'] as bool? ?? false,
   subscription: json['subscription'] as bool? ?? false,
-  users: (json['users'] as List<dynamic>?)?.map((e) => PlexHomeUser.fromJson(e as Map<String, dynamic>)).toList() ?? [],
+  users:
+      (json['users'] as List<dynamic>?)
+          ?.map((e) => PlexHomeUser.fromJson(e as Map<String, dynamic>))
+          .toList() ??
+      [],
 );
 
 Map<String, dynamic> _$PlexHomeToJson(PlexHome instance) => <String, dynamic>{
@@ -23,5 +27,5 @@ Map<String, dynamic> _$PlexHomeToJson(PlexHome instance) => <String, dynamic>{
   'guestUserUUID': instance.guestUserUUID,
   'guestEnabled': instance.guestEnabled,
   'subscription': instance.subscription,
-  'users': instance.users,
+  'users': instance.users.map((e) => e.toJson()).toList(),
 };

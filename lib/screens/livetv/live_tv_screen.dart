@@ -6,6 +6,7 @@ import 'package:material_symbols_icons/symbols.dart';
 import 'package:provider/provider.dart';
 
 import '../../focus/focusable_action_bar.dart';
+import '../../focus/focusable_button.dart';
 import '../../i18n/strings.g.dart';
 import '../../media/live_tv_support.dart';
 import '../../media/media_server_client.dart';
@@ -70,15 +71,12 @@ class _LiveTvScreenState extends State<LiveTvScreen>
   final Map<String, String> _favoriteStoreBySource = {};
   final Map<String, FavoriteChannelPersistenceMode> _favoriteModeByStore = {};
 
-  List<LiveTvChannel> get _filteredChannels {
-    if (!_showFavoritesOnly) return _channels;
-    if (_favoriteKeys.isEmpty) return const [];
-    final channelMap = {for (final c in _channels) _favoriteKeyForChannel(c): c};
-    return [
-      for (final fav in _favoriteChannels)
-        if (channelMap.containsKey(fav.stableKey)) channelMap[fav.stableKey]!,
-    ];
-  }
+  List<LiveTvChannel> get _filteredChannels => filterLiveTvChannelsForFavorites(
+    channels: _channels,
+    favoritesOnly: _showFavoritesOnly,
+    favorites: _favoriteChannels,
+    sourceForChannel: _sourceForChannel,
+  );
 
   String _liveServerScopeKey(LiveTvServerInfo serverInfo) => '${serverInfo.serverId}\u0000${serverInfo.dvrKey}';
 
@@ -250,6 +248,20 @@ class _LiveTvScreenState extends State<LiveTvScreen>
     return _extractEnabledChannelKeys(matching.isNotEmpty ? matching : serverInfo.dvrs);
   }
 
+  String? _sourceTitleForServerInfo(LiveTvServerInfo serverInfo) {
+    for (final dvr in serverInfo.dvrs) {
+      if (dvr.key == serverInfo.dvrKey) {
+        return _nonEmpty(dvr.lineupTitle) ?? _nonEmpty(dvr.lineupURL) ?? _nonEmpty(dvr.lineup);
+      }
+    }
+    return _nonEmpty(serverInfo.lineup);
+  }
+
+  String? _nonEmpty(String? value) {
+    final trimmed = value?.trim();
+    return trimmed == null || trimmed.isEmpty ? null : trimmed;
+  }
+
   Future<void> _loadChannels() async {
     if (!mounted) return;
     setState(() {
@@ -298,6 +310,7 @@ class _LiveTvScreenState extends State<LiveTvScreen>
 
           final liveTv = genericClient.liveTv;
           final source = await liveTv.buildFavoriteChannelSource(lineup: serverInfo.lineup);
+          final sourceTitle = _sourceTitleForServerInfo(serverInfo);
           final storeKey = liveTv.favoriteStoreKey;
           final liveServerKey = _liveServerScopeKey(serverInfo);
           _favoriteSourceByLiveServer[liveServerKey] = source;
@@ -316,6 +329,7 @@ class _LiveTvScreenState extends State<LiveTvScreen>
             if (enabledKeys != null && !enabledKeys.contains(channel.key)) continue;
             final scopedChannel = channel.copyWith(
               liveDvrKey: serverInfo.dvrKey,
+              liveTvSourceTitle: sourceTitle,
               favoriteSource: source,
               favoriteStoreKey: storeKey,
             );
@@ -606,10 +620,14 @@ class _LiveTvScreenState extends State<LiveTvScreen>
             const SizedBox(height: 16),
             Text(_error!, style: theme.textTheme.bodyLarge),
             const SizedBox(height: 16),
-            FilledButton.icon(
+            FocusableButton(
+              autofocus: true,
               onPressed: _loadChannels,
-              icon: const AppIcon(Symbols.refresh_rounded),
-              label: Text(t.common.retry),
+              child: FilledButton.icon(
+                onPressed: _loadChannels,
+                icon: const AppIcon(Symbols.refresh_rounded),
+                label: Text(t.common.retry),
+              ),
             ),
           ],
         ),
