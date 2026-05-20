@@ -26,6 +26,7 @@ import '../i18n/strings.g.dart';
 import 'media_context_menu.dart';
 import 'media_progress_bar.dart';
 import 'media_card_list_layout.dart';
+import 'backend_badge.dart';
 import 'optimized_media_image.dart';
 
 const _failedPosterUrlCacheLimit = 512;
@@ -58,6 +59,7 @@ class MediaCard extends StatefulWidget {
   final bool isOffline; // True for downloaded content without server access
   final bool mixedHubContext; // True when in a hub with mixed content (movies + episodes)
   final bool showServerName; // Show server name in list view (multi-server)
+  final EpisodePosterMode? episodePosterModeOverride;
 
   const MediaCard({
     super.key,
@@ -74,6 +76,7 @@ class MediaCard extends StatefulWidget {
     this.isOffline = false,
     this.mixedHubContext = false,
     this.showServerName = false,
+    this.episodePosterModeOverride,
   });
 
   @override
@@ -227,7 +230,7 @@ class MediaCardState extends State<MediaCard> with ContextMenuTapMixin<MediaCard
     final localPosterPath = _getLocalPosterPath(context, item);
 
     final cardWidget = viewMode == ViewMode.grid
-        ? _buildGridCard(context, item, semanticLabel, localPosterPath)
+        ? _buildGridCard(context, item, localPosterPath)
         : _MediaCardList(
             item: item,
             semanticLabel: semanticLabel,
@@ -240,6 +243,7 @@ class MediaCardState extends State<MediaCard> with ContextMenuTapMixin<MediaCard
             isOffline: widget.isOffline,
             localPosterPath: localPosterPath,
             showServerName: widget.showServerName,
+            episodePosterModeOverride: widget.episodePosterModeOverride,
           );
 
     // MediaContextMenu as a non-widget helper — only wrap with its key for
@@ -259,7 +263,7 @@ class MediaCardState extends State<MediaCard> with ContextMenuTapMixin<MediaCard
 
   /// Grid layout — inlined from former _MediaCardGrid, _PosterOverlay, and
   /// flattened Column. Semantics removed (InkWell provides button semantics).
-  Widget _buildGridCard(BuildContext context, Object item, String semanticLabel, String? localPosterPath) {
+  Widget _buildGridCard(BuildContext context, Object item, String? localPosterPath) {
     // Compute actual poster dimensions from card dimensions
     final posterWidth = widget.width != null ? widget.width! - 6 : null; // 3px padding each side
     final posterHeight = widget.height;
@@ -267,6 +271,7 @@ class MediaCardState extends State<MediaCard> with ContextMenuTapMixin<MediaCard
     return SizedBox(
       width: widget.width,
       child: InkWell(
+        mouseCursor: SystemMouseCursors.click,
         canRequestFocus: false,
         onTap: () => _handleTap(context, item),
         onTapDown: storeTapPosition,
@@ -295,6 +300,7 @@ class MediaCardState extends State<MediaCard> with ContextMenuTapMixin<MediaCard
                           isOffline: widget.isOffline,
                           localPosterPath: localPosterPath,
                           mixedHubContext: widget.mixedHubContext,
+                          episodePosterModeOverride: widget.episodePosterModeOverride,
                           knownWidth: posterWidth,
                           knownHeight: posterHeight,
                         ),
@@ -315,6 +321,7 @@ class MediaCardState extends State<MediaCard> with ContextMenuTapMixin<MediaCard
                           isOffline: widget.isOffline,
                           localPosterPath: localPosterPath,
                           mixedHubContext: widget.mixedHubContext,
+                          episodePosterModeOverride: widget.episodePosterModeOverride,
                         ),
                       ),
                       if (item is MediaItem) _MediaCardHelpers.buildWatchProgress(context, item),
@@ -362,6 +369,7 @@ class _MediaCardList extends StatelessWidget {
   final bool isOffline;
   final String? localPosterPath;
   final bool showServerName;
+  final EpisodePosterMode? episodePosterModeOverride;
 
   const _MediaCardList({
     required this.item,
@@ -375,18 +383,20 @@ class _MediaCardList extends StatelessWidget {
     this.isOffline = false,
     this.localPosterPath,
     this.showServerName = false,
+    this.episodePosterModeOverride,
   });
 
   bool _usesWideAspectRatio() {
     if (item is! MediaItem) return false;
-    final mode = SettingsService.instanceOrNull!.read(SettingsService.episodePosterMode);
+    final EpisodePosterMode mode =
+        episodePosterModeOverride ?? SettingsService.instanceOrNull!.read(SettingsService.episodePosterMode);
     return (item as MediaItem).usesWideAspectRatio(mode);
   }
 
-  double _posterWidth(BuildContext context) =>
+  double _posterWidth() =>
       MediaCardListLayout.posterWidth(density: density, usesWideAspectRatio: _usesWideAspectRatio());
 
-  double _posterHeight(BuildContext context) =>
+  double _posterHeight() =>
       MediaCardListLayout.posterHeight(density: density, usesWideAspectRatio: _usesWideAspectRatio());
 
   double get _titleFontSize => 13 + LibraryDensity.factor(density) * 3; // 13–16
@@ -459,7 +469,7 @@ class _MediaCardList extends StatelessWidget {
     return parts.join(' • ');
   }
 
-  String? _buildSubtitleText(BuildContext context) {
+  String? _buildSubtitleText() {
     if (item is MediaPlaylist) {
       return null;
     } else if (item is MediaItem) {
@@ -521,9 +531,10 @@ class _MediaCardList extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final metadataLine = _buildMetadataLine();
-    final subtitle = _buildSubtitleText(context);
+    final subtitle = _buildSubtitleText();
 
     return InkWell(
+      mouseCursor: SystemMouseCursors.click,
       canRequestFocus: false, // Keyboard handled by FocusableMediaCard
       onTap: onTap,
       onTapDown: onTapDown,
@@ -537,13 +548,19 @@ class _MediaCardList extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             SizedBox(
-              width: _posterWidth(context),
-              height: _posterHeight(context),
+              width: _posterWidth(),
+              height: _posterHeight(),
               child: Stack(
                 children: [
                   ClipRRect(
                     borderRadius: BorderRadius.circular(tokens(context).radiusSm),
-                    child: _buildPosterImage(context, item, isOffline: isOffline, localPosterPath: localPosterPath),
+                    child: _buildPosterImage(
+                      context,
+                      item,
+                      isOffline: isOffline,
+                      localPosterPath: localPosterPath,
+                      episodePosterModeOverride: episodePosterModeOverride,
+                    ),
                   ),
                   if (item is MediaItem) _MediaCardHelpers.buildWatchProgress(context, item as MediaItem),
                 ],
@@ -619,9 +636,8 @@ class _MediaCardList extends StatelessWidget {
                     const SizedBox(height: 4),
                     Row(
                       children: [
-                        AppIcon(
-                          Symbols.dns_rounded,
-                          fill: 1,
+                        BackendBadge(
+                          backend: (item as MediaItem).backend,
                           size: _metadataFontSize + 2,
                           color: tokens(context).textMuted.withValues(alpha: 0.6),
                         ),
@@ -650,21 +666,29 @@ class _MediaCardList extends StatelessWidget {
   }
 }
 
+Widget _buildPosterLoadingPlaceholder(BuildContext context, String _) {
+  return ColoredBox(color: Theme.of(context).colorScheme.surfaceContainerHighest, child: const SizedBox.expand());
+}
+
+IconData _mediaPosterFallbackIcon(MediaItem item) {
+  if (item.isShow || item.isSeason || item.isEpisode) return Symbols.tv_rounded;
+  return Symbols.movie_rounded;
+}
+
 Widget _buildPosterImage(
   BuildContext context,
   Object item, {
   bool isOffline = false,
   String? localPosterPath,
   bool mixedHubContext = false,
+  EpisodePosterMode? episodePosterModeOverride,
   double? knownWidth,
   double? knownHeight,
 }) {
   String? posterUrl;
-  IconData fallbackIcon = Symbols.movie_rounded;
 
   if (item is MediaPlaylist) {
     posterUrl = item.displayImagePath;
-    fallbackIcon = Symbols.playlist_play_rounded;
 
     return OptimizedMediaImage.playlist(
       client: isOffline ? null : context.tryGetMediaClientWithFallback(item.serverId),
@@ -672,10 +696,12 @@ Widget _buildPosterImage(
       width: knownWidth ?? double.infinity,
       height: knownHeight ?? double.infinity,
       fit: BoxFit.cover,
+      placeholder: _buildPosterLoadingPlaceholder,
       localFilePath: localPosterPath,
     );
   } else if (item is MediaItem) {
-    final episodePosterMode = SettingsService.instanceOrNull!.read(SettingsService.episodePosterMode);
+    final EpisodePosterMode episodePosterMode =
+        episodePosterModeOverride ?? SettingsService.instanceOrNull!.read(SettingsService.episodePosterMode);
     final hideSpoilers = SettingsService.instanceOrNull!.read(SettingsService.hideSpoilers);
     final shouldBlur =
         hideSpoilers && item.shouldHideSpoiler && episodePosterMode == EpisodePosterMode.episodeThumbnail;
@@ -684,6 +710,7 @@ Widget _buildPosterImage(
     final useRememberedFallback = posterFallbackUrl != null && _hasFailedPosterUrl(primaryPosterUrl);
     posterUrl = useRememberedFallback ? posterFallbackUrl : primaryPosterUrl;
     final mediaClient = isOffline ? null : context.tryGetMediaClientWithFallback(item.serverId);
+    final fallbackIcon = _mediaPosterFallbackIcon(item);
 
     Widget image;
 
@@ -695,6 +722,8 @@ Widget _buildPosterImage(
         width: knownWidth ?? double.infinity,
         height: knownHeight ?? double.infinity,
         fit: BoxFit.cover,
+        placeholder: _buildPosterLoadingPlaceholder,
+        fallbackIcon: fallbackIcon,
         localFilePath: localPosterPath,
       );
     } else {
@@ -704,6 +733,8 @@ Widget _buildPosterImage(
         width: knownWidth ?? double.infinity,
         height: knownHeight ?? double.infinity,
         fit: BoxFit.cover,
+        placeholder: _buildPosterLoadingPlaceholder,
+        fallbackIcon: fallbackIcon,
         errorWidget: posterFallbackUrl == null || useRememberedFallback
             ? null
             : (_, _, _) {
@@ -714,6 +745,8 @@ Widget _buildPosterImage(
                   width: knownWidth ?? double.infinity,
                   height: knownHeight ?? double.infinity,
                   fit: BoxFit.cover,
+                  placeholder: _buildPosterLoadingPlaceholder,
+                  fallbackIcon: fallbackIcon,
                 );
               },
         localFilePath: localPosterPath,
@@ -729,7 +762,7 @@ Widget _buildPosterImage(
   }
 
   return SkeletonLoader(
-    child: Center(child: AppIcon(fallbackIcon, fill: 1, size: 40, color: Colors.white54)),
+    child: const Center(child: AppIcon(Symbols.movie_rounded, fill: 1, size: 40, color: Colors.white54)),
   );
 }
 
@@ -909,6 +942,8 @@ void _navigateToSeason(BuildContext context, MediaItem episode, {bool isOffline 
       title: episode.grandparentTitle ?? episode.displayTitle,
       thumbPath: episode.grandparentThumbPath,
       artPath: episode.grandparentArtPath,
+      libraryId: episode.libraryId,
+      libraryTitle: episode.libraryTitle,
       serverId: episode.serverId,
       serverName: episode.serverName,
     );
@@ -929,6 +964,8 @@ void _navigateToSeason(BuildContext context, MediaItem episode, {bool isOffline 
       index: episode.parentIndex,
       parentId: episode.grandparentId,
       thumbPath: episode.parentThumbPath,
+      libraryId: episode.libraryId,
+      libraryTitle: episode.libraryTitle,
       serverId: episode.serverId,
       serverName: episode.serverName,
     );
@@ -956,6 +993,8 @@ void _navigateToDetail(BuildContext context, MediaItem mi, {bool isOffline = fal
       title: mi.grandparentTitle ?? mi.displayTitle,
       thumbPath: mi.grandparentThumbPath,
       artPath: mi.grandparentArtPath,
+      libraryId: mi.libraryId,
+      libraryTitle: mi.libraryTitle,
       serverId: mi.serverId,
       serverName: mi.serverName,
     );
@@ -968,6 +1007,8 @@ void _navigateToDetail(BuildContext context, MediaItem mi, {bool isOffline = fal
       title: mi.grandparentTitle ?? mi.parentTitle ?? mi.displayTitle,
       thumbPath: mi.grandparentThumbPath ?? mi.parentThumbPath,
       artPath: mi.grandparentArtPath,
+      libraryId: mi.libraryId,
+      libraryTitle: mi.libraryTitle,
       serverId: mi.serverId,
       serverName: mi.serverName,
     );

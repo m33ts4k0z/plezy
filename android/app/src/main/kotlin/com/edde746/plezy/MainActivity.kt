@@ -7,22 +7,30 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
+import android.graphics.SurfaceTexture
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.util.Rational
+import android.view.InputDevice
 import android.view.KeyEvent
+import android.view.TextureView
 import android.view.ViewGroup
+import android.view.WindowInsets
 import android.view.inputmethod.InputMethodManager
 import android.widget.FrameLayout
 import androidx.core.content.FileProvider
 import com.edde746.plezy.exoplayer.ExoPlayerPlugin
 import com.edde746.plezy.medianotification.MediaNotificationPlugin
 import com.edde746.plezy.mpv.MpvPlayerPlugin
+import com.edde746.plezy.shared.DeviceQuirks
 import com.edde746.plezy.shared.ThemeHelper
 import com.edde746.plezy.watchnext.WatchNextPlugin
 import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.android.FlutterTextureView
 import io.flutter.embedding.android.RenderMode
 import io.flutter.embedding.android.TransparencyMode
 import io.flutter.embedding.engine.FlutterEngine
@@ -50,9 +58,11 @@ class MainActivity : FlutterActivity() {
   private val EXTERNAL_PLAYER_CHANNEL = "com.plezy/external_player"
   private val THEME_CHANNEL = "com.plezy/theme"
   private val DEVICE_CHANNEL = "com.plezy/device"
+  private val TEXT_INPUT_CHANNEL = "com.plezy/text_input"
   private val APP_EXIT_CHANNEL = "com.plezy/app_exit"
   private val APP_FOREGROUND_CHANNEL = "com.plezy/app_foreground"
   private var watchNextPlugin: WatchNextPlugin? = null
+  private var nativeTextInputFocused = false
 
   // Auto PiP state
   private var autoPipReady = false
@@ -60,6 +70,67 @@ class MainActivity : FlutterActivity() {
   private var autoPipHeight: Int = 9
 
   private fun isAndroidTvDevice(): Boolean = getAndroidTvDetection()["isTv"] as Boolean
+
+  private fun isImeVisible(): Boolean {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return false
+    return window.decorView.rootWindowInsets?.isVisible(WindowInsets.Type.ime()) == true
+  }
+
+  private fun keyActionName(action: Int): String = when (action) {
+    KeyEvent.ACTION_DOWN -> "down"
+    KeyEvent.ACTION_UP -> "up"
+    KeyEvent.ACTION_MULTIPLE -> "multiple"
+    else -> "unknown($action)"
+  }
+
+  private fun sourceNames(source: Int): String {
+    val names = mutableListOf<String>()
+    if ((source and InputDevice.SOURCE_KEYBOARD) == InputDevice.SOURCE_KEYBOARD) names.add("keyboard")
+    if ((source and InputDevice.SOURCE_DPAD) == InputDevice.SOURCE_DPAD) names.add("dpad")
+    if ((source and InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD) names.add("gamepad")
+    if ((source and InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK) names.add("joystick")
+    if ((source and InputDevice.SOURCE_TOUCHSCREEN) == InputDevice.SOURCE_TOUCHSCREEN) names.add("touchscreen")
+    if ((source and InputDevice.SOURCE_MOUSE) == InputDevice.SOURCE_MOUSE) names.add("mouse")
+    return names.ifEmpty { listOf("unknown") }.joinToString("+")
+  }
+
+  private fun isDpadKeyCode(keyCode: Int): Boolean = when (keyCode) {
+    KeyEvent.KEYCODE_DPAD_UP,
+    KeyEvent.KEYCODE_DPAD_DOWN,
+    KeyEvent.KEYCODE_DPAD_LEFT,
+    KeyEvent.KEYCODE_DPAD_RIGHT,
+    KeyEvent.KEYCODE_DPAD_CENTER,
+    KeyEvent.KEYCODE_BACK,
+    KeyEvent.KEYCODE_ENTER,
+    KeyEvent.KEYCODE_NUMPAD_ENTER -> true
+    else -> false
+  }
+
+  private fun describeDevice(event: KeyEvent): String {
+    val device = event.device ?: return "device=null deviceId=${event.deviceId}"
+    return "deviceId=${event.deviceId} name=${device.name} vendor=${device.vendorId} product=${device.productId} " +
+      "keyboardType=${device.keyboardType} sources=0x${Integer.toHexString(device.sources)}[${sourceNames(device.sources)}]"
+  }
+
+  private fun describeKeyEvent(event: KeyEvent): String = "action=${keyActionName(event.action)} key=${KeyEvent.keyCodeToString(event.keyCode)}(${event.keyCode}) " +
+    "scan=${event.scanCode} repeat=${event.repeatCount} source=0x${Integer.toHexString(event.source)}[${sourceNames(event.source)}] " +
+    "flags=0x${Integer.toHexString(event.flags)} meta=0x${Integer.toHexString(event.metaState)} ${describeDevice(event)}"
+
+  private fun describeImeState(): String {
+    val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+    val focus = currentFocus
+    return "nativeTextInputFocused=$nativeTextInputFocused imeVisible=${isImeVisible()} " +
+      "acceptingText=${imm.isAcceptingText} activeDecor=${imm.isActive(window.decorView)} " +
+      "decorHasFocus=${window.decorView.hasFocus()} currentFocus=${focus?.javaClass?.name} " +
+      "currentFocusHasFocus=${focus?.hasFocus()} currentFocusFocused=${focus?.isFocused}"
+  }
+
+  private fun shouldForwardDpadBeforeIme(): Boolean {
+    val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+    val forward = !nativeTextInputFocused && !isImeVisible() && !imm.isAcceptingText
+    Log.i(TAG, "TextInputDiag shouldForwardDpadBeforeIme=$forward ${describeImeState()}")
+    return forward
+  }
 
   private fun getAndroidTvDetection(): Map<String, Any> {
     val pm = packageManager
@@ -124,20 +195,28 @@ class MainActivity : FlutterActivity() {
     val content = findViewById<ViewGroup>(android.R.id.content)
     val wrapper = object : FrameLayout(this) {
       override fun dispatchKeyEventPreIme(event: KeyEvent): Boolean {
+        if (isDpadKeyCode(event.keyCode)) {
+          Log.i(TAG, "TextInputDiag preIme received ${describeKeyEvent(event)} ${describeImeState()}")
+        }
         when (event.keyCode) {
           KeyEvent.KEYCODE_DPAD_UP,
           KeyEvent.KEYCODE_DPAD_DOWN,
           KeyEvent.KEYCODE_DPAD_LEFT,
           KeyEvent.KEYCODE_DPAD_RIGHT,
           KeyEvent.KEYCODE_DPAD_CENTER -> {
-            val imm = context.getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
-            if (!imm.isAcceptingText) {
+            if (shouldForwardDpadBeforeIme()) {
+              Log.i(TAG, "TextInputDiag preIme forwarding-to-Flutter-and-consuming ${describeKeyEvent(event)}")
               super.dispatchKeyEvent(event)
               return true
             }
+            Log.i(TAG, "TextInputDiag preIme letting-IME-handle ${describeKeyEvent(event)}")
           }
         }
-        return super.dispatchKeyEventPreIme(event)
+        val handled = super.dispatchKeyEventPreIme(event)
+        if (isDpadKeyCode(event.keyCode)) {
+          Log.i(TAG, "TextInputDiag preIme superResult=$handled ${describeKeyEvent(event)} ${describeImeState()}")
+        }
+        return handled
       }
     }
     while (content.childCount > 0) {
@@ -172,6 +251,17 @@ class MainActivity : FlutterActivity() {
     super.onDestroy()
   }
 
+  override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+    if (isDpadKeyCode(event.keyCode)) {
+      Log.i(TAG, "TextInputDiag activity.dispatchKeyEvent before ${describeKeyEvent(event)} ${describeImeState()}")
+    }
+    val handled = super.dispatchKeyEvent(event)
+    if (isDpadKeyCode(event.keyCode)) {
+      Log.i(TAG, "TextInputDiag activity.dispatchKeyEvent after handled=$handled ${describeKeyEvent(event)} ${describeImeState()}")
+    }
+    return handled
+  }
+
   private fun handleWatchNextIntent(intent: Intent?) {
     val contentId = WatchNextPlugin.handleIntent(intent)
     if (contentId != null) {
@@ -190,16 +280,7 @@ class MainActivity : FlutterActivity() {
   private fun shouldDisableImpeller(): Boolean {
     // Android TV devices — weaker GPUs, less Impeller testing
     if (isAndroidTvDevice()) return true
-    // Google Tensor SoC (Mali GPU) — Pixel 6+
-    // SOC_MODEL may return marketing name ("Tensor G2") or internal ID ("GS201")
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-      val soc = Build.SOC_MODEL
-      if (soc.startsWith("Tensor", ignoreCase = true) ||
-        soc.startsWith("GS", ignoreCase = true)
-      ) {
-        return true
-      }
-    }
+    if (DeviceQuirks.isEWaste) return true
     // NVIDIA Tegra (Shield TV)
     if (Build.MANUFACTURER.equals("NVIDIA", ignoreCase = true)) return true
     // Huawei/HONOR Kirin SoCs use Mali GPUs
@@ -211,11 +292,55 @@ class MainActivity : FlutterActivity() {
     return false
   }
 
-  override fun getRenderMode(): RenderMode = RenderMode.surface
+  override fun getRenderMode(): RenderMode {
+    // Keep Flutter in the normal View hierarchy so video/subtitle SurfaceViews
+    // remain the only native composition layers. This restores the pre-1.35.0
+    // behavior and avoids compositor regressions with Dolby Vision playback.
+    return RenderMode.texture
+  }
 
   override fun getTransparencyMode(): TransparencyMode {
     // Keep Flutter transparent so video/subtitles are visible below.
     return TransparencyMode.transparent
+  }
+
+  override fun onFlutterTextureViewCreated(flutterTextureView: FlutterTextureView) {
+    val original = flutterTextureView.surfaceTextureListener ?: return
+    val handler = Handler(Looper.getMainLooper())
+    var pendingResize: Runnable? = null
+    var lastWidth = 0
+    var lastHeight = 0
+
+    flutterTextureView.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+      override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
+        original.onSurfaceTextureAvailable(surface, width, height)
+      }
+
+      override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {
+        if (width == lastWidth && height == lastHeight) return
+        lastWidth = width
+        lastHeight = height
+        pendingResize?.let { handler.removeCallbacks(it) }
+        pendingResize = Runnable {
+          if (flutterTextureView.isAvailable) {
+            original.onSurfaceTextureSizeChanged(surface, width, height)
+          }
+        }
+        handler.postDelayed(pendingResize!!, 100)
+      }
+
+      override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
+        original.onSurfaceTextureUpdated(surface)
+      }
+
+      override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean {
+        pendingResize?.let { handler.removeCallbacks(it) }
+        pendingResize = null
+        lastWidth = 0
+        lastHeight = 0
+        return original.onSurfaceTextureDestroyed(surface)
+      }
+    }
   }
 
   override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
@@ -227,6 +352,21 @@ class MainActivity : FlutterActivity() {
     MethodChannel(flutterEngine.dartExecutor.binaryMessenger, DEVICE_CHANNEL).setMethodCallHandler { call, result ->
       when (call.method) {
         "getTvDetection" -> result.success(getAndroidTvDetection())
+        else -> result.notImplemented()
+      }
+    }
+
+    MethodChannel(flutterEngine.dartExecutor.binaryMessenger, TEXT_INPUT_CHANNEL).setMethodCallHandler { call, result ->
+      when (call.method) {
+        "setNativeTextInputFocused" -> {
+          val oldValue = nativeTextInputFocused
+          nativeTextInputFocused = call.arguments as? Boolean ?: false
+          Log.i(
+            TAG,
+            "TextInputDiag methodChannel setNativeTextInputFocused old=$oldValue new=$nativeTextInputFocused ${describeImeState()}"
+          )
+          result.success(null)
+        }
         else -> result.notImplemented()
       }
     }

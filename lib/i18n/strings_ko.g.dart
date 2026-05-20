@@ -49,6 +49,7 @@ class TranslationsKo extends Translations with BaseTranslations<AppLocale, Trans
 	@override late final _TranslationsHotkeysKo hotkeys = _TranslationsHotkeysKo._(_root);
 	@override late final _TranslationsFileInfoKo fileInfo = _TranslationsFileInfoKo._(_root);
 	@override late final _TranslationsMediaMenuKo mediaMenu = _TranslationsMediaMenuKo._(_root);
+	@override late final _TranslationsRateSheetKo rateSheet = _TranslationsRateSheetKo._(_root);
 	@override late final _TranslationsAccessibilityKo accessibility = _TranslationsAccessibilityKo._(_root);
 	@override late final _TranslationsTooltipsKo tooltips = _TranslationsTooltipsKo._(_root);
 	@override late final _TranslationsVideoControlsKo videoControls = _TranslationsVideoControlsKo._(_root);
@@ -375,6 +376,12 @@ class _TranslationsSettingsKo extends TranslationsSettingsEn {
 	@override String get displaySwitchDelay => '디스플레이 전환 지연';
 	@override String get tunneledPlayback => '터널 재생';
 	@override String get tunneledPlaybackDescription => '비디오 터널링을 사용합니다. HDR 재생 시 검은 화면이 보이면 비활성화하세요.';
+	@override String get dvConversionMode => 'Dolby Vision 변환';
+	@override String get dvConversionModeDescription => 'ExoPlayer가 Dolby Vision Profile 7 파일을 처리하는 방식을 선택합니다.';
+	@override String get dvConversionAuto => '자동';
+	@override String get dvConversionNative => '네이티브 / 비활성화';
+	@override String get dvConversionDv81 => 'P7 → P8.1';
+	@override String get dvConversionHevcStrip => 'P7 → HEVC';
 	@override String get requireProfileSelectionOnOpen => '앱 실행 시 프로필 선택';
 	@override String get requireProfileSelectionOnOpenDescription => '앱을 열 때마다 프로필 선택 화면을 표시합니다';
 	@override String get forceTvMode => 'TV 모드 강제 사용';
@@ -481,6 +488,26 @@ class _TranslationsMediaMenuKo extends TranslationsMediaMenuEn {
 	@override String get playVersion => '버전 재생...';
 }
 
+// Path: rateSheet
+class _TranslationsRateSheetKo extends TranslationsRateSheetEn {
+	_TranslationsRateSheetKo._(TranslationsKo root) : this._root = root, super.internal(root);
+
+	final TranslationsKo _root; // ignore: unused_field
+
+	// Translations
+	@override String get title => '평가';
+	@override String get server => '서버';
+	@override String starValue({required Object rating}) => '${rating} / 5';
+	@override String scoreValue({required Object score}) => '${score} / 10';
+	@override String get setScore => '점수 설정';
+	@override String get notRated => '평가 없음';
+	@override String get liked => '좋아요';
+	@override String get notLiked => '좋아요 아님';
+	@override String get saved => '저장됨';
+	@override String get notAvailable => '일치 항목 없음';
+	@override String get noConnectedTrackers => '설정에서 트래커를 연결하면 거기에도 평가할 수 있습니다.';
+}
+
 // Path: accessibility
 class _TranslationsAccessibilityKo extends TranslationsAccessibilityEn {
 	_TranslationsAccessibilityKo._(TranslationsKo root) : this._root = root, super.internal(root);
@@ -574,6 +601,7 @@ class _TranslationsVideoControlsKo extends TranslationsVideoControlsEn {
 	@override String endsAt({required Object time}) => '${time}에 종료';
 	@override String get pipActive => '화면 속 화면으로 재생 중';
 	@override String get pipFailed => '화면 속 화면 모드를 시작할 수 없습니다';
+	@override String get screenshotSaved => '스크린샷 저장됨';
 	@override late final _TranslationsVideoControlsPipErrorsKo pipErrors = _TranslationsVideoControlsPipErrorsKo._(_root);
 	@override String get chapters => '챕터';
 	@override String get noChaptersAvailable => '사용 가능한 챕터가 없습니다';
@@ -736,18 +764,32 @@ class _TranslationsProfilesKo extends TranslationsProfilesEn {
 	@override String get pinManagedByPlex => 'PIN은 Plex에서 관리됩니다. plex.tv에서 편집하세요.';
 	@override String get noPinSetEditOnPlex => '설정된 PIN이 없습니다. 요구하려면 plex.tv에서 Home 사용자를 편집하세요.';
 	@override String get setPin => 'PIN 설정';
+	@override String get setPinTitle => 'PIN 설정';
+	@override String get confirmPinTitle => 'PIN 확인';
+	@override String get pinSet => 'PIN 설정됨';
+	@override String get changePin => '변경';
+	@override String get removePin => '제거';
 	@override String get connectionsLabel => '연결';
 	@override String get add => '추가';
 	@override String get deleteProfileButton => '프로필 삭제';
 	@override String get noConnectionsHint => '연결이 없습니다 — 이 프로필을 사용하려면 하나 추가하세요.';
+	@override String get noConnections => '연결 없음';
 	@override String get plexHomeAccount => 'Plex Home 계정';
 	@override String get connectionDefault => '기본값';
+	@override String connectionAs({required Object displayName}) => '${displayName}(으)로';
 	@override String get makeDefault => '기본값으로 설정';
 	@override String get removeConnection => '제거';
+	@override String get profileRenamed => '프로필 이름이 변경되었습니다.';
 	@override String borrowAddTo({required Object displayName}) => '${displayName}에 추가';
 	@override String get borrowExplain => '다른 프로필의 연결을 빌립니다. PIN으로 보호된 프로필에는 PIN이 필요합니다.';
 	@override String get borrowEmpty => '아직 빌릴 것이 없습니다.';
 	@override String get borrowEmptySubtitle => '먼저 다른 프로필에 Plex 또는 Jellyfin을 연결하세요.';
+	@override String borrowFromProfile({required Object displayName}) => '${displayName}에서';
+	@override String get borrowConnectionBorrowed => '연결을 빌렸습니다.';
+	@override String get borrowFailed => '연결을 빌리지 못했습니다.';
+	@override String get incorrectPin => 'PIN이 올바르지 않습니다.';
+	@override String get sourceProfileMissingParentAccount => '원본 프로필에 상위 계정이 없습니다.';
+	@override String get failedToVerifyPin => 'PIN을 확인하지 못했습니다.';
 	@override String get newProfile => '새 프로필';
 	@override String get profileNameHint => '예: 손님, 어린이, 가족실';
 	@override String get pinProtectionOptional => 'PIN 보호 (선택 사항)';
@@ -1521,6 +1563,7 @@ class _TranslationsHotkeysActionsKo extends TranslationsHotkeysActionsEn {
 	@override String get subSeekPrev => '이전 자막으로 이동';
 	@override String get shaderToggle => '셰이더 전환';
 	@override String get skipMarker => '인트로/크레딧 건너뛰기';
+	@override String get screenshot => '스크린샷 찍기';
 }
 
 // Path: videoControls.pipErrors
@@ -1592,8 +1635,18 @@ class _TranslationsLibrariesSortLabelsKo extends TranslationsLibrariesSortLabels
 	@override String get dateAdded => '추가된 날짜';
 	@override String get releaseDate => '출시일';
 	@override String get rating => '평점';
+	@override String get communityRating => '커뮤니티 평점';
+	@override String get criticRating => '평론가 평점';
 	@override String get lastPlayed => '마지막 재생';
+	@override String get datePlayed => '재생일';
 	@override String get playCount => '재생 횟수';
+	@override String get productionYear => '제작 연도';
+	@override String get runtime => '재생 시간';
+	@override String get officialRating => '공식 등급';
+	@override String get premiereDate => '최초 공개일';
+	@override String get startDate => '시작일';
+	@override String get airTime => '방영 시간';
+	@override String get studio => '스튜디오';
 	@override String get random => '무작위';
 	@override String get dateShared => '공유된 날짜';
 	@override String get latestEpisodeAirDate => '최신 에피소드 방영일';
@@ -1986,6 +2039,12 @@ extension on TranslationsKo {
 			'settings.displaySwitchDelay' => '디스플레이 전환 지연',
 			'settings.tunneledPlayback' => '터널 재생',
 			'settings.tunneledPlaybackDescription' => '비디오 터널링을 사용합니다. HDR 재생 시 검은 화면이 보이면 비활성화하세요.',
+			'settings.dvConversionMode' => 'Dolby Vision 변환',
+			'settings.dvConversionModeDescription' => 'ExoPlayer가 Dolby Vision Profile 7 파일을 처리하는 방식을 선택합니다.',
+			'settings.dvConversionAuto' => '자동',
+			'settings.dvConversionNative' => '네이티브 / 비활성화',
+			'settings.dvConversionDv81' => 'P7 → P8.1',
+			'settings.dvConversionHevcStrip' => 'P7 → HEVC',
 			'settings.requireProfileSelectionOnOpen' => '앱 실행 시 프로필 선택',
 			'settings.requireProfileSelectionOnOpenDescription' => '앱을 열 때마다 프로필 선택 화면을 표시합니다',
 			'settings.forceTvMode' => 'TV 모드 강제 사용',
@@ -2034,6 +2093,7 @@ extension on TranslationsKo {
 			'hotkeys.actions.subSeekPrev' => '이전 자막으로 이동',
 			'hotkeys.actions.shaderToggle' => '셰이더 전환',
 			'hotkeys.actions.skipMarker' => '인트로/크레딧 건너뛰기',
+			'hotkeys.actions.screenshot' => '스크린샷 찍기',
 			'fileInfo.title' => '파일 정보',
 			'fileInfo.video' => '비디오',
 			'fileInfo.audio' => '오디오',
@@ -2074,6 +2134,17 @@ extension on TranslationsKo {
 			'mediaMenu.rate' => '평가',
 			'mediaMenu.playFromBeginning' => '처음부터 재생',
 			'mediaMenu.playVersion' => '버전 재생...',
+			'rateSheet.title' => '평가',
+			'rateSheet.server' => '서버',
+			'rateSheet.starValue' => ({required Object rating}) => '${rating} / 5',
+			'rateSheet.scoreValue' => ({required Object score}) => '${score} / 10',
+			'rateSheet.setScore' => '점수 설정',
+			'rateSheet.notRated' => '평가 없음',
+			'rateSheet.liked' => '좋아요',
+			'rateSheet.notLiked' => '좋아요 아님',
+			'rateSheet.saved' => '저장됨',
+			'rateSheet.notAvailable' => '일치 항목 없음',
+			'rateSheet.noConnectedTrackers' => '설정에서 트래커를 연결하면 거기에도 평가할 수 있습니다.',
 			'accessibility.mediaCardMovie' => ({required Object title}) => '${title}, 영화',
 			'accessibility.mediaCardShow' => ({required Object title}) => '${title}, TV 프로그램',
 			'accessibility.mediaCardEpisode' => ({required Object title, required Object episodeInfo}) => '${title}, ${episodeInfo}',
@@ -2142,6 +2213,7 @@ extension on TranslationsKo {
 			'videoControls.endsAt' => ({required Object time}) => '${time}에 종료',
 			'videoControls.pipActive' => '화면 속 화면으로 재생 중',
 			'videoControls.pipFailed' => '화면 속 화면 모드를 시작할 수 없습니다',
+			'videoControls.screenshotSaved' => '스크린샷 저장됨',
 			'videoControls.pipErrors.androidVersion' => 'Android 8.0 이상이 필요합니다',
 			'videoControls.pipErrors.iosVersion' => 'iOS 15.0 이상이 필요합니다',
 			'videoControls.pipErrors.permissionDisabled' => '화면 속 화면이 비활성화되어 있습니다. 시스템 설정에서 활성화하세요.',
@@ -2241,6 +2313,8 @@ extension on TranslationsKo {
 			'profiles.signOut' => '로그아웃',
 			'profiles.signOutPlexTitle' => 'Plex에서 로그아웃하시겠습니까?',
 			'profiles.signOutPlexMessage' => ({required Object displayName}) => '${displayName} 및 모든 Plex Home 사용자를 제거할까요? 언제든 다시 로그인할 수 있습니다.',
+			_ => null,
+		} ?? switch (path) {
 			'profiles.signedOutPlex' => 'Plex에서 로그아웃되었습니다.',
 			'profiles.signOutFailed' => '로그아웃에 실패했습니다.',
 			'profiles.sectionTitle' => '프로필',
@@ -2256,20 +2330,32 @@ extension on TranslationsKo {
 			'profiles.pinManagedByPlex' => 'PIN은 Plex에서 관리됩니다. plex.tv에서 편집하세요.',
 			'profiles.noPinSetEditOnPlex' => '설정된 PIN이 없습니다. 요구하려면 plex.tv에서 Home 사용자를 편집하세요.',
 			'profiles.setPin' => 'PIN 설정',
+			'profiles.setPinTitle' => 'PIN 설정',
+			'profiles.confirmPinTitle' => 'PIN 확인',
+			'profiles.pinSet' => 'PIN 설정됨',
+			'profiles.changePin' => '변경',
+			'profiles.removePin' => '제거',
 			'profiles.connectionsLabel' => '연결',
 			'profiles.add' => '추가',
 			'profiles.deleteProfileButton' => '프로필 삭제',
 			'profiles.noConnectionsHint' => '연결이 없습니다 — 이 프로필을 사용하려면 하나 추가하세요.',
-			_ => null,
-		} ?? switch (path) {
+			'profiles.noConnections' => '연결 없음',
 			'profiles.plexHomeAccount' => 'Plex Home 계정',
 			'profiles.connectionDefault' => '기본값',
+			'profiles.connectionAs' => ({required Object displayName}) => '${displayName}(으)로',
 			'profiles.makeDefault' => '기본값으로 설정',
 			'profiles.removeConnection' => '제거',
+			'profiles.profileRenamed' => '프로필 이름이 변경되었습니다.',
 			'profiles.borrowAddTo' => ({required Object displayName}) => '${displayName}에 추가',
 			'profiles.borrowExplain' => '다른 프로필의 연결을 빌립니다. PIN으로 보호된 프로필에는 PIN이 필요합니다.',
 			'profiles.borrowEmpty' => '아직 빌릴 것이 없습니다.',
 			'profiles.borrowEmptySubtitle' => '먼저 다른 프로필에 Plex 또는 Jellyfin을 연결하세요.',
+			'profiles.borrowFromProfile' => ({required Object displayName}) => '${displayName}에서',
+			'profiles.borrowConnectionBorrowed' => '연결을 빌렸습니다.',
+			'profiles.borrowFailed' => '연결을 빌리지 못했습니다.',
+			'profiles.incorrectPin' => 'PIN이 올바르지 않습니다.',
+			'profiles.sourceProfileMissingParentAccount' => '원본 프로필에 상위 계정이 없습니다.',
+			'profiles.failedToVerifyPin' => 'PIN을 확인하지 못했습니다.',
 			'profiles.newProfile' => '새 프로필',
 			'profiles.profileNameHint' => '예: 손님, 어린이, 가족실',
 			'profiles.pinProtectionOptional' => 'PIN 보호 (선택 사항)',
@@ -2372,8 +2458,18 @@ extension on TranslationsKo {
 			'libraries.sortLabels.dateAdded' => '추가된 날짜',
 			'libraries.sortLabels.releaseDate' => '출시일',
 			'libraries.sortLabels.rating' => '평점',
+			'libraries.sortLabels.communityRating' => '커뮤니티 평점',
+			'libraries.sortLabels.criticRating' => '평론가 평점',
 			'libraries.sortLabels.lastPlayed' => '마지막 재생',
+			'libraries.sortLabels.datePlayed' => '재생일',
 			'libraries.sortLabels.playCount' => '재생 횟수',
+			'libraries.sortLabels.productionYear' => '제작 연도',
+			'libraries.sortLabels.runtime' => '재생 시간',
+			'libraries.sortLabels.officialRating' => '공식 등급',
+			'libraries.sortLabels.premiereDate' => '최초 공개일',
+			'libraries.sortLabels.startDate' => '시작일',
+			'libraries.sortLabels.airTime' => '방영 시간',
+			'libraries.sortLabels.studio' => '스튜디오',
 			'libraries.sortLabels.random' => '무작위',
 			'libraries.sortLabels.dateShared' => '공유된 날짜',
 			'libraries.sortLabels.latestEpisodeAirDate' => '최신 에피소드 방영일',
@@ -2731,6 +2827,8 @@ extension on TranslationsKo {
 			'metadataEdit.summary' => '줄거리',
 			'metadataEdit.poster' => '포스터',
 			'metadataEdit.background' => '배경',
+			_ => null,
+		} ?? switch (path) {
 			'metadataEdit.logo' => '로고',
 			'metadataEdit.squareArt' => '정사각형 아트',
 			'metadataEdit.selectPoster' => '포스터 선택',
@@ -2774,8 +2872,6 @@ extension on TranslationsKo {
 			'metadataEdit.metadataLanguage' => '메타데이터 언어',
 			'metadataEdit.useOriginalTitle' => '원제 사용',
 			'metadataEdit.preferredAudioLanguage' => '선호 오디오 언어',
-			_ => null,
-		} ?? switch (path) {
 			'metadataEdit.preferredSubtitleLanguage' => '선호 자막 언어',
 			'metadataEdit.subtitleMode' => '자막 자동 선택 모드',
 			'metadataEdit.manuallySelected' => '수동 선택',

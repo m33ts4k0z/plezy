@@ -22,6 +22,7 @@ import '../../services/pip_service.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../../mixins/settings_effect_mixin.dart';
+import '../../mixins/mounted_set_state_mixin.dart';
 import '../../mpv/mpv.dart';
 import '../overlay_sheet.dart';
 import '../../focus/dpad_navigator.dart';
@@ -83,6 +84,7 @@ Widget plexVideoControlsBuilder(
   VoidCallback? onPrevious,
   List<MediaVersion>? availableVersions,
   int? selectedMediaIndex,
+  String? selectedMediaSourceId,
   TranscodeQualityPreset selectedQualityPreset = TranscodeQualityPreset.original,
   bool serverSupportsTranscoding = false,
   bool isTranscoding = false,
@@ -127,6 +129,7 @@ Widget plexVideoControlsBuilder(
     onPrevious: onPrevious,
     availableVersions: availableVersions ?? [],
     selectedMediaIndex: selectedMediaIndex ?? 0,
+    selectedMediaSourceId: selectedMediaSourceId,
     selectedQualityPreset: selectedQualityPreset,
     serverSupportsTranscoding: serverSupportsTranscoding,
     isTranscoding: isTranscoding,
@@ -208,6 +211,7 @@ class PlexVideoControls extends StatefulWidget {
   final VoidCallback? onPrevious;
   final List<MediaVersion> availableVersions;
   final int selectedMediaIndex;
+  final String? selectedMediaSourceId;
   final TranscodeQualityPreset selectedQualityPreset;
   final bool serverSupportsTranscoding;
   final bool isTranscoding;
@@ -297,6 +301,7 @@ class PlexVideoControls extends StatefulWidget {
     this.onPrevious,
     this.availableVersions = const [],
     this.selectedMediaIndex = 0,
+    this.selectedMediaSourceId,
     this.selectedQualityPreset = TranscodeQualityPreset.original,
     this.serverSupportsTranscoding = false,
     this.isTranscoding = false,
@@ -337,7 +342,8 @@ class PlexVideoControls extends StatefulWidget {
   State<PlexVideoControls> createState() => _PlexVideoControlsState();
 }
 
-class _PlexVideoControlsState extends State<PlexVideoControls> with WindowListener, SettingsEffectMixin {
+class _PlexVideoControlsState extends State<PlexVideoControls>
+    with WindowListener, SettingsEffectMixin, MountedSetStateMixin {
   bool _showControls = true;
   bool _forceShowControls = false;
   bool _isLoadingExtras = false;
@@ -501,7 +507,7 @@ class _PlexVideoControlsState extends State<PlexVideoControls> with WindowListen
     });
   }
 
-  void _setControlsState(VoidCallback fn) => setState(fn);
+  void _setControlsState(VoidCallback fn) => setStateIfMounted(fn);
 
   @override
   void dispose() {
@@ -785,7 +791,9 @@ class _PlexVideoControlsState extends State<PlexVideoControls> with WindowListen
                     ),
                   ),
                   // Skip intro/credits button (auto-dismisses after 7s, then only shows with controls)
-                  if (_currentMarker != null && (!_skipButtonDismissed || _showControls))
+                  if (_currentMarker != null &&
+                      widget.playNextFocusNode == null &&
+                      (!_skipButtonDismissed || _showControls))
                     AnimatedPositioned(
                       duration: const Duration(milliseconds: 200),
                       curve: Curves.easeInOut,
@@ -805,7 +813,7 @@ class _PlexVideoControlsState extends State<PlexVideoControls> with WindowListen
                     AnimatedPositioned(
                       duration: const Duration(milliseconds: 200),
                       curve: Curves.easeInOut,
-                      top: _showControls && isMobile ? 80.0 : 16.0,
+                      top: _showControls ? (isMobile ? 100.0 : 60.0) : 16.0,
                       left: 16,
                       child: AnimatedOpacity(
                         opacity: (!_autoHidePerformanceOverlay || _showControls || _forceShowControls) ? 1.0 : 0.0,

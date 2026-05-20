@@ -5,6 +5,7 @@ import 'package:collection/collection.dart';
 import 'package:flutter/foundation.dart' show protected;
 import 'package:flutter/services.dart';
 
+import '../../media/media_display_criteria.dart';
 import '../../utils/app_logger.dart';
 import '../../utils/track_label_builder.dart';
 import '../font_loader.dart';
@@ -438,18 +439,18 @@ abstract class PlayerBase with PlayerStreamControllersMixin implements Player {
       selectedTrack = _state.tracks.audio.firstWhereOrNull((t) => t.id == id);
     }
 
+    if (selectedTrack == null) return;
     _state = _state.copyWith(track: _state.track.copyWith(audio: selectedTrack));
     trackController.add(_state.track);
   }
 
   void updateSelectedSubtitleTrack(dynamic trackId) {
     final id = trackId?.toString();
-    SubtitleTrack? selectedTrack;
-
-    selectedTrack = (id == null || id == 'no')
+    final selectedTrack = (id == null || id == 'no')
         ? SubtitleTrack.off
         : _state.tracks.subtitle.firstWhereOrNull((t) => t.id == id);
 
+    if (selectedTrack == null) return;
     _state = _state.copyWith(track: _state.track.copyWith(subtitle: selectedTrack));
     trackController.add(_state.track);
   }
@@ -523,10 +524,13 @@ abstract class PlayerBase with PlayerStreamControllersMixin implements Player {
   }
 
   @override
-  Future<bool> setVisible(bool visible) async {
+  Future<void> setDisplayCriteria(MediaDisplayCriteria? criteria) async {}
+
+  @override
+  Future<bool> setVisible(bool visible, {bool restoreOnWindowVisible = false}) async {
     if (_disposed) return false;
     try {
-      await invoke('setVisible', {'visible': visible});
+      await invoke('setVisible', {'visible': visible, 'restoreOnWindowVisible': restoreOnWindowVisible});
       return true;
     } catch (e) {
       errorController.add(PlayerError('Failed to set visibility: $e'));

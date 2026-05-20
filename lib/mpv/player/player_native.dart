@@ -2,6 +2,7 @@ import 'dart:io' show Platform;
 
 import 'package:flutter/services.dart';
 
+import '../../media/media_display_criteria.dart';
 import '../models.dart';
 import '../../utils/app_logger.dart';
 import 'player_base.dart';
@@ -136,6 +137,7 @@ class PlayerNative extends PlayerBase {
     if (disposed) return;
     await _ensureInitialized();
     final startPosition = media.start ?? Duration.zero;
+    clearTracks();
     resetPlaybackProgress(startPosition);
     setSeekable(false);
 
@@ -289,6 +291,13 @@ class PlayerNative extends PlayerBase {
   // ============================================
   // Log Level
   // ============================================
+
+  @override
+  Future<void> setDisplayCriteria(MediaDisplayCriteria? criteria) async {
+    if (disposed || !Platform.isIOS) return;
+    await _ensureInitialized();
+    await invoke('setDisplayCriteria', {'criteria': criteria?.toJson()});
+  }
 
   @override
   Future<void> setLogLevel(String level) async {

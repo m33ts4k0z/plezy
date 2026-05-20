@@ -13,13 +13,17 @@ import '../../../i18n/strings.g.dart';
 import '../../../mixins/mounted_set_state_mixin.dart';
 import '../../../models/livetv_channel.dart';
 import '../../../models/livetv_program.dart';
+import '../../../models/media_grab_operation.dart';
 import '../../../providers/multi_server_provider.dart';
 import '../../../media/media_server_client.dart';
 import '../../../utils/app_logger.dart';
 import '../../../utils/formatters.dart';
+import '../../../utils/live_tv_grouping.dart';
+import '../../../utils/live_tv_matching.dart';
 import '../../../utils/media_image_helper.dart';
 import '../../../utils/live_tv_player_navigation.dart';
 import '../../../widgets/app_icon.dart';
+import '../../../widgets/clickable_cursor.dart';
 import '../../../widgets/overlay_sheet.dart';
 import '../../../widgets/optimized_media_image.dart';
 import '../program_details_sheet.dart';
@@ -46,14 +50,33 @@ class GuideTab extends StatefulWidget {
 
 enum _GuideZone { timeNav, grid }
 
+sealed class _GuideRow {
+  const _GuideRow();
+}
+
+final class _GuideSourceHeaderRow extends _GuideRow {
+  final String label;
+
+  const _GuideSourceHeaderRow({required this.label});
+}
+
+final class _GuideChannelRow extends _GuideRow {
+  final LiveTvChannel channel;
+  final int channelIndex;
+
+  const _GuideChannelRow({required this.channel, required this.channelIndex});
+}
+
 class GuideTabState extends State<GuideTab> with MountedSetStateMixin {
   static const _slotWidth = 180.0;
-  static const _channelColumnWidth = 100.0;
+  static const _channelColumnWidth = 132.0;
   static const _rowHeight = 64.0;
+  static const _sourceHeaderRowHeight = 40.0;
   static const _timeHeaderHeight = 40.0;
   static const _minutesPerSlot = 30;
 
   List<LiveTvProgram> _programs = [];
+  Set<String> _scheduledRecordingKeys = const {};
   bool _isLoading = true;
 
   late DateTime _gridStart;
@@ -125,6 +148,7 @@ class GuideTabState extends State<GuideTab> with MountedSetStateMixin {
       // ignore: no-empty-block - setState triggers rebuild to update time indicator
       setStateIfMounted(() {});
     });
+    unawaited(_refreshScheduledRecordingKeys());
   }
 
   @override
@@ -204,6 +228,7 @@ class GuideTabState extends State<GuideTab> with MountedSetStateMixin {
       final multiServer = context.read<MultiServerProvider>();
       final liveTvServers = multiServer.liveTvServers;
       final allPrograms = <LiveTvProgram>[];
+      final scheduledRecordingKeys = <String>{};
       final queriedServers = <String>{};
 
       for (final serverInfo in liveTvServers) {
@@ -219,6 +244,11 @@ class GuideTabState extends State<GuideTab> with MountedSetStateMixin {
           final toDt = DateTime.fromMillisecondsSinceEpoch(endEpoch * 1000, isUtc: true);
           final programs = await genericClient.liveTv.fetchSchedule(from: fromDt, to: toDt);
           allPrograms.addAll(programs);
+          await _addScheduledRecordingKeysForServer(
+            client: genericClient,
+            serverId: serverInfo.serverId,
+            keys: scheduledRecordingKeys,
+          );
         } catch (e) {
           appLogger.e('Failed to load programs from server ${serverInfo.serverId}', error: e);
         }
@@ -230,6 +260,7 @@ class GuideTabState extends State<GuideTab> with MountedSetStateMixin {
 
       setState(() {
         _programs = allPrograms;
+        _scheduledRecordingKeys = scheduledRecordingKeys;
         _isLoading = false;
       });
 
@@ -248,6 +279,148 @@ class GuideTabState extends State<GuideTab> with MountedSetStateMixin {
     }
   }
 
+  Future<void> _refreshScheduledRecordingKeys() async {
+    if (!mounted) return;
+    final multiServer = context.read<MultiServerProvider>();
+    final scheduledRecordingKeys = <String>{};
+    final queriedServers = <String>{};
+
+    for (final serverInfo in multiServer.liveTvServers) {
+      if (!queriedServers.add(serverInfo.serverId)) continue;
+      final client = multiServer.getClientForServer(serverInfo.serverId);
+      if (client == null) continue;
+      await _addScheduledRecordingKeysForServer(
+        client: client,
+        serverId: serverInfo.serverId,
+        keys: scheduledRecordingKeys,
+      );
+    }
+
+    if (!mounted) return;
+    setState(() => _scheduledRecordingKeys = scheduledRecordingKeys);
+  }
+
+  Future<void> _addScheduledRecordingKeysForServer({
+    required MediaServerClient client,
+    required String serverId,
+    required Set<String> keys,
+  }) async {
+    if (!client.capabilities.liveTvDvr) return;
+    try {
+      final grabs = await client.liveTv.fetchScheduledRecordings();
+      for (final grab in grabs) {
+        if (!_isActiveScheduledGrab(grab)) continue;
+        final program = grab.program;
+        if (program == null) continue;
+        keys.addAll(_recordingKeysForProgram(program, fallbackServerId: serverId));
+      }
+    } catch (e) {
+      appLogger.d('Failed to load scheduled recordings for $serverId', error: e);
+    }
+  }
+
+  bool _isActiveScheduledGrab(MediaGrabOperation grab) {
+    final status = grab.status?.toLowerCase();
+    return status == null || status.isEmpty || status == 'scheduled' || status == 'grabbing';
+  }
+
+  bool _isRecordingScheduled(LiveTvProgram program) {
+    final keys = _recordingKeysForProgram(program);
+    return keys.any(_scheduledRecordingKeys.contains);
+  }
+
+  void _handleRecordingStateChanged(LiveTvProgram program, bool isScheduled) {
+    final keys = _recordingKeysForProgram(program);
+    if (keys.isNotEmpty) {
+      setState(() {
+        final next = {..._scheduledRecordingKeys};
+        if (isScheduled) {
+          next.addAll(keys);
+        } else {
+          next.removeAll(keys);
+        }
+        _scheduledRecordingKeys = next;
+      });
+    }
+    unawaited(_refreshScheduledRecordingKeys());
+  }
+
+  Set<String> _recordingKeysForProgram(LiveTvProgram program, {String? fallbackServerId}) {
+    final serverId = _nonEmpty(program.serverId) ?? _nonEmpty(fallbackServerId);
+    if (serverId == null) return const <String>{};
+
+    final keys = <String>{};
+    void addMediaId(String? value) {
+      final normalized = _nonEmpty(value);
+      if (normalized != null) keys.add(_recordingKey(serverId, 'media', normalized));
+    }
+
+    addMediaId(program.ratingKey);
+    addMediaId(program.guid);
+    addMediaId(program.key);
+
+    final channelIdentifier = _nonEmpty(program.channelIdentifier);
+    final beginsAt = program.beginsAt;
+    if (channelIdentifier != null && beginsAt != null) {
+      keys.add(_recordingKey(serverId, 'slot', '$channelIdentifier|$beginsAt|${program.endsAt ?? ''}'));
+    }
+
+    return keys;
+  }
+
+  String _recordingKey(String serverId, String type, String value) => '$serverId\u0000$type\u0000$value';
+
+  String? _nonEmpty(String? value) {
+    final trimmed = value?.trim();
+    return trimmed == null || trimmed.isEmpty ? null : trimmed;
+  }
+
+  List<_GuideRow> get _guideRows {
+    final groups = groupLiveTvChannelsBySource(widget.channels);
+    if (groups.length <= 1) {
+      return [
+        for (var i = 0; i < widget.channels.length; i++) _GuideChannelRow(channel: widget.channels[i], channelIndex: i),
+      ];
+    }
+
+    final channelIndexes = <LiveTvChannel, int>{};
+    for (var i = 0; i < widget.channels.length; i++) {
+      channelIndexes[widget.channels[i]] = i;
+    }
+
+    return [
+      for (final group in groups) ...[
+        _GuideSourceHeaderRow(label: group.label),
+        for (final channel in group.channels)
+          _GuideChannelRow(channel: channel, channelIndex: channelIndexes[channel] ?? 0),
+      ],
+    ];
+  }
+
+  double _guideRowHeight(_GuideRow row) {
+    return switch (row) {
+      _GuideSourceHeaderRow() => _sourceHeaderRowHeight,
+      _GuideChannelRow() => _rowHeight,
+    };
+  }
+
+  double _guideContentHeight(List<_GuideRow> rows) {
+    var height = 0.0;
+    for (final row in rows) {
+      height += _guideRowHeight(row);
+    }
+    return height;
+  }
+
+  double _rowTopForChannelIndex(int channelIndex) {
+    var top = 0.0;
+    for (final row in _guideRows) {
+      if (row is _GuideChannelRow && row.channelIndex == channelIndex) return top;
+      top += _guideRowHeight(row);
+    }
+    return channelIndex * _rowHeight;
+  }
+
   void _scrollToNow() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final now = DateTime.now();
@@ -262,7 +435,7 @@ class GuideTabState extends State<GuideTab> with MountedSetStateMixin {
   }
 
   List<LiveTvProgram> _getProgramsForChannel(LiveTvChannel channel) {
-    return _programs.where((p) => p.channelIdentifier == channel.key).toList()
+    return _programs.where((program) => liveTvProgramMatchesChannel(program, channel)).toList()
       ..sort((a, b) => (a.beginsAt ?? 0).compareTo(b.beginsAt ?? 0));
   }
 
@@ -460,7 +633,7 @@ class GuideTabState extends State<GuideTab> with MountedSetStateMixin {
 
   void _scrollToChannel(int index) {
     if (!_gridVerticalController.hasClients) return;
-    final targetTop = index * _rowHeight;
+    final targetTop = _rowTopForChannelIndex(index);
     final targetBottom = targetTop + _rowHeight;
     final viewportTop = _gridVerticalController.offset;
     final viewportBottom = viewportTop + _gridVerticalController.position.viewportDimension;
@@ -525,6 +698,7 @@ class GuideTabState extends State<GuideTab> with MountedSetStateMixin {
     return ValueListenableBuilder<bool>(
       valueListenable: _hasFocusNotifier,
       builder: (context, hasFocus, child) {
+        final rows = _guideRows;
         return Column(
           children: [
             _buildTimeNavigation(theme),
@@ -561,10 +735,18 @@ class GuideTabState extends State<GuideTab> with MountedSetStateMixin {
                             child: ListView.builder(
                               controller: _channelVerticalController,
                               physics: const NeverScrollableScrollPhysics(),
-                              itemCount: widget.channels.length,
-                              itemExtent: _rowHeight,
-                              itemBuilder: (context, index) =>
-                                  _buildChannelCell(widget.channels[index], theme, index: index),
+                              itemCount: rows.length,
+                              itemBuilder: (context, index) {
+                                final row = rows[index];
+                                return switch (row) {
+                                  _GuideSourceHeaderRow(:final label) => _buildSourceHeaderCell(label, theme),
+                                  _GuideChannelRow(:final channel, :final channelIndex) => _buildChannelCell(
+                                    channel,
+                                    theme,
+                                    index: channelIndex,
+                                  ),
+                                };
+                              },
                             ),
                           ),
                           Expanded(
@@ -586,12 +768,18 @@ class GuideTabState extends State<GuideTab> with MountedSetStateMixin {
                                   width: _totalGridWidth(),
                                   child: ListView.builder(
                                     controller: _gridVerticalController,
-                                    itemCount: widget.channels.length,
-                                    itemExtent: _rowHeight,
+                                    itemCount: rows.length,
                                     itemBuilder: (context, index) {
-                                      final channel = widget.channels[index];
-                                      final programs = _getProgramsForChannel(channel);
-                                      return _buildProgramRow(channel, programs, theme, channelIndex: index);
+                                      final row = rows[index];
+                                      return switch (row) {
+                                        _GuideSourceHeaderRow(:final label) => _buildSourceHeaderGridRow(label, theme),
+                                        _GuideChannelRow(:final channel, :final channelIndex) => _buildProgramRow(
+                                          channel,
+                                          _getProgramsForChannel(channel),
+                                          theme,
+                                          channelIndex: channelIndex,
+                                        ),
+                                      };
                                     },
                                   ),
                                 ),
@@ -624,7 +812,7 @@ class GuideTabState extends State<GuideTab> with MountedSetStateMixin {
     // Hide when scrolled behind the channel column
     if (left < _channelColumnWidth) return const SizedBox.shrink();
 
-    final gridHeight = _timeHeaderHeight + widget.channels.length * _rowHeight;
+    final gridHeight = _timeHeaderHeight + _guideContentHeight(_guideRows);
 
     return Positioned(
       left: left,
@@ -705,6 +893,7 @@ class GuideTabState extends State<GuideTab> with MountedSetStateMixin {
         }),
       ],
     ).then((value) {
+      if (!mounted) return;
       if (value == null) {
         _guideFocusNode.requestFocus();
         return;
@@ -802,18 +991,20 @@ class GuideTabState extends State<GuideTab> with MountedSetStateMixin {
                 _timeNavFocusWrap(
                   index: 1,
                   theme: theme,
-                  child: GestureDetector(
-                    key: _dayPickerKey,
-                    onTap: _showDayPicker,
-                    child: Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Text(dayLabel, style: theme.textTheme.labelLarge),
-                          const SizedBox(width: 2),
-                          AppIcon(Symbols.arrow_drop_down_rounded, size: 18, color: theme.colorScheme.onSurface),
-                        ],
+                  child: ClickableCursor(
+                    child: GestureDetector(
+                      key: _dayPickerKey,
+                      onTap: _showDayPicker,
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(dayLabel, style: theme.textTheme.labelLarge),
+                            const SizedBox(width: 2),
+                            AppIcon(Symbols.arrow_drop_down_rounded, size: 18, color: theme.colorScheme.onSurface),
+                          ],
+                        ),
                       ),
                     ),
                   ),
@@ -864,6 +1055,65 @@ class GuideTabState extends State<GuideTab> with MountedSetStateMixin {
     }
 
     return Row(children: slots);
+  }
+
+  Widget _buildSourceHeaderCell(String label, ThemeData theme) {
+    return Container(
+      height: _sourceHeaderRowHeight,
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.35),
+        border: Border(
+          bottom: BorderSide(color: theme.dividerColor.withValues(alpha: 0.3)),
+          right: BorderSide(color: theme.dividerColor.withValues(alpha: 0.3)),
+        ),
+      ),
+      alignment: Alignment.centerLeft,
+      child: Text(
+        label,
+        style: theme.textTheme.labelSmall?.copyWith(
+          color: theme.colorScheme.onSurfaceVariant,
+          fontWeight: FontWeight.w700,
+        ),
+        maxLines: 2,
+        overflow: TextOverflow.ellipsis,
+      ),
+    );
+  }
+
+  Widget _buildSourceHeaderGridRow(String label, ThemeData theme) {
+    return Container(
+      height: _sourceHeaderRowHeight,
+      decoration: BoxDecoration(
+        color: theme.colorScheme.surfaceContainerHighest.withValues(alpha: 0.25),
+        border: Border(bottom: BorderSide(color: theme.dividerColor.withValues(alpha: 0.3))),
+      ),
+      child: ClipRect(
+        child: ListenableBuilder(
+          listenable: _gridHorizontalController,
+          builder: (context, child) {
+            final scrollOffset = _gridHorizontalController.hasClients ? _gridHorizontalController.offset : 0.0;
+            return Transform.translate(offset: Offset(scrollOffset, 0), child: child);
+          },
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12),
+              child: Text(
+                label,
+                style: theme.textTheme.labelSmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant.withValues(alpha: 0.8),
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: 0.3,
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
   }
 
   Widget _buildChannelCell(LiveTvChannel channel, ThemeData theme, {required int index}) {
@@ -992,6 +1242,7 @@ class GuideTabState extends State<GuideTab> with MountedSetStateMixin {
   }) {
     final isCurrentlyAiring = program.isCurrentlyAiring;
     final isPast = program.endsAt != null && program.endsAt! < DateTime.now().millisecondsSinceEpoch ~/ 1000;
+    final isRecordingScheduled = _isRecordingScheduled(program);
 
     Color materialColor;
     if (isFocused) {
@@ -1028,6 +1279,7 @@ class GuideTabState extends State<GuideTab> with MountedSetStateMixin {
           side: isFocused ? BorderSide(color: theme.colorScheme.primary, width: 2) : BorderSide.none,
         ),
         child: InkWell(
+          mouseCursor: SystemMouseCursors.click,
           canRequestFocus: false,
           onTap: () => _showProgramDetails(channel, program),
           child: Container(
@@ -1051,11 +1303,24 @@ class GuideTabState extends State<GuideTab> with MountedSetStateMixin {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: [
-                      Text(
-                        program.grandparentTitle ?? program.title,
-                        style: theme.textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600, color: titleColor),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
+                      Row(
+                        children: [
+                          if (isRecordingScheduled) ...[
+                            _RecordingDot(color: Colors.red, tooltip: t.liveTv.recordingScheduled),
+                            const SizedBox(width: 5),
+                          ],
+                          Expanded(
+                            child: Text(
+                              program.grandparentTitle ?? program.title,
+                              style: theme.textTheme.bodyMedium?.copyWith(
+                                fontWeight: FontWeight.w600,
+                                color: titleColor,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                        ],
                       ),
                       if (program.grandparentTitle != null)
                         Text(
@@ -1104,6 +1369,29 @@ class GuideTabState extends State<GuideTab> with MountedSetStateMixin {
       posterUrl: posterUrl,
       onTuneChannel: () => _tuneChannel(channel),
       client: client,
+      onRecordingStateChanged: (isScheduled) => _handleRecordingStateChanged(program, isScheduled),
+    );
+  }
+}
+
+class _RecordingDot extends StatelessWidget {
+  final Color color;
+  final String tooltip;
+
+  const _RecordingDot({required this.color, required this.tooltip});
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      child: Semantics(
+        label: tooltip,
+        child: Container(
+          width: 8,
+          height: 8,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
+      ),
     );
   }
 }
@@ -1148,6 +1436,7 @@ class _ChannelCellState extends State<_ChannelCell> {
     final showAction = _hovered || widget.isFocused;
 
     return MouseRegion(
+      cursor: SystemMouseCursors.click,
       onEnter: (_) => setState(() => _hovered = true),
       onExit: (_) => setState(() => _hovered = false),
       child: GestureDetector(

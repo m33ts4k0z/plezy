@@ -8,16 +8,24 @@ import '../../../media/media_hub.dart';
 import '../../../media/media_item.dart';
 import '../../../mixins/item_updatable.dart';
 import '../../../mixins/watch_state_aware.dart';
+import '../../../services/settings_service.dart';
 import '../../../utils/global_key_utils.dart';
+import '../../../utils/layout_constants.dart';
+import '../../../utils/platform_detector.dart';
 import '../../../utils/provider_extensions.dart';
 import '../../../utils/watch_state_notifier.dart';
 import '../../../widgets/hub_section.dart';
+import '../../../widgets/settings_builder.dart';
+import '../../../widgets/tv_browse_rail.dart';
+import '../../../widgets/tv_spotlight_background.dart';
 import '../../main_screen.dart';
 import 'base_library_tab.dart';
 
 /// Recommended tab for library screen
 /// Shows library-specific hubs and recommendations, including dedicated Continue Watching
 class LibraryRecommendedTab extends BaseLibraryTab<MediaHub> {
+  final VoidCallback? onNavigateToChrome;
+
   const LibraryRecommendedTab({
     super.key,
     required super.library,
@@ -25,6 +33,7 @@ class LibraryRecommendedTab extends BaseLibraryTab<MediaHub> {
     super.isActive,
     super.suppressAutoFocus,
     super.onBack,
+    this.onNavigateToChrome,
   });
 
   @override
@@ -35,6 +44,29 @@ class _LibraryRecommendedTabState extends BaseLibraryTabState<MediaHub, LibraryR
     with ItemUpdatable, WatchStateAware {
   /// GlobalKeys for each hub section to enable vertical navigation
   final List<GlobalKey<HubSectionState>> _hubKeys = [];
+  final _tvBrowseRailKey = GlobalKey<TvBrowseRailState>();
+  MediaItem? _spotlightItem;
+
+  MediaItem? get _defaultSpotlightItem {
+    for (final hub in items) {
+      if (hub.items.isNotEmpty) return hub.items.first;
+    }
+    return null;
+  }
+
+  MediaItem? get _effectiveSpotlightItem {
+    final current = _spotlightItem;
+    if (current == null) return _defaultSpotlightItem;
+    for (final hub in items) {
+      if (hub.items.any((item) => item.globalKey == current.globalKey)) return current;
+    }
+    return _defaultSpotlightItem;
+  }
+
+  void _setSpotlightItem(MediaItem item) {
+    if (_spotlightItem?.globalKey == item.globalKey) return;
+    setState(() => _spotlightItem = item);
+  }
 
   @override
   String? get itemServerId => widget.library.serverId;
@@ -148,7 +180,14 @@ class _LibraryRecommendedTabState extends BaseLibraryTabState<MediaHub, LibraryR
     final client = context.tryGetMediaClientForServer(widget.library.serverId);
     final hubs = client == null
         ? <MediaHub>[]
-        : List.of(await client.fetchLibraryHubs(widget.library.id, libraryName: widget.library.title, limit: 12));
+        : List.of(
+            await client.fetchLibraryHubs(
+              widget.library.id,
+              libraryName: widget.library.title,
+              limit: 12,
+              libraryKind: widget.library.kind,
+            ),
+          );
 
     // Move Continue Watching hub to the front if present
     final cwIndex = hubs.indexWhere(_isContinueWatchingHub);
@@ -195,6 +234,10 @@ class _LibraryRecommendedTabState extends BaseLibraryTabState<MediaHub, LibraryR
   /// Focus the first item in the first hub (for tab activation)
   @override
   void focusFirstItem() {
+    if (PlatformDetector.isTV()) {
+      _tvBrowseRailKey.currentState?.requestFocus();
+      return;
+    }
     if (_hubKeys.isNotEmpty && items.isNotEmpty) {
       _hubKeys.first.currentState?.requestFocusAt(0);
     }
@@ -211,6 +254,13 @@ class _LibraryRecommendedTabState extends BaseLibraryTabState<MediaHub, LibraryR
   @override
   Widget buildContent(List<MediaHub> items) {
     _ensureHubKeys(items.length);
+
+    if (PlatformDetector.isTV()) {
+      return SettingsBuilder(
+        prefs: const [SettingsService.hideSpoilers, SettingsService.libraryDensity, SettingsService.episodePosterMode],
+        builder: (context) => _buildTvContent(items),
+      );
+    }
 
     return CustomScrollView(
       // Allow focus decoration to render outside scroll bounds
@@ -241,6 +291,74 @@ class _LibraryRecommendedTabState extends BaseLibraryTabState<MediaHub, LibraryR
           ),
         ),
       ],
+    );
+  }
+
+  Widget _buildTvContent(List<MediaHub> items) {
+    final tvHubs = items.where((hub) => hub.items.isNotEmpty).toList();
+    final spotlight = _effectiveSpotlightItem;
+    final size = MediaQuery.sizeOf(context);
+    final theme = Theme.of(context);
+    final svc = SettingsService.instanceOrNull!;
+    final client = context.tryGetMediaClientForServer(spotlight?.serverId ?? widget.library.serverId);
+    final scale = TvLayoutConstants.scaleForSize(size);
+    final railHeight = tvHubs.isEmpty
+        ? 0.0
+        : TvBrowseRailLayout.estimateHeight(
+            size: size,
+            hubs: tvHubs,
+            density: svc.read(SettingsService.libraryDensity),
+            episodePosterMode: svc.read(SettingsService.episodePosterMode),
+            tallPosterScale: TvBrowseRailLayout.compactTallPosterScale,
+          );
+    final spotlightTop = (size.height * 0.075).clamp(64.0 * scale, 120.0 * scale).toDouble();
+    final minimumSpotlightBottom = railHeight + (16 * scale);
+    final baseSpotlightBottom = (size.height * 0.53).clamp(180.0, 900.0).toDouble();
+    final desiredSpotlightBottom = minimumSpotlightBottom > baseSpotlightBottom
+        ? minimumSpotlightBottom
+        : baseSpotlightBottom;
+    final maxSpotlightBottom = (size.height - spotlightTop - (96 * scale)).clamp(0.0, double.infinity).toDouble();
+    final spotlightBottom = desiredSpotlightBottom > maxSpotlightBottom ? maxSpotlightBottom : desiredSpotlightBottom;
+    final spotlightLeft = (24 * scale).clamp(18.0, 40.0).toDouble();
+
+    return Material(
+      color: theme.scaffoldBackgroundColor,
+      child: SizedBox.expand(
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            TvSpotlightBackground(
+              item: spotlight,
+              client: client,
+              hideSpoilers: svc.read(SettingsService.hideSpoilers),
+              contentTop: spotlightTop,
+              contentBottom: spotlightBottom,
+              contentLeft: spotlightLeft,
+              compact: true,
+              showPrimaryAction: false,
+            ),
+            if (tvHubs.isNotEmpty)
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                child: TvBrowseRail(
+                  key: _tvBrowseRailKey,
+                  hubs: tvHubs,
+                  iconForHub: (hub, _) => _getHubIcon(hub),
+                  onFocusedItemChanged: _setSpotlightItem,
+                  onRefresh: updateItem,
+                  onRemoveFromContinueWatching: _refreshContinueWatching,
+                  isContinueWatchingHub: _isContinueWatchingHub,
+                  onNavigateUp: widget.onNavigateToChrome ?? widget.onBack,
+                  onNavigateToSidebar: _navigateToSidebar,
+                  onBack: widget.onBack,
+                  tallPosterScale: TvBrowseRailLayout.compactTallPosterScale,
+                ),
+              ),
+          ],
+        ),
+      ),
     );
   }
 

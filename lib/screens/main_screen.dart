@@ -23,12 +23,9 @@ import '../mixins/refreshable.dart';
 import '../widgets/overlay_sheet.dart';
 import '../mixins/tab_visibility_aware.dart';
 import '../navigation/navigation_tabs.dart';
-import '../connection/connection_registry.dart';
-import '../profiles/active_plex_identity.dart';
 import '../profiles/active_profile_binder.dart';
 import '../profiles/active_profile_provider.dart';
 import '../profiles/plex_home_service.dart';
-import '../profiles/profile_connection_registry.dart';
 import '../providers/download_provider.dart';
 import '../providers/multi_server_provider.dart';
 import '../providers/hidden_libraries_provider.dart';
@@ -40,6 +37,7 @@ import '../services/multi_server_manager.dart';
 import '../services/offline_watch_sync_service.dart';
 import '../services/settings_service.dart';
 import '../providers/offline_mode_provider.dart';
+import '../services/companion_remote/companion_remote_host_controller.dart';
 import '../services/companion_remote/companion_remote_receiver.dart';
 import '../services/fullscreen_state_manager.dart';
 import '../providers/companion_remote_provider.dart';
@@ -251,7 +249,7 @@ class _MainScreenState extends State<MainScreen>
 
         // Auto-start companion remote server once the active profile is known.
         if (_companionRemoteSetup && mounted) {
-          unawaited(_autoStartCompanionRemoteServer(context.read<CompanionRemoteProvider>()));
+          unawaited(_autoStartCompanionRemoteServer());
         }
       }
 
@@ -657,35 +655,12 @@ class _MainScreenState extends State<MainScreen>
     };
   }
 
-  Future<void> _autoStartCompanionRemoteServer(CompanionRemoteProvider companionRemote) async {
+  Future<void> _autoStartCompanionRemoteServer() async {
     try {
       final settings = await SettingsService.getInstance();
       if (!settings.read(SettingsService.enableCompanionRemoteServer)) return;
       if (!mounted) return;
-
-      final connections = context.read<ConnectionRegistry>();
-      final activeProfile = context.read<ActiveProfileProvider>();
-      final profileConnections = context.read<ProfileConnectionRegistry>();
-      final plexHome = context.read<PlexHomeService>();
-      final identity = await resolveActivePlexIdentity(
-        activeProfile: activeProfile,
-        connections: connections,
-        profileConnections: profileConnections,
-      );
-      if (!mounted) return;
-      final home = identity == null ? null : await plexHome.materializePlexHomeForConnection(identity.account.id);
-      if (!mounted) return;
-      final ok = await companionRemote.ensureCryptoReady(
-        home,
-        connections: connections,
-        activeProfile: activeProfile,
-        profileConnections: profileConnections,
-        identity: identity,
-        plexHomeForConnection: plexHome.materializePlexHomeForConnection,
-      );
-      if (ok) {
-        await companionRemote.startHostServer();
-      }
+      await startCompanionRemoteHost(context);
     } catch (e) {
       appLogger.e('CompanionRemote: Failed to auto-start server', error: e);
     }
@@ -954,13 +929,18 @@ class _MainScreenState extends State<MainScreen>
       return KeyEventResult.handled;
     }
 
+    // AppleTV: KeyDown does the work, KeyUp is consumed silently. See the
+    // matching comment in handleBackKeyAction for why the suppressor pattern
+    // doesn't fit here.
     if (PlatformDetector.isAppleTV() && event is KeyDownEvent) {
       final result = _handleMainBack(allowTvSystemExit: true);
       if (result == KeyEventResult.handled) {
         BackKeyCoordinator.markHandled();
-        BackKeyUpSuppressor.suppressBackUntilKeyUp();
       }
       return result;
+    }
+    if (PlatformDetector.isAppleTV() && event is KeyUpEvent) {
+      return KeyEventResult.handled;
     }
 
     if (event is KeyUpEvent) {
@@ -1232,7 +1212,7 @@ class _MainScreenState extends State<MainScreen>
         builder: (context, alwaysExpanded, _) {
           final contentLeftPadding = alwaysExpanded
               ? SideNavigationRailState.expandedWidth
-              : SideNavigationRailState.collapsedWidth;
+              : SideNavigationRailState.collapsedWidthForContext(context);
 
           return OverlaySheetHost(
             child: PopScope(

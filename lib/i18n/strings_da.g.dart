@@ -49,6 +49,7 @@ class TranslationsDa extends Translations with BaseTranslations<AppLocale, Trans
 	@override late final _TranslationsHotkeysDa hotkeys = _TranslationsHotkeysDa._(_root);
 	@override late final _TranslationsFileInfoDa fileInfo = _TranslationsFileInfoDa._(_root);
 	@override late final _TranslationsMediaMenuDa mediaMenu = _TranslationsMediaMenuDa._(_root);
+	@override late final _TranslationsRateSheetDa rateSheet = _TranslationsRateSheetDa._(_root);
 	@override late final _TranslationsAccessibilityDa accessibility = _TranslationsAccessibilityDa._(_root);
 	@override late final _TranslationsTooltipsDa tooltips = _TranslationsTooltipsDa._(_root);
 	@override late final _TranslationsVideoControlsDa videoControls = _TranslationsVideoControlsDa._(_root);
@@ -375,6 +376,12 @@ class _TranslationsSettingsDa extends TranslationsSettingsEn {
 	@override String get displaySwitchDelay => 'Forsinkelse ved skærmskift';
 	@override String get tunneledPlayback => 'Tunneleret afspilning';
 	@override String get tunneledPlaybackDescription => 'Brug videotunneling. Slå fra, hvis HDR-afspilning viser sort video.';
+	@override String get dvConversionMode => 'Dolby Vision-konvertering';
+	@override String get dvConversionModeDescription => 'Vælg, hvordan ExoPlayer håndterer Dolby Vision Profile 7-filer.';
+	@override String get dvConversionAuto => 'Auto';
+	@override String get dvConversionNative => 'Native / deaktiveret';
+	@override String get dvConversionDv81 => 'P7 → P8.1';
+	@override String get dvConversionHevcStrip => 'P7 → HEVC';
 	@override String get requireProfileSelectionOnOpen => 'Spørg om profil ved åbning';
 	@override String get requireProfileSelectionOnOpenDescription => 'Vis profilvalg hver gang appen åbnes';
 	@override String get forceTvMode => 'Gennemtving TV-tilstand';
@@ -481,6 +488,26 @@ class _TranslationsMediaMenuDa extends TranslationsMediaMenuEn {
 	@override String get playVersion => 'Afspil version...';
 }
 
+// Path: rateSheet
+class _TranslationsRateSheetDa extends TranslationsRateSheetEn {
+	_TranslationsRateSheetDa._(TranslationsDa root) : this._root = root, super.internal(root);
+
+	final TranslationsDa _root; // ignore: unused_field
+
+	// Translations
+	@override String get title => 'Bedøm';
+	@override String get server => 'Server';
+	@override String starValue({required Object rating}) => '${rating} / 5';
+	@override String scoreValue({required Object score}) => '${score} / 10';
+	@override String get setScore => 'Angiv en score';
+	@override String get notRated => 'Ikke bedømt';
+	@override String get liked => 'Synes godt om';
+	@override String get notLiked => 'Ikke liket';
+	@override String get saved => 'Gemt';
+	@override String get notAvailable => 'Intet match fundet';
+	@override String get noConnectedTrackers => 'Forbind en tracker i Indstillinger for at bedømme der.';
+}
+
 // Path: accessibility
 class _TranslationsAccessibilityDa extends TranslationsAccessibilityEn {
 	_TranslationsAccessibilityDa._(TranslationsDa root) : this._root = root, super.internal(root);
@@ -574,6 +601,7 @@ class _TranslationsVideoControlsDa extends TranslationsVideoControlsEn {
 	@override String endsAt({required Object time}) => 'Slutter kl. ${time}';
 	@override String get pipActive => 'Afspiller i billede-i-billede';
 	@override String get pipFailed => 'Billede-i-billede kunne ikke starte';
+	@override String get screenshotSaved => 'Skærmbillede gemt';
 	@override late final _TranslationsVideoControlsPipErrorsDa pipErrors = _TranslationsVideoControlsPipErrorsDa._(_root);
 	@override String get chapters => 'Kapitler';
 	@override String get noChaptersAvailable => 'Ingen kapitler tilgængelige';
@@ -736,18 +764,32 @@ class _TranslationsProfilesDa extends TranslationsProfilesEn {
 	@override String get pinManagedByPlex => 'PIN administreres af Plex. Rediger på plex.tv.';
 	@override String get noPinSetEditOnPlex => 'Ingen PIN-kode angivet. For at kræve en, redigér Home-brugeren på plex.tv.';
 	@override String get setPin => 'Angiv PIN';
+	@override String get setPinTitle => 'Angiv PIN';
+	@override String get confirmPinTitle => 'Bekræft PIN';
+	@override String get pinSet => 'PIN angivet';
+	@override String get changePin => 'Skift';
+	@override String get removePin => 'Fjern';
 	@override String get connectionsLabel => 'Forbindelser';
 	@override String get add => 'Tilføj';
 	@override String get deleteProfileButton => 'Slet profil';
 	@override String get noConnectionsHint => 'Ingen forbindelser — tilføj en for at bruge denne profil.';
+	@override String get noConnections => 'Ingen forbindelser';
 	@override String get plexHomeAccount => 'Plex Home-konto';
 	@override String get connectionDefault => 'Standard';
+	@override String connectionAs({required Object displayName}) => 'som ${displayName}';
 	@override String get makeDefault => 'Gør til standard';
 	@override String get removeConnection => 'Fjern';
+	@override String get profileRenamed => 'Profil omdøbt.';
 	@override String borrowAddTo({required Object displayName}) => 'Tilføj til ${displayName}';
 	@override String get borrowExplain => 'Lån en anden profils forbindelse. PIN-beskyttede profiler kræver en PIN.';
 	@override String get borrowEmpty => 'Intet at låne endnu.';
 	@override String get borrowEmptySubtitle => 'Forbind Plex eller Jellyfin til en anden profil først.';
+	@override String borrowFromProfile({required Object displayName}) => 'Fra ${displayName}';
+	@override String get borrowConnectionBorrowed => 'Forbindelse lånt.';
+	@override String get borrowFailed => 'Kunne ikke låne forbindelse.';
+	@override String get incorrectPin => 'Forkert PIN.';
+	@override String get sourceProfileMissingParentAccount => 'Kildeprofilen mangler sin overordnede konto.';
+	@override String get failedToVerifyPin => 'Kunne ikke bekræfte PIN.';
 	@override String get newProfile => 'Ny profil';
 	@override String get profileNameHint => 'fx. Gæster, Børn, Familiens stue';
 	@override String get pinProtectionOptional => 'PIN-beskyttelse (valgfri)';
@@ -1521,6 +1563,7 @@ class _TranslationsHotkeysActionsDa extends TranslationsHotkeysActionsEn {
 	@override String get subSeekPrev => 'Søg til forrige undertekst';
 	@override String get shaderToggle => 'Skift shadere';
 	@override String get skipMarker => 'Spring intro/rulletekster over';
+	@override String get screenshot => 'Tag skærmbillede';
 }
 
 // Path: videoControls.pipErrors
@@ -1592,8 +1635,18 @@ class _TranslationsLibrariesSortLabelsDa extends TranslationsLibrariesSortLabels
 	@override String get dateAdded => 'Tilføjet dato';
 	@override String get releaseDate => 'Udgivelsesdato';
 	@override String get rating => 'Vurdering';
+	@override String get communityRating => 'Fællesskabsvurdering';
+	@override String get criticRating => 'Kritikerbedømmelse';
 	@override String get lastPlayed => 'Sidst afspillet';
+	@override String get datePlayed => 'Afspilningsdato';
 	@override String get playCount => 'Antal afspilninger';
+	@override String get productionYear => 'Produktionsår';
+	@override String get runtime => 'Spilletid';
+	@override String get officialRating => 'Officiel vurdering';
+	@override String get premiereDate => 'Premieredato';
+	@override String get startDate => 'Startdato';
+	@override String get airTime => 'Sendetid';
+	@override String get studio => 'Studie';
 	@override String get random => 'Tilfældig';
 	@override String get dateShared => 'Delt dato';
 	@override String get latestEpisodeAirDate => 'Seneste episodes premieredato';
@@ -1986,6 +2039,12 @@ extension on TranslationsDa {
 			'settings.displaySwitchDelay' => 'Forsinkelse ved skærmskift',
 			'settings.tunneledPlayback' => 'Tunneleret afspilning',
 			'settings.tunneledPlaybackDescription' => 'Brug videotunneling. Slå fra, hvis HDR-afspilning viser sort video.',
+			'settings.dvConversionMode' => 'Dolby Vision-konvertering',
+			'settings.dvConversionModeDescription' => 'Vælg, hvordan ExoPlayer håndterer Dolby Vision Profile 7-filer.',
+			'settings.dvConversionAuto' => 'Auto',
+			'settings.dvConversionNative' => 'Native / deaktiveret',
+			'settings.dvConversionDv81' => 'P7 → P8.1',
+			'settings.dvConversionHevcStrip' => 'P7 → HEVC',
 			'settings.requireProfileSelectionOnOpen' => 'Spørg om profil ved åbning',
 			'settings.requireProfileSelectionOnOpenDescription' => 'Vis profilvalg hver gang appen åbnes',
 			'settings.forceTvMode' => 'Gennemtving TV-tilstand',
@@ -2034,6 +2093,7 @@ extension on TranslationsDa {
 			'hotkeys.actions.subSeekPrev' => 'Søg til forrige undertekst',
 			'hotkeys.actions.shaderToggle' => 'Skift shadere',
 			'hotkeys.actions.skipMarker' => 'Spring intro/rulletekster over',
+			'hotkeys.actions.screenshot' => 'Tag skærmbillede',
 			'fileInfo.title' => 'Filinfo',
 			'fileInfo.video' => 'Video',
 			'fileInfo.audio' => 'Lyd',
@@ -2074,6 +2134,17 @@ extension on TranslationsDa {
 			'mediaMenu.rate' => 'Bedøm',
 			'mediaMenu.playFromBeginning' => 'Afspil fra begyndelsen',
 			'mediaMenu.playVersion' => 'Afspil version...',
+			'rateSheet.title' => 'Bedøm',
+			'rateSheet.server' => 'Server',
+			'rateSheet.starValue' => ({required Object rating}) => '${rating} / 5',
+			'rateSheet.scoreValue' => ({required Object score}) => '${score} / 10',
+			'rateSheet.setScore' => 'Angiv en score',
+			'rateSheet.notRated' => 'Ikke bedømt',
+			'rateSheet.liked' => 'Synes godt om',
+			'rateSheet.notLiked' => 'Ikke liket',
+			'rateSheet.saved' => 'Gemt',
+			'rateSheet.notAvailable' => 'Intet match fundet',
+			'rateSheet.noConnectedTrackers' => 'Forbind en tracker i Indstillinger for at bedømme der.',
 			'accessibility.mediaCardMovie' => ({required Object title}) => '${title}, film',
 			'accessibility.mediaCardShow' => ({required Object title}) => '${title}, TV-serie',
 			'accessibility.mediaCardEpisode' => ({required Object title, required Object episodeInfo}) => '${title}, ${episodeInfo}',
@@ -2142,6 +2213,7 @@ extension on TranslationsDa {
 			'videoControls.endsAt' => ({required Object time}) => 'Slutter kl. ${time}',
 			'videoControls.pipActive' => 'Afspiller i billede-i-billede',
 			'videoControls.pipFailed' => 'Billede-i-billede kunne ikke starte',
+			'videoControls.screenshotSaved' => 'Skærmbillede gemt',
 			'videoControls.pipErrors.androidVersion' => 'Kræver Android 8.0 eller nyere',
 			'videoControls.pipErrors.iosVersion' => 'Kræver iOS 15.0 eller nyere',
 			'videoControls.pipErrors.permissionDisabled' => 'Billede-i-billede er deaktiveret. Slå det til i systemindstillinger.',
@@ -2241,6 +2313,8 @@ extension on TranslationsDa {
 			'profiles.signOut' => 'Log ud',
 			'profiles.signOutPlexTitle' => 'Log ud af Plex?',
 			'profiles.signOutPlexMessage' => ({required Object displayName}) => 'Fjern ${displayName} og alle Plex Home-brugere? Log ind igen når som helst.',
+			_ => null,
+		} ?? switch (path) {
 			'profiles.signedOutPlex' => 'Logget ud af Plex.',
 			'profiles.signOutFailed' => 'Log ud mislykkedes.',
 			'profiles.sectionTitle' => 'Profiler',
@@ -2256,20 +2330,32 @@ extension on TranslationsDa {
 			'profiles.pinManagedByPlex' => 'PIN administreres af Plex. Rediger på plex.tv.',
 			'profiles.noPinSetEditOnPlex' => 'Ingen PIN-kode angivet. For at kræve en, redigér Home-brugeren på plex.tv.',
 			'profiles.setPin' => 'Angiv PIN',
+			'profiles.setPinTitle' => 'Angiv PIN',
+			'profiles.confirmPinTitle' => 'Bekræft PIN',
+			'profiles.pinSet' => 'PIN angivet',
+			'profiles.changePin' => 'Skift',
+			'profiles.removePin' => 'Fjern',
 			'profiles.connectionsLabel' => 'Forbindelser',
 			'profiles.add' => 'Tilføj',
 			'profiles.deleteProfileButton' => 'Slet profil',
 			'profiles.noConnectionsHint' => 'Ingen forbindelser — tilføj en for at bruge denne profil.',
-			_ => null,
-		} ?? switch (path) {
+			'profiles.noConnections' => 'Ingen forbindelser',
 			'profiles.plexHomeAccount' => 'Plex Home-konto',
 			'profiles.connectionDefault' => 'Standard',
+			'profiles.connectionAs' => ({required Object displayName}) => 'som ${displayName}',
 			'profiles.makeDefault' => 'Gør til standard',
 			'profiles.removeConnection' => 'Fjern',
+			'profiles.profileRenamed' => 'Profil omdøbt.',
 			'profiles.borrowAddTo' => ({required Object displayName}) => 'Tilføj til ${displayName}',
 			'profiles.borrowExplain' => 'Lån en anden profils forbindelse. PIN-beskyttede profiler kræver en PIN.',
 			'profiles.borrowEmpty' => 'Intet at låne endnu.',
 			'profiles.borrowEmptySubtitle' => 'Forbind Plex eller Jellyfin til en anden profil først.',
+			'profiles.borrowFromProfile' => ({required Object displayName}) => 'Fra ${displayName}',
+			'profiles.borrowConnectionBorrowed' => 'Forbindelse lånt.',
+			'profiles.borrowFailed' => 'Kunne ikke låne forbindelse.',
+			'profiles.incorrectPin' => 'Forkert PIN.',
+			'profiles.sourceProfileMissingParentAccount' => 'Kildeprofilen mangler sin overordnede konto.',
+			'profiles.failedToVerifyPin' => 'Kunne ikke bekræfte PIN.',
 			'profiles.newProfile' => 'Ny profil',
 			'profiles.profileNameHint' => 'fx. Gæster, Børn, Familiens stue',
 			'profiles.pinProtectionOptional' => 'PIN-beskyttelse (valgfri)',
@@ -2372,8 +2458,18 @@ extension on TranslationsDa {
 			'libraries.sortLabels.dateAdded' => 'Tilføjet dato',
 			'libraries.sortLabels.releaseDate' => 'Udgivelsesdato',
 			'libraries.sortLabels.rating' => 'Vurdering',
+			'libraries.sortLabels.communityRating' => 'Fællesskabsvurdering',
+			'libraries.sortLabels.criticRating' => 'Kritikerbedømmelse',
 			'libraries.sortLabels.lastPlayed' => 'Sidst afspillet',
+			'libraries.sortLabels.datePlayed' => 'Afspilningsdato',
 			'libraries.sortLabels.playCount' => 'Antal afspilninger',
+			'libraries.sortLabels.productionYear' => 'Produktionsår',
+			'libraries.sortLabels.runtime' => 'Spilletid',
+			'libraries.sortLabels.officialRating' => 'Officiel vurdering',
+			'libraries.sortLabels.premiereDate' => 'Premieredato',
+			'libraries.sortLabels.startDate' => 'Startdato',
+			'libraries.sortLabels.airTime' => 'Sendetid',
+			'libraries.sortLabels.studio' => 'Studie',
 			'libraries.sortLabels.random' => 'Tilfældig',
 			'libraries.sortLabels.dateShared' => 'Delt dato',
 			'libraries.sortLabels.latestEpisodeAirDate' => 'Seneste episodes premieredato',
@@ -2731,6 +2827,8 @@ extension on TranslationsDa {
 			'metadataEdit.summary' => 'Resumé',
 			'metadataEdit.poster' => 'Plakat',
 			'metadataEdit.background' => 'Baggrund',
+			_ => null,
+		} ?? switch (path) {
 			'metadataEdit.logo' => 'Logo',
 			'metadataEdit.squareArt' => 'Kvadratisk billede',
 			'metadataEdit.selectPoster' => 'Vælg plakat',
@@ -2774,8 +2872,6 @@ extension on TranslationsDa {
 			'metadataEdit.metadataLanguage' => 'Metadatasprog',
 			'metadataEdit.useOriginalTitle' => 'Brug originaltitel',
 			'metadataEdit.preferredAudioLanguage' => 'Foretrukket lydsprog',
-			_ => null,
-		} ?? switch (path) {
 			'metadataEdit.preferredSubtitleLanguage' => 'Foretrukket undertekstsprog',
 			'metadataEdit.subtitleMode' => 'Auto-vælg underteksttilstand',
 			'metadataEdit.manuallySelected' => 'Manuelt valgt',

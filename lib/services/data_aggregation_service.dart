@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import '../i18n/strings.g.dart';
 import '../media/media_hub.dart';
 import '../media/media_item.dart';
 import '../media/media_kind.dart';
@@ -8,6 +7,7 @@ import '../media/media_library.dart';
 import '../media/media_server_client.dart';
 import '../utils/app_logger.dart';
 import '../utils/global_key_utils.dart';
+import '../utils/search_relevance.dart';
 import 'multi_server_manager.dart';
 
 /// Cross-server aggregation: fans calls out to every online client and
@@ -53,7 +53,7 @@ class DataAggregationService {
     final futures = clients.entries.map((entry) async {
       final client = entry.value;
       try {
-        return await client.fetchContinueWatching();
+        return await client.fetchContinueWatching(count: limit);
       } catch (e, st) {
         appLogger.e('Failed on-deck fetch from ${entry.key}', error: e, stackTrace: st);
         return <MediaItem>[];
@@ -87,8 +87,8 @@ class DataAggregationService {
   }
 
   /// Fetch recommendation hubs from all servers as neutral [MediaHub]s.
-  /// When useGlobalHubs is true (default), rich-hub backends use the global
-  /// /hubs endpoint to get true home page hubs like "Recently Added Movies".
+  /// When useGlobalHubs is true (default), rich-hub backends use their true
+  /// home page hubs (Plex's promoted/global hub endpoint).
   /// Backends without rich home hubs fall back to per-library hubs so one
   /// capped "Latest" response cannot hide whole library types.
   Future<List<MediaHub>> getHubsFromAllServers({
@@ -103,9 +103,10 @@ class DataAggregationService {
       return [];
     }
 
-    // For global hubs, pre-fetch libraries to split "Recently Added" hubs
-    // by library and resolve human-readable names.
-    final libraries = useGlobalHubs ? _groupLibrariesByServer(await getMediaLibrariesFromAllServers()) : null;
+    // Only fallback clients need a library prefetch when home layout is on;
+    // rich-hub backends return the intended home rows directly.
+    final needsLibraryPrefetch = useGlobalHubs && clients.values.any((client) => !client.capabilities.richHubs);
+    final libraries = needsLibraryPrefetch ? _groupLibrariesByServer(await getMediaLibrariesFromAllServers()) : null;
 
     final futures = clients.entries.map((entry) async {
       final serverId = entry.key;
@@ -122,13 +123,7 @@ class DataAggregationService {
                 includePlaybackHubs: includePlaybackHubs,
                 libraries: useGlobalHubs ? serverLibraries : null,
               );
-        return _postProcessHubs(
-          hubs,
-          serverId: serverId,
-          hiddenLibraryKeys: hiddenLibraryKeys,
-          libraries: serverLibraries,
-          splitRecentlyAdded: shouldUseGlobalHubs,
-        );
+        return _postProcessHubs(hubs, serverId: serverId, hiddenLibraryKeys: hiddenLibraryKeys);
       } catch (e, stackTrace) {
         appLogger.e('Failed to fetch hubs from server $serverId', error: e, stackTrace: stackTrace);
         return <MediaHub>[];
@@ -173,6 +168,7 @@ class DataAggregationService {
               libraryName: l.title,
               limit: limit,
               includePlaybackHubs: includePlaybackHubs,
+              libraryKind: l.kind,
             );
           } catch (e, st) {
             appLogger.e('Failed to fetch library hubs for ${l.globalKey}', error: e, stackTrace: st);
@@ -187,15 +183,8 @@ class DataAggregationService {
     return all;
   }
 
-  /// Filter hidden-library items, optionally split multi-library "Recently
-  /// Added" hubs by section, and drop empty hubs.
-  List<MediaHub> _postProcessHubs(
-    List<MediaHub> hubs, {
-    required String serverId,
-    Set<String>? hiddenLibraryKeys,
-    List<MediaLibrary>? libraries,
-    required bool splitRecentlyAdded,
-  }) {
+  /// Filter hidden-library items and drop empty hubs.
+  List<MediaHub> _postProcessHubs(List<MediaHub> hubs, {required String serverId, Set<String>? hiddenLibraryKeys}) {
     var filtered = hubs;
     if (hiddenLibraryKeys != null && hiddenLibraryKeys.isNotEmpty) {
       filtered = filtered
@@ -212,10 +201,6 @@ class DataAggregationService {
           .whereType<MediaHub>()
           .toList();
     }
-
-    if (splitRecentlyAdded) {
-      filtered = _splitRecentlyAddedHubs(filtered, libraries);
-    }
     return filtered;
   }
 
@@ -229,10 +214,13 @@ class DataAggregationService {
     final clients = _serverManager.onlineClients;
     if (clients.isEmpty) return [];
 
+    final resultLimit = limit ?? defaultMediaSearchLimit;
+    final fetchLimit = resultLimit < defaultMediaSearchLimit ? defaultMediaSearchLimit : resultLimit;
+
     final futures = clients.entries.map((entry) async {
       final client = entry.value;
       try {
-        return await client.searchItems(query, limit: limit ?? 30);
+        return await client.searchItems(query, limit: fetchLimit);
       } catch (e, st) {
         appLogger.e('Search failed on ${entry.key}', error: e, stackTrace: st);
         return <MediaItem>[];
@@ -240,7 +228,7 @@ class DataAggregationService {
     });
 
     final allResults = (await Future.wait(futures)).expand((l) => l).toList();
-    final result = limit != null && limit < allResults.length ? allResults.sublist(0, limit) : allResults;
+    final result = rankMediaSearchResults(allResults, query, limit: resultLimit);
 
     appLogger.i('Found ${result.length} search results across all servers');
 
@@ -259,78 +247,5 @@ class DataAggregationService {
     }
 
     return grouped;
-  }
-
-  /// Split "Recently Added" hubs that contain items from multiple libraries
-  /// into separate per-library hubs, matching the official Plex client behavior.
-  List<MediaHub> _splitRecentlyAddedHubs(List<MediaHub> hubs, List<MediaLibrary>? libraries) {
-    final result = <MediaHub>[];
-
-    for (final hub in hubs) {
-      final hubId = hub.identifier?.toLowerCase() ?? '';
-      if (!hubId.contains('.recent')) {
-        result.add(hub);
-        continue;
-      }
-
-      // Group items by libraryId
-      final groups = <String, List<MediaItem>>{};
-      final ungrouped = <MediaItem>[];
-
-      for (final item in hub.items) {
-        final libraryId = item.libraryId;
-        if (libraryId == null) {
-          ungrouped.add(item);
-        } else {
-          groups.putIfAbsent(libraryId, () => []).add(item);
-        }
-      }
-
-      // Single library (or no groupable items) — keep hub unchanged
-      if (groups.length <= 1) {
-        result.add(hub);
-        continue;
-      }
-
-      // Multiple libraries — create one hub per library
-      for (final entry in groups.entries) {
-        final items = entry.value;
-        final libraryName = _resolveLibraryName(items.first, libraries);
-        final title = libraryName != null ? t.discover.recentlyAddedIn(library: libraryName) : hub.title;
-
-        result.add(
-          hub.copyWith(
-            title: title,
-            identifier: '${hub.identifier}_${entry.key}',
-            size: items.length,
-            items: items,
-            libraryId: entry.key,
-          ),
-        );
-      }
-
-      // Keep ungrouped items in a hub with the original title
-      if (ungrouped.isNotEmpty) {
-        result.add(hub.copyWith(size: ungrouped.length, items: ungrouped));
-      }
-    }
-
-    return result;
-  }
-
-  /// Resolve a library name from an item's [libraryTitle] or by looking up
-  /// the library in the supplied list.
-  String? _resolveLibraryName(MediaItem item, List<MediaLibrary>? libraries) {
-    if (item.libraryTitle != null && item.libraryTitle!.isNotEmpty) {
-      return item.libraryTitle;
-    }
-    if (libraries != null && item.libraryId != null) {
-      for (final lib in libraries) {
-        if (lib.id == item.libraryId) {
-          return lib.title;
-        }
-      }
-    }
-    return null;
   }
 }

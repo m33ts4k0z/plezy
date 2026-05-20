@@ -18,8 +18,9 @@ Future<void> collectEpisodesForShow(
   String showRatingKey, {
   required bool unwatchedOnly,
   required List<MediaItem> out,
+  MediaItem? fallback,
 }) {
-  return _collectPlayable(client, showRatingKey, unwatchedOnly: unwatchedOnly, out: out);
+  return _collectPlayable(client, showRatingKey, unwatchedOnly: unwatchedOnly, out: out, fallback: fallback);
 }
 
 /// Collect every episode of a single season into [out] via the same
@@ -30,8 +31,9 @@ Future<void> collectEpisodesForSeason(
   String seasonRatingKey, {
   required bool unwatchedOnly,
   required List<MediaItem> out,
+  MediaItem? fallback,
 }) {
-  return _collectPlayable(client, seasonRatingKey, unwatchedOnly: unwatchedOnly, out: out);
+  return _collectPlayable(client, seasonRatingKey, unwatchedOnly: unwatchedOnly, out: out, fallback: fallback);
 }
 
 Future<void> _collectPlayable(
@@ -39,11 +41,38 @@ Future<void> _collectPlayable(
   String parentId, {
   required bool unwatchedOnly,
   required List<MediaItem> out,
+  MediaItem? fallback,
 }) async {
   final leaves = await client.fetchPlayableDescendants(parentId);
   for (final ep in leaves) {
     if (ep.kind != MediaKind.episode) continue;
     if (unwatchedOnly && ep.isWatched && !ep.hasActiveProgress) continue;
-    out.add(ep);
+    out.add(_withFallbackLibrary(ep, fallback));
   }
+}
+
+MediaItem _withFallbackLibrary(MediaItem item, MediaItem? fallback) {
+  if (fallback == null) return item;
+  final fallbackIsSeason = fallback.kind == MediaKind.season;
+  final fallbackIsShow = fallback.kind == MediaKind.show;
+  return item.copyWith(
+    serverId: item.serverId ?? fallback.serverId,
+    serverName: item.serverName ?? fallback.serverName,
+    libraryId: item.libraryId ?? fallback.libraryId,
+    libraryTitle: item.libraryTitle ?? fallback.libraryTitle,
+    parentId: item.parentId ?? (fallbackIsSeason ? fallback.id : null),
+    parentTitle: item.parentTitle ?? (fallbackIsSeason ? fallback.title : null),
+    grandparentId: item.grandparentId ?? _fallbackGrandparentId(fallback, isShow: fallbackIsShow),
+    grandparentTitle: item.grandparentTitle ?? _fallbackGrandparentTitle(fallback, isShow: fallbackIsShow),
+  );
+}
+
+String? _fallbackGrandparentId(MediaItem fallback, {required bool isShow}) {
+  if (isShow) return fallback.id;
+  return fallback.grandparentId ?? fallback.parentId;
+}
+
+String? _fallbackGrandparentTitle(MediaItem fallback, {required bool isShow}) {
+  if (isShow) return fallback.title;
+  return fallback.grandparentTitle ?? fallback.parentTitle;
 }

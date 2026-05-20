@@ -49,6 +49,7 @@ class TranslationsRu extends Translations with BaseTranslations<AppLocale, Trans
 	@override late final _TranslationsHotkeysRu hotkeys = _TranslationsHotkeysRu._(_root);
 	@override late final _TranslationsFileInfoRu fileInfo = _TranslationsFileInfoRu._(_root);
 	@override late final _TranslationsMediaMenuRu mediaMenu = _TranslationsMediaMenuRu._(_root);
+	@override late final _TranslationsRateSheetRu rateSheet = _TranslationsRateSheetRu._(_root);
 	@override late final _TranslationsAccessibilityRu accessibility = _TranslationsAccessibilityRu._(_root);
 	@override late final _TranslationsTooltipsRu tooltips = _TranslationsTooltipsRu._(_root);
 	@override late final _TranslationsVideoControlsRu videoControls = _TranslationsVideoControlsRu._(_root);
@@ -375,6 +376,12 @@ class _TranslationsSettingsRu extends TranslationsSettingsEn {
 	@override String get displaySwitchDelay => 'Задержка переключения дисплея';
 	@override String get tunneledPlayback => 'Туннельное воспроизведение';
 	@override String get tunneledPlaybackDescription => 'Использовать видеотуннелирование. Отключите, если HDR показывает черный экран.';
+	@override String get dvConversionMode => 'Преобразование Dolby Vision';
+	@override String get dvConversionModeDescription => 'Выберите, как ExoPlayer обрабатывает файлы Dolby Vision Profile 7.';
+	@override String get dvConversionAuto => 'Авто';
+	@override String get dvConversionNative => 'Нативно / отключено';
+	@override String get dvConversionDv81 => 'P7 → P8.1';
+	@override String get dvConversionHevcStrip => 'P7 → HEVC';
 	@override String get requireProfileSelectionOnOpen => 'Запрашивать профиль при запуске';
 	@override String get requireProfileSelectionOnOpenDescription => 'Показывать выбор профиля при каждом открытии приложения';
 	@override String get forceTvMode => 'Принудительный режим ТВ';
@@ -481,6 +488,26 @@ class _TranslationsMediaMenuRu extends TranslationsMediaMenuEn {
 	@override String get playVersion => 'Воспроизвести версию...';
 }
 
+// Path: rateSheet
+class _TranslationsRateSheetRu extends TranslationsRateSheetEn {
+	_TranslationsRateSheetRu._(TranslationsRu root) : this._root = root, super.internal(root);
+
+	final TranslationsRu _root; // ignore: unused_field
+
+	// Translations
+	@override String get title => 'Оценить';
+	@override String get server => 'Сервер';
+	@override String starValue({required Object rating}) => '${rating} / 5';
+	@override String scoreValue({required Object score}) => '${score} / 10';
+	@override String get setScore => 'Установить оценку';
+	@override String get notRated => 'Без оценки';
+	@override String get liked => 'Понравилось';
+	@override String get notLiked => 'Не отмечено понравившимся';
+	@override String get saved => 'Сохранено';
+	@override String get notAvailable => 'Совпадений не найдено';
+	@override String get noConnectedTrackers => 'Подключите трекер в настройках, чтобы оценивать там.';
+}
+
 // Path: accessibility
 class _TranslationsAccessibilityRu extends TranslationsAccessibilityEn {
 	_TranslationsAccessibilityRu._(TranslationsRu root) : this._root = root, super.internal(root);
@@ -574,6 +601,7 @@ class _TranslationsVideoControlsRu extends TranslationsVideoControlsEn {
 	@override String endsAt({required Object time}) => 'Закончится в ${time}';
 	@override String get pipActive => 'Воспроизводится в режиме «картинка в картинке»';
 	@override String get pipFailed => 'Не удалось запустить режим «картинка в картинке»';
+	@override String get screenshotSaved => 'Снимок экрана сохранён';
 	@override late final _TranslationsVideoControlsPipErrorsRu pipErrors = _TranslationsVideoControlsPipErrorsRu._(_root);
 	@override String get chapters => 'Главы';
 	@override String get noChaptersAvailable => 'Главы недоступны';
@@ -736,18 +764,32 @@ class _TranslationsProfilesRu extends TranslationsProfilesEn {
 	@override String get pinManagedByPlex => 'PIN управляется Plex. Редактируйте на plex.tv.';
 	@override String get noPinSetEditOnPlex => 'PIN не установлен. Чтобы требовать его, отредактируйте пользователя Home на plex.tv.';
 	@override String get setPin => 'Установить PIN';
+	@override String get setPinTitle => 'Установить PIN';
+	@override String get confirmPinTitle => 'Подтвердить PIN';
+	@override String get pinSet => 'PIN установлен';
+	@override String get changePin => 'Изменить';
+	@override String get removePin => 'Удалить';
 	@override String get connectionsLabel => 'Соединения';
 	@override String get add => 'Добавить';
 	@override String get deleteProfileButton => 'Удалить профиль';
 	@override String get noConnectionsHint => 'Нет соединений — добавьте одно, чтобы использовать этот профиль.';
+	@override String get noConnections => 'Нет соединений';
 	@override String get plexHomeAccount => 'Аккаунт Plex Home';
 	@override String get connectionDefault => 'По умолчанию';
+	@override String connectionAs({required Object displayName}) => 'как ${displayName}';
 	@override String get makeDefault => 'Сделать по умолчанию';
 	@override String get removeConnection => 'Удалить';
+	@override String get profileRenamed => 'Профиль переименован.';
 	@override String borrowAddTo({required Object displayName}) => 'Добавить в ${displayName}';
 	@override String get borrowExplain => 'Заимствуйте подключение другого профиля. Для профилей с PIN нужен PIN.';
 	@override String get borrowEmpty => 'Пока нечего заимствовать.';
 	@override String get borrowEmptySubtitle => 'Сначала подключите Plex или Jellyfin к другому профилю.';
+	@override String borrowFromProfile({required Object displayName}) => 'Из ${displayName}';
+	@override String get borrowConnectionBorrowed => 'Подключение заимствовано.';
+	@override String get borrowFailed => 'Не удалось заимствовать подключение.';
+	@override String get incorrectPin => 'Неверный PIN.';
+	@override String get sourceProfileMissingParentAccount => 'У исходного профиля отсутствует родительская учетная запись.';
+	@override String get failedToVerifyPin => 'Не удалось проверить PIN.';
 	@override String get newProfile => 'Новый профиль';
 	@override String get profileNameHint => 'например, Гости, Дети, Семейная комната';
 	@override String get pinProtectionOptional => 'Защита PIN-кодом (необязательно)';
@@ -1521,6 +1563,7 @@ class _TranslationsHotkeysActionsRu extends TranslationsHotkeysActionsEn {
 	@override String get subSeekPrev => 'К предыдущему субтитру';
 	@override String get shaderToggle => 'Вкл./выкл. шейдеры';
 	@override String get skipMarker => 'Пропустить вступление/титры';
+	@override String get screenshot => 'Сделать снимок экрана';
 }
 
 // Path: videoControls.pipErrors
@@ -1592,8 +1635,18 @@ class _TranslationsLibrariesSortLabelsRu extends TranslationsLibrariesSortLabels
 	@override String get dateAdded => 'Дата добавления';
 	@override String get releaseDate => 'Дата выхода';
 	@override String get rating => 'Рейтинг';
+	@override String get communityRating => 'Оценка сообщества';
+	@override String get criticRating => 'Оценка критиков';
 	@override String get lastPlayed => 'Последний просмотр';
+	@override String get datePlayed => 'Дата просмотра';
 	@override String get playCount => 'Количество просмотров';
+	@override String get productionYear => 'Год производства';
+	@override String get runtime => 'Длительность';
+	@override String get officialRating => 'Официальный рейтинг';
+	@override String get premiereDate => 'Дата премьеры';
+	@override String get startDate => 'Дата начала';
+	@override String get airTime => 'Время эфира';
+	@override String get studio => 'Студия';
 	@override String get random => 'Случайно';
 	@override String get dateShared => 'Дата открытия доступа';
 	@override String get latestEpisodeAirDate => 'Дата выхода последнего эпизода';
@@ -1986,6 +2039,12 @@ extension on TranslationsRu {
 			'settings.displaySwitchDelay' => 'Задержка переключения дисплея',
 			'settings.tunneledPlayback' => 'Туннельное воспроизведение',
 			'settings.tunneledPlaybackDescription' => 'Использовать видеотуннелирование. Отключите, если HDR показывает черный экран.',
+			'settings.dvConversionMode' => 'Преобразование Dolby Vision',
+			'settings.dvConversionModeDescription' => 'Выберите, как ExoPlayer обрабатывает файлы Dolby Vision Profile 7.',
+			'settings.dvConversionAuto' => 'Авто',
+			'settings.dvConversionNative' => 'Нативно / отключено',
+			'settings.dvConversionDv81' => 'P7 → P8.1',
+			'settings.dvConversionHevcStrip' => 'P7 → HEVC',
 			'settings.requireProfileSelectionOnOpen' => 'Запрашивать профиль при запуске',
 			'settings.requireProfileSelectionOnOpenDescription' => 'Показывать выбор профиля при каждом открытии приложения',
 			'settings.forceTvMode' => 'Принудительный режим ТВ',
@@ -2034,6 +2093,7 @@ extension on TranslationsRu {
 			'hotkeys.actions.subSeekPrev' => 'К предыдущему субтитру',
 			'hotkeys.actions.shaderToggle' => 'Вкл./выкл. шейдеры',
 			'hotkeys.actions.skipMarker' => 'Пропустить вступление/титры',
+			'hotkeys.actions.screenshot' => 'Сделать снимок экрана',
 			'fileInfo.title' => 'Информация о файле',
 			'fileInfo.video' => 'Видео',
 			'fileInfo.audio' => 'Аудио',
@@ -2074,6 +2134,17 @@ extension on TranslationsRu {
 			'mediaMenu.rate' => 'Оценить',
 			'mediaMenu.playFromBeginning' => 'Воспроизвести сначала',
 			'mediaMenu.playVersion' => 'Воспроизвести версию...',
+			'rateSheet.title' => 'Оценить',
+			'rateSheet.server' => 'Сервер',
+			'rateSheet.starValue' => ({required Object rating}) => '${rating} / 5',
+			'rateSheet.scoreValue' => ({required Object score}) => '${score} / 10',
+			'rateSheet.setScore' => 'Установить оценку',
+			'rateSheet.notRated' => 'Без оценки',
+			'rateSheet.liked' => 'Понравилось',
+			'rateSheet.notLiked' => 'Не отмечено понравившимся',
+			'rateSheet.saved' => 'Сохранено',
+			'rateSheet.notAvailable' => 'Совпадений не найдено',
+			'rateSheet.noConnectedTrackers' => 'Подключите трекер в настройках, чтобы оценивать там.',
 			'accessibility.mediaCardMovie' => ({required Object title}) => '${title}, фильм',
 			'accessibility.mediaCardShow' => ({required Object title}) => '${title}, сериал',
 			'accessibility.mediaCardEpisode' => ({required Object title, required Object episodeInfo}) => '${title}, ${episodeInfo}',
@@ -2142,6 +2213,7 @@ extension on TranslationsRu {
 			'videoControls.endsAt' => ({required Object time}) => 'Закончится в ${time}',
 			'videoControls.pipActive' => 'Воспроизводится в режиме «картинка в картинке»',
 			'videoControls.pipFailed' => 'Не удалось запустить режим «картинка в картинке»',
+			'videoControls.screenshotSaved' => 'Снимок экрана сохранён',
 			'videoControls.pipErrors.androidVersion' => 'Требуется Android 8.0 или новее',
 			'videoControls.pipErrors.iosVersion' => 'Требуется iOS 15.0 или новее',
 			'videoControls.pipErrors.permissionDisabled' => 'Картинка-в-картинке отключена. Включите ее в системных настройках.',
@@ -2241,6 +2313,8 @@ extension on TranslationsRu {
 			'profiles.signOut' => 'Выйти',
 			'profiles.signOutPlexTitle' => 'Выйти из Plex?',
 			'profiles.signOutPlexMessage' => ({required Object displayName}) => 'Удалить ${displayName} и всех пользователей Plex Home? Вы сможете войти снова в любое время.',
+			_ => null,
+		} ?? switch (path) {
 			'profiles.signedOutPlex' => 'Вы вышли из Plex.',
 			'profiles.signOutFailed' => 'Не удалось выйти.',
 			'profiles.sectionTitle' => 'Профили',
@@ -2256,20 +2330,32 @@ extension on TranslationsRu {
 			'profiles.pinManagedByPlex' => 'PIN управляется Plex. Редактируйте на plex.tv.',
 			'profiles.noPinSetEditOnPlex' => 'PIN не установлен. Чтобы требовать его, отредактируйте пользователя Home на plex.tv.',
 			'profiles.setPin' => 'Установить PIN',
+			'profiles.setPinTitle' => 'Установить PIN',
+			'profiles.confirmPinTitle' => 'Подтвердить PIN',
+			'profiles.pinSet' => 'PIN установлен',
+			'profiles.changePin' => 'Изменить',
+			'profiles.removePin' => 'Удалить',
 			'profiles.connectionsLabel' => 'Соединения',
 			'profiles.add' => 'Добавить',
 			'profiles.deleteProfileButton' => 'Удалить профиль',
 			'profiles.noConnectionsHint' => 'Нет соединений — добавьте одно, чтобы использовать этот профиль.',
-			_ => null,
-		} ?? switch (path) {
+			'profiles.noConnections' => 'Нет соединений',
 			'profiles.plexHomeAccount' => 'Аккаунт Plex Home',
 			'profiles.connectionDefault' => 'По умолчанию',
+			'profiles.connectionAs' => ({required Object displayName}) => 'как ${displayName}',
 			'profiles.makeDefault' => 'Сделать по умолчанию',
 			'profiles.removeConnection' => 'Удалить',
+			'profiles.profileRenamed' => 'Профиль переименован.',
 			'profiles.borrowAddTo' => ({required Object displayName}) => 'Добавить в ${displayName}',
 			'profiles.borrowExplain' => 'Заимствуйте подключение другого профиля. Для профилей с PIN нужен PIN.',
 			'profiles.borrowEmpty' => 'Пока нечего заимствовать.',
 			'profiles.borrowEmptySubtitle' => 'Сначала подключите Plex или Jellyfin к другому профилю.',
+			'profiles.borrowFromProfile' => ({required Object displayName}) => 'Из ${displayName}',
+			'profiles.borrowConnectionBorrowed' => 'Подключение заимствовано.',
+			'profiles.borrowFailed' => 'Не удалось заимствовать подключение.',
+			'profiles.incorrectPin' => 'Неверный PIN.',
+			'profiles.sourceProfileMissingParentAccount' => 'У исходного профиля отсутствует родительская учетная запись.',
+			'profiles.failedToVerifyPin' => 'Не удалось проверить PIN.',
 			'profiles.newProfile' => 'Новый профиль',
 			'profiles.profileNameHint' => 'например, Гости, Дети, Семейная комната',
 			'profiles.pinProtectionOptional' => 'Защита PIN-кодом (необязательно)',
@@ -2372,8 +2458,18 @@ extension on TranslationsRu {
 			'libraries.sortLabels.dateAdded' => 'Дата добавления',
 			'libraries.sortLabels.releaseDate' => 'Дата выхода',
 			'libraries.sortLabels.rating' => 'Рейтинг',
+			'libraries.sortLabels.communityRating' => 'Оценка сообщества',
+			'libraries.sortLabels.criticRating' => 'Оценка критиков',
 			'libraries.sortLabels.lastPlayed' => 'Последний просмотр',
+			'libraries.sortLabels.datePlayed' => 'Дата просмотра',
 			'libraries.sortLabels.playCount' => 'Количество просмотров',
+			'libraries.sortLabels.productionYear' => 'Год производства',
+			'libraries.sortLabels.runtime' => 'Длительность',
+			'libraries.sortLabels.officialRating' => 'Официальный рейтинг',
+			'libraries.sortLabels.premiereDate' => 'Дата премьеры',
+			'libraries.sortLabels.startDate' => 'Дата начала',
+			'libraries.sortLabels.airTime' => 'Время эфира',
+			'libraries.sortLabels.studio' => 'Студия',
 			'libraries.sortLabels.random' => 'Случайно',
 			'libraries.sortLabels.dateShared' => 'Дата открытия доступа',
 			'libraries.sortLabels.latestEpisodeAirDate' => 'Дата выхода последнего эпизода',
@@ -2731,6 +2827,8 @@ extension on TranslationsRu {
 			'metadataEdit.summary' => 'Описание',
 			'metadataEdit.poster' => 'Постер',
 			'metadataEdit.background' => 'Фон',
+			_ => null,
+		} ?? switch (path) {
 			'metadataEdit.logo' => 'Логотип',
 			'metadataEdit.squareArt' => 'Квадратное изображение',
 			'metadataEdit.selectPoster' => 'Выбрать постер',
@@ -2774,8 +2872,6 @@ extension on TranslationsRu {
 			'metadataEdit.metadataLanguage' => 'Язык метаданных',
 			'metadataEdit.useOriginalTitle' => 'Использовать оригинальное название',
 			'metadataEdit.preferredAudioLanguage' => 'Предпочитаемый язык аудио',
-			_ => null,
-		} ?? switch (path) {
 			'metadataEdit.preferredSubtitleLanguage' => 'Предпочитаемый язык субтитров',
 			'metadataEdit.subtitleMode' => 'Автовыбор субтитров',
 			'metadataEdit.manuallySelected' => 'Выбор вручную',

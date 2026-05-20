@@ -10,6 +10,7 @@ import '../../i18n/strings.g.dart';
 import '../../mixins/controller_disposer_mixin.dart';
 import '../../utils/platform_detector.dart';
 import '../../widgets/app_icon.dart';
+import '../../widgets/clickable_cursor.dart';
 
 /// Dialog for entering a 4-digit PIN to access a protected profile.
 class PinEntryDialog extends StatefulWidget {
@@ -27,6 +28,7 @@ class _PinEntryDialogState extends State<PinEntryDialog> with SingleTickerProvid
   late Animation<double> _shakeAnimation;
   final _pinInputKey = GlobalKey<_TvPinInputState>();
   final _cancelFocusNode = FocusNode(debugLabel: 'PinCancelButton');
+  bool _completed = false;
 
   @override
   void initState() {
@@ -56,11 +58,15 @@ class _PinEntryDialogState extends State<PinEntryDialog> with SingleTickerProvid
   }
 
   void _submit(String pin) {
-    Navigator.of(context).pop(pin);
+    if (_completed) return;
+    _completed = true;
+    Navigator.of(context).pop<String>(pin);
   }
 
   void _cancel() {
-    Navigator.of(context).pop(null);
+    if (_completed) return;
+    _completed = true;
+    Navigator.of(context).pop<String>();
   }
 
   void _focusPinInput() {
@@ -201,11 +207,13 @@ class _TvPinInputState extends State<_TvPinInput> with ControllerDisposerMixin {
   final FocusNode _mobileFocusNode = FocusNode(debugLabel: 'PinInputMobile');
   late final TextEditingController _mobileController = createTextEditingController();
   final FocusNode _keypadFocusNode = FocusNode(debugLabel: 'PinKeypad');
+  bool _keypadRefocusScheduled = false;
 
   @override
   void initState() {
     super.initState();
     _mobileFocusNode.addListener(_handleMobileFocusChanged);
+    _keypadFocusNode.addListener(_handleKeypadFocusChanged);
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
@@ -220,6 +228,7 @@ class _TvPinInputState extends State<_TvPinInput> with ControllerDisposerMixin {
 
   @override
   void dispose() {
+    _keypadFocusNode.removeListener(_handleKeypadFocusChanged);
     _keypadFocusNode.dispose();
     _mobileFocusNode.removeListener(_handleMobileFocusChanged);
     _mobileFocusNode.dispose();
@@ -228,6 +237,21 @@ class _TvPinInputState extends State<_TvPinInput> with ControllerDisposerMixin {
 
   void _handleMobileFocusChanged() {
     if (mounted) setState(() {});
+  }
+
+  void _handleKeypadFocusChanged() {
+    if (!mounted || widget.isMobile || _keypadFocusNode.hasFocus) return;
+    _scheduleKeypadRefocus();
+  }
+
+  void _scheduleKeypadRefocus() {
+    if (_keypadRefocusScheduled) return;
+    _keypadRefocusScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _keypadRefocusScheduled = false;
+      if (!mounted || widget.isMobile || _keypadFocusNode.hasFocus) return;
+      _requestKeypadFocus();
+    });
   }
 
   void _reset() {
@@ -361,13 +385,13 @@ class _TvPinInputState extends State<_TvPinInput> with ControllerDisposerMixin {
         return KeyEventResult.handled;
       }
 
-      if (event.isPhysicalKeyboardEnter) {
-        _trySubmit();
+      if (event.isTvSelectEvent || (PlatformDetector.isTV() && event.isPhysicalKeyboardEnter)) {
+        _activate(_rows[_row][_column]);
         return KeyEventResult.handled;
       }
 
-      if (event.isTvSelectEvent) {
-        _activate(_rows[_row][_column]);
+      if (event.isPhysicalKeyboardEnter) {
+        _trySubmit();
         return KeyEventResult.handled;
       }
 
@@ -445,7 +469,12 @@ class _TvPinInputState extends State<_TvPinInput> with ControllerDisposerMixin {
       return _buildMobileLayout(context);
     }
 
-    return Focus(focusNode: _keypadFocusNode, onKeyEvent: _handleKey, child: _buildKeypadLayout(context));
+    return Focus(
+      focusNode: _keypadFocusNode,
+      autofocus: true,
+      onKeyEvent: _handleKey,
+      child: _buildKeypadLayout(context),
+    );
   }
 
   Widget _buildKeypadLayout(BuildContext context) {
@@ -482,23 +511,25 @@ class _TvPinInputState extends State<_TvPinInput> with ControllerDisposerMixin {
     final background = selected ? colorScheme.primary : colorScheme.surfaceContainerHighest.withValues(alpha: 0.88);
     final foreground = selected ? colorScheme.onPrimary : colorScheme.onSurface;
 
-    return GestureDetector(
-      onTap: () {
-        setState(() {
-          _row = row;
-          _column = column;
-        });
-        _activate(key);
-      },
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 120),
-        width: _keySize,
-        height: _keySize,
-        alignment: Alignment.center,
-        decoration: BoxDecoration(color: background, borderRadius: BorderRadius.circular(16)),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 4),
-          child: _buildKeyContent(context, key, foreground),
+    return ClickableCursor(
+      child: GestureDetector(
+        onTap: () {
+          setState(() {
+            _row = row;
+            _column = column;
+          });
+          _activate(key);
+        },
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          width: _keySize,
+          height: _keySize,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(color: background, borderRadius: BorderRadius.circular(16)),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            child: _buildKeyContent(context, key, foreground),
+          ),
         ),
       ),
     );
@@ -638,7 +669,7 @@ class _PinKey {
       case _PinKeyType.digit:
         return digit.toString();
       case _PinKeyType.backspace:
-        return 'Del';
+        return t.common.delete;
       case _PinKeyType.close:
         return t.common.cancel;
     }
@@ -671,13 +702,13 @@ Future<String?> showPinEntryDialog(BuildContext context, String userName, {Strin
 /// in one place so multiple call sites don't drift.
 Future<String?> captureAndConfirmPin(
   BuildContext context, {
-  String setLabel = 'Set PIN',
-  String confirmLabel = 'Confirm PIN',
+  String? setLabel,
+  String? confirmLabel,
   void Function(BuildContext)? onMismatch,
 }) async {
-  final pin = await showPinEntryDialog(context, setLabel);
+  final pin = await showPinEntryDialog(context, setLabel ?? t.profiles.setPinTitle);
   if (pin == null || !context.mounted) return null;
-  final confirm = await showPinEntryDialog(context, confirmLabel);
+  final confirm = await showPinEntryDialog(context, confirmLabel ?? t.profiles.confirmPinTitle);
   if (confirm == null || !context.mounted) return null;
   if (pin == confirm) return pin;
   onMismatch?.call(context);

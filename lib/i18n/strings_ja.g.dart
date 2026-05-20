@@ -49,6 +49,7 @@ class TranslationsJa extends Translations with BaseTranslations<AppLocale, Trans
 	@override late final _TranslationsHotkeysJa hotkeys = _TranslationsHotkeysJa._(_root);
 	@override late final _TranslationsFileInfoJa fileInfo = _TranslationsFileInfoJa._(_root);
 	@override late final _TranslationsMediaMenuJa mediaMenu = _TranslationsMediaMenuJa._(_root);
+	@override late final _TranslationsRateSheetJa rateSheet = _TranslationsRateSheetJa._(_root);
 	@override late final _TranslationsAccessibilityJa accessibility = _TranslationsAccessibilityJa._(_root);
 	@override late final _TranslationsTooltipsJa tooltips = _TranslationsTooltipsJa._(_root);
 	@override late final _TranslationsVideoControlsJa videoControls = _TranslationsVideoControlsJa._(_root);
@@ -375,6 +376,12 @@ class _TranslationsSettingsJa extends TranslationsSettingsEn {
 	@override String get displaySwitchDelay => 'ディスプレイ切り替え遅延';
 	@override String get tunneledPlayback => 'トンネル再生';
 	@override String get tunneledPlaybackDescription => '動画トンネリングを使用します。HDR再生で画面が黒くなる場合は無効にしてください。';
+	@override String get dvConversionMode => 'Dolby Vision 変換';
+	@override String get dvConversionModeDescription => 'ExoPlayer が Dolby Vision Profile 7 ファイルを処理する方法を選択します。';
+	@override String get dvConversionAuto => '自動';
+	@override String get dvConversionNative => 'ネイティブ / 無効';
+	@override String get dvConversionDv81 => 'P7 → P8.1';
+	@override String get dvConversionHevcStrip => 'P7 → HEVC';
 	@override String get requireProfileSelectionOnOpen => 'アプリ起動時にプロフィールを確認';
 	@override String get requireProfileSelectionOnOpenDescription => 'アプリを開くたびにプロフィール選択を表示';
 	@override String get forceTvMode => 'TVモードを強制';
@@ -481,6 +488,26 @@ class _TranslationsMediaMenuJa extends TranslationsMediaMenuEn {
 	@override String get playVersion => 'バージョンを再生...';
 }
 
+// Path: rateSheet
+class _TranslationsRateSheetJa extends TranslationsRateSheetEn {
+	_TranslationsRateSheetJa._(TranslationsJa root) : this._root = root, super.internal(root);
+
+	final TranslationsJa _root; // ignore: unused_field
+
+	// Translations
+	@override String get title => '評価';
+	@override String get server => 'サーバー';
+	@override String starValue({required Object rating}) => '${rating} / 5';
+	@override String scoreValue({required Object score}) => '${score} / 10';
+	@override String get setScore => 'スコアを設定';
+	@override String get notRated => '未評価';
+	@override String get liked => 'いいね済み';
+	@override String get notLiked => 'いいねなし';
+	@override String get saved => '保存済み';
+	@override String get notAvailable => '一致なし';
+	@override String get noConnectedTrackers => '設定でトラッカーを接続すると、そこで評価できます。';
+}
+
 // Path: accessibility
 class _TranslationsAccessibilityJa extends TranslationsAccessibilityEn {
 	_TranslationsAccessibilityJa._(TranslationsJa root) : this._root = root, super.internal(root);
@@ -574,6 +601,7 @@ class _TranslationsVideoControlsJa extends TranslationsVideoControlsEn {
 	@override String endsAt({required Object time}) => '${time}に終了';
 	@override String get pipActive => 'ピクチャーインピクチャーで再生中';
 	@override String get pipFailed => 'ピクチャーインピクチャーの開始に失敗しました';
+	@override String get screenshotSaved => 'スクリーンショットを保存しました';
 	@override late final _TranslationsVideoControlsPipErrorsJa pipErrors = _TranslationsVideoControlsPipErrorsJa._(_root);
 	@override String get chapters => 'チャプター';
 	@override String get noChaptersAvailable => 'チャプターがありません';
@@ -736,18 +764,32 @@ class _TranslationsProfilesJa extends TranslationsProfilesEn {
 	@override String get pinManagedByPlex => 'PINはPlexで管理されています。plex.tvで編集してください。';
 	@override String get noPinSetEditOnPlex => 'PINが設定されていません。要求するには、plex.tvでHomeユーザーを編集してください。';
 	@override String get setPin => 'PINを設定';
+	@override String get setPinTitle => 'PINを設定';
+	@override String get confirmPinTitle => 'PINを確認';
+	@override String get pinSet => 'PIN設定済み';
+	@override String get changePin => '変更';
+	@override String get removePin => '削除';
 	@override String get connectionsLabel => '接続';
 	@override String get add => '追加';
 	@override String get deleteProfileButton => 'プロファイルを削除';
 	@override String get noConnectionsHint => '接続がありません — このプロファイルを使うには1つ追加してください。';
+	@override String get noConnections => '接続がありません';
 	@override String get plexHomeAccount => 'Plex Homeアカウント';
 	@override String get connectionDefault => 'デフォルト';
+	@override String connectionAs({required Object displayName}) => '${displayName}として';
 	@override String get makeDefault => 'デフォルトに設定';
 	@override String get removeConnection => '削除';
+	@override String get profileRenamed => 'プロフィール名を変更しました。';
 	@override String borrowAddTo({required Object displayName}) => '${displayName}に追加';
 	@override String get borrowExplain => '別のプロフィールの接続を借用します。PIN保護されたプロフィールにはPINが必要です。';
 	@override String get borrowEmpty => 'まだ借りるものがありません。';
 	@override String get borrowEmptySubtitle => 'まず別のプロフィールにPlexまたはJellyfinを接続してください。';
+	@override String borrowFromProfile({required Object displayName}) => '${displayName}から';
+	@override String get borrowConnectionBorrowed => '接続を借用しました。';
+	@override String get borrowFailed => '接続を借用できませんでした。';
+	@override String get incorrectPin => 'PINが正しくありません。';
+	@override String get sourceProfileMissingParentAccount => 'ソースプロフィールに親アカウントがありません。';
+	@override String get failedToVerifyPin => 'PINを確認できませんでした。';
 	@override String get newProfile => '新しいプロファイル';
 	@override String get profileNameHint => '例：ゲスト、キッズ、ファミリールーム';
 	@override String get pinProtectionOptional => 'PIN保護（オプション）';
@@ -1521,6 +1563,7 @@ class _TranslationsHotkeysActionsJa extends TranslationsHotkeysActionsEn {
 	@override String get subSeekPrev => '前の字幕にシーク';
 	@override String get shaderToggle => 'シェーダー切替';
 	@override String get skipMarker => 'イントロ/クレジットをスキップ';
+	@override String get screenshot => 'スクリーンショットを撮る';
 }
 
 // Path: videoControls.pipErrors
@@ -1592,8 +1635,18 @@ class _TranslationsLibrariesSortLabelsJa extends TranslationsLibrariesSortLabels
 	@override String get dateAdded => '追加日';
 	@override String get releaseDate => 'リリース日';
 	@override String get rating => '評価';
+	@override String get communityRating => 'コミュニティ評価';
+	@override String get criticRating => '批評家評価';
 	@override String get lastPlayed => '最終再生';
+	@override String get datePlayed => '再生日';
 	@override String get playCount => '再生回数';
+	@override String get productionYear => '製作年';
+	@override String get runtime => '再生時間';
+	@override String get officialRating => '公式レーティング';
+	@override String get premiereDate => 'プレミア日';
+	@override String get startDate => '開始日';
+	@override String get airTime => '放送時刻';
+	@override String get studio => 'スタジオ';
 	@override String get random => 'ランダム';
 	@override String get dateShared => '共有日';
 	@override String get latestEpisodeAirDate => '最新エピソード放送日';
@@ -1986,6 +2039,12 @@ extension on TranslationsJa {
 			'settings.displaySwitchDelay' => 'ディスプレイ切り替え遅延',
 			'settings.tunneledPlayback' => 'トンネル再生',
 			'settings.tunneledPlaybackDescription' => '動画トンネリングを使用します。HDR再生で画面が黒くなる場合は無効にしてください。',
+			'settings.dvConversionMode' => 'Dolby Vision 変換',
+			'settings.dvConversionModeDescription' => 'ExoPlayer が Dolby Vision Profile 7 ファイルを処理する方法を選択します。',
+			'settings.dvConversionAuto' => '自動',
+			'settings.dvConversionNative' => 'ネイティブ / 無効',
+			'settings.dvConversionDv81' => 'P7 → P8.1',
+			'settings.dvConversionHevcStrip' => 'P7 → HEVC',
 			'settings.requireProfileSelectionOnOpen' => 'アプリ起動時にプロフィールを確認',
 			'settings.requireProfileSelectionOnOpenDescription' => 'アプリを開くたびにプロフィール選択を表示',
 			'settings.forceTvMode' => 'TVモードを強制',
@@ -2034,6 +2093,7 @@ extension on TranslationsJa {
 			'hotkeys.actions.subSeekPrev' => '前の字幕にシーク',
 			'hotkeys.actions.shaderToggle' => 'シェーダー切替',
 			'hotkeys.actions.skipMarker' => 'イントロ/クレジットをスキップ',
+			'hotkeys.actions.screenshot' => 'スクリーンショットを撮る',
 			'fileInfo.title' => 'ファイル情報',
 			'fileInfo.video' => '映像',
 			'fileInfo.audio' => '音声',
@@ -2074,6 +2134,17 @@ extension on TranslationsJa {
 			'mediaMenu.rate' => '評価',
 			'mediaMenu.playFromBeginning' => '最初から再生',
 			'mediaMenu.playVersion' => 'バージョンを再生...',
+			'rateSheet.title' => '評価',
+			'rateSheet.server' => 'サーバー',
+			'rateSheet.starValue' => ({required Object rating}) => '${rating} / 5',
+			'rateSheet.scoreValue' => ({required Object score}) => '${score} / 10',
+			'rateSheet.setScore' => 'スコアを設定',
+			'rateSheet.notRated' => '未評価',
+			'rateSheet.liked' => 'いいね済み',
+			'rateSheet.notLiked' => 'いいねなし',
+			'rateSheet.saved' => '保存済み',
+			'rateSheet.notAvailable' => '一致なし',
+			'rateSheet.noConnectedTrackers' => '設定でトラッカーを接続すると、そこで評価できます。',
 			'accessibility.mediaCardMovie' => ({required Object title}) => '${title}、映画',
 			'accessibility.mediaCardShow' => ({required Object title}) => '${title}、テレビ番組',
 			'accessibility.mediaCardEpisode' => ({required Object title, required Object episodeInfo}) => '${title}、${episodeInfo}',
@@ -2142,6 +2213,7 @@ extension on TranslationsJa {
 			'videoControls.endsAt' => ({required Object time}) => '${time}に終了',
 			'videoControls.pipActive' => 'ピクチャーインピクチャーで再生中',
 			'videoControls.pipFailed' => 'ピクチャーインピクチャーの開始に失敗しました',
+			'videoControls.screenshotSaved' => 'スクリーンショットを保存しました',
 			'videoControls.pipErrors.androidVersion' => 'Android 8.0以降が必要です',
 			'videoControls.pipErrors.iosVersion' => 'iOS 15.0以降が必要です',
 			'videoControls.pipErrors.permissionDisabled' => 'ピクチャーインピクチャーが無効です。システム設定で有効にしてください。',
@@ -2241,6 +2313,8 @@ extension on TranslationsJa {
 			'profiles.signOut' => 'サインアウト',
 			'profiles.signOutPlexTitle' => 'Plex からサインアウトしますか？',
 			'profiles.signOutPlexMessage' => ({required Object displayName}) => '${displayName}とすべてのPlex Homeユーザーを削除しますか？いつでも再サインインできます。',
+			_ => null,
+		} ?? switch (path) {
 			'profiles.signedOutPlex' => 'Plex からサインアウトしました。',
 			'profiles.signOutFailed' => 'サインアウトに失敗しました。',
 			'profiles.sectionTitle' => 'プロファイル',
@@ -2256,20 +2330,32 @@ extension on TranslationsJa {
 			'profiles.pinManagedByPlex' => 'PINはPlexで管理されています。plex.tvで編集してください。',
 			'profiles.noPinSetEditOnPlex' => 'PINが設定されていません。要求するには、plex.tvでHomeユーザーを編集してください。',
 			'profiles.setPin' => 'PINを設定',
+			'profiles.setPinTitle' => 'PINを設定',
+			'profiles.confirmPinTitle' => 'PINを確認',
+			'profiles.pinSet' => 'PIN設定済み',
+			'profiles.changePin' => '変更',
+			'profiles.removePin' => '削除',
 			'profiles.connectionsLabel' => '接続',
 			'profiles.add' => '追加',
 			'profiles.deleteProfileButton' => 'プロファイルを削除',
 			'profiles.noConnectionsHint' => '接続がありません — このプロファイルを使うには1つ追加してください。',
-			_ => null,
-		} ?? switch (path) {
+			'profiles.noConnections' => '接続がありません',
 			'profiles.plexHomeAccount' => 'Plex Homeアカウント',
 			'profiles.connectionDefault' => 'デフォルト',
+			'profiles.connectionAs' => ({required Object displayName}) => '${displayName}として',
 			'profiles.makeDefault' => 'デフォルトに設定',
 			'profiles.removeConnection' => '削除',
+			'profiles.profileRenamed' => 'プロフィール名を変更しました。',
 			'profiles.borrowAddTo' => ({required Object displayName}) => '${displayName}に追加',
 			'profiles.borrowExplain' => '別のプロフィールの接続を借用します。PIN保護されたプロフィールにはPINが必要です。',
 			'profiles.borrowEmpty' => 'まだ借りるものがありません。',
 			'profiles.borrowEmptySubtitle' => 'まず別のプロフィールにPlexまたはJellyfinを接続してください。',
+			'profiles.borrowFromProfile' => ({required Object displayName}) => '${displayName}から',
+			'profiles.borrowConnectionBorrowed' => '接続を借用しました。',
+			'profiles.borrowFailed' => '接続を借用できませんでした。',
+			'profiles.incorrectPin' => 'PINが正しくありません。',
+			'profiles.sourceProfileMissingParentAccount' => 'ソースプロフィールに親アカウントがありません。',
+			'profiles.failedToVerifyPin' => 'PINを確認できませんでした。',
 			'profiles.newProfile' => '新しいプロファイル',
 			'profiles.profileNameHint' => '例：ゲスト、キッズ、ファミリールーム',
 			'profiles.pinProtectionOptional' => 'PIN保護（オプション）',
@@ -2372,8 +2458,18 @@ extension on TranslationsJa {
 			'libraries.sortLabels.dateAdded' => '追加日',
 			'libraries.sortLabels.releaseDate' => 'リリース日',
 			'libraries.sortLabels.rating' => '評価',
+			'libraries.sortLabels.communityRating' => 'コミュニティ評価',
+			'libraries.sortLabels.criticRating' => '批評家評価',
 			'libraries.sortLabels.lastPlayed' => '最終再生',
+			'libraries.sortLabels.datePlayed' => '再生日',
 			'libraries.sortLabels.playCount' => '再生回数',
+			'libraries.sortLabels.productionYear' => '製作年',
+			'libraries.sortLabels.runtime' => '再生時間',
+			'libraries.sortLabels.officialRating' => '公式レーティング',
+			'libraries.sortLabels.premiereDate' => 'プレミア日',
+			'libraries.sortLabels.startDate' => '開始日',
+			'libraries.sortLabels.airTime' => '放送時刻',
+			'libraries.sortLabels.studio' => 'スタジオ',
 			'libraries.sortLabels.random' => 'ランダム',
 			'libraries.sortLabels.dateShared' => '共有日',
 			'libraries.sortLabels.latestEpisodeAirDate' => '最新エピソード放送日',
@@ -2731,6 +2827,8 @@ extension on TranslationsJa {
 			'metadataEdit.summary' => 'あらすじ',
 			'metadataEdit.poster' => 'ポスター',
 			'metadataEdit.background' => '背景',
+			_ => null,
+		} ?? switch (path) {
 			'metadataEdit.logo' => 'ロゴ',
 			'metadataEdit.squareArt' => '正方形アート',
 			'metadataEdit.selectPoster' => 'ポスターを選択',
@@ -2774,8 +2872,6 @@ extension on TranslationsJa {
 			'metadataEdit.metadataLanguage' => 'メタデータの言語',
 			'metadataEdit.useOriginalTitle' => '原題を使用',
 			'metadataEdit.preferredAudioLanguage' => '優先音声言語',
-			_ => null,
-		} ?? switch (path) {
 			'metadataEdit.preferredSubtitleLanguage' => '優先字幕言語',
 			'metadataEdit.subtitleMode' => '字幕自動選択モード',
 			'metadataEdit.manuallySelected' => '手動選択',

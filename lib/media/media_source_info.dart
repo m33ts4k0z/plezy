@@ -1,5 +1,6 @@
 import '../utils/codec_utils.dart';
 import '../utils/track_label_builder.dart' show TrackLabelBuilder, buildTrackLabel;
+import 'media_display_criteria.dart';
 
 class MediaSourceInfo {
   final String videoUrl;
@@ -7,7 +8,7 @@ class MediaSourceInfo {
   final List<MediaSubtitleTrack> subtitleTracks;
   final List<MediaChapter> chapters;
   final int? partId;
-  final double? frameRate;
+  final MediaDisplayCriteria? displayCriteria;
 
   /// Jellyfin source id for the *selected* version (null on Plex). Lets the
   /// trickplay loader request the right tile sheet when an item has multiple
@@ -30,7 +31,7 @@ class MediaSourceInfo {
     required this.subtitleTracks,
     required this.chapters,
     this.partId,
-    this.frameRate,
+    this.displayCriteria,
     this.mediaSourceId,
     this.defaultAudioStreamIndex,
     this.defaultSubtitleStreamIndex,
@@ -93,6 +94,7 @@ class MediaAudioTrack with _TrackLabelMixin {
   final String? displayTitle;
   final int? channels;
   final bool selected;
+  final bool external;
 
   MediaAudioTrack({
     required this.id,
@@ -104,7 +106,10 @@ class MediaAudioTrack with _TrackLabelMixin {
     this.displayTitle,
     this.channels,
     required this.selected,
+    this.external = false,
   });
+
+  bool get isExternal => external;
 
   String get label {
     final additionalParts = <String>[];

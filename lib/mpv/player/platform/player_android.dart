@@ -13,6 +13,7 @@ class PlayerAndroid extends PlayerBase {
   int? _bufferSizeBytes;
   bool _tunnelingEnabled = true;
   Duration _serverManagedStartOffset = Duration.zero;
+  String _dvConversionMode = 'auto';
 
   /// Stored subtitle track ID when subtitles are hidden via sub-visibility.
   String? _hiddenSubtitleTrackId;
@@ -103,6 +104,7 @@ class PlayerAndroid extends PlayerBase {
       final result = await invoke<bool>('initialize', {
         'bufferSizeBytes': _bufferSizeBytes,
         'tunnelingEnabled': _tunnelingEnabled,
+        'dvConversionMode': _dvConversionMode,
       });
       initialized = result == true;
       if (!initialized) {
@@ -136,12 +138,14 @@ class PlayerAndroid extends PlayerBase {
   Future<void> open(Media media, {bool play = true, bool isLive = false, List<SubtitleTrack>? externalSubtitles}) async {
     if (disposed) return;
     await _ensureInitialized();
-    setSeekable(false);
+    final startPosition = media.start ?? Duration.zero;
     // Drop any track-list left over from a previous open() so consumers that
     // poll `state.tracks` (e.g. TrackManager.applyTrackSelectionWhenReady) can
     // tell when fresh tracks have arrived rather than picking stale IDs from
     // the prior media. ExoPlayer re-emits the track list on STATE_READY.
     clearTracks();
+    resetPlaybackProgress(startPosition);
+    setSeekable(false);
 
     // ExoPlayer handles HLS seeking via the manifest. Plex now serves the
     // transcode from source 0 (full manifest), so ExoPlayer can seek to any
@@ -151,7 +155,6 @@ class PlayerAndroid extends PlayerBase {
     // time-pos by the offset) is no longer needed: with ExoPlayer doing the
     // seek locally via setMediaItem(item, startPositionMs), time-pos already
     // reflects source-time and sidecar SRT timestamps line up naturally.
-    final requestedStart = media.start ?? Duration.zero;
     _serverManagedStartOffset = Duration.zero;
 
     // Show the video layer
@@ -160,7 +163,7 @@ class PlayerAndroid extends PlayerBase {
     await invoke('open', {
       'uri': media.uri,
       'headers': media.headers,
-      'startPositionMs': requestedStart.inMilliseconds,
+      'startPositionMs': startPosition.inMilliseconds,
       'autoPlay': play,
       'isLive': isLive,
       if (externalSubtitles != null && externalSubtitles.isNotEmpty)
@@ -269,6 +272,14 @@ class PlayerAndroid extends PlayerBase {
         break;
       case 'tunneled-playback':
         _tunnelingEnabled = value != 'no';
+        break;
+      case 'dv-conversion-mode':
+        _dvConversionMode = value;
+        if (initialized) {
+          await invoke('setDvConversionMode', {'mode': value});
+        }
+        // If not yet initialized, the value is passed through the next
+        // `_ensureInitialized()` call via the initialize() payload.
         break;
       case 'sub-visibility':
         if (value == 'no') {

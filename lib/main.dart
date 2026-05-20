@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:io' show Platform, ProcessInfo;
+import 'dart:io' show Directory, Platform, ProcessInfo;
 import 'dart:ui' show AppExitResponse;
 import 'package:flutter/foundation.dart';
 // ignore: depend_on_referenced_packages
@@ -33,6 +33,8 @@ import 'services/settings_service.dart';
 import 'utils/platform_detector.dart';
 import 'services/apple_tv_remote_touch_service.dart';
 import 'services/discord_rpc_service.dart';
+import 'package:path_provider/path_provider.dart';
+import 'services/image_cache_service.dart';
 import 'services/gamepad_service.dart';
 import 'services/trakt/trakt_scrobble_service.dart';
 import 'services/trakt/trakt_sync_service.dart';
@@ -66,7 +68,8 @@ import 'services/plex_api_cache.dart';
 import 'database/app_database.dart';
 import 'screens/video_player_screen.dart';
 import 'utils/app_logger.dart';
-import 'utils/media_server_http_client.dart' show httpClient;
+import 'utils/managed_http_client.dart';
+import 'utils/media_server_http_client.dart';
 import 'utils/orientation_helper.dart';
 import 'utils/watch_state_notifier.dart';
 import 'i18n/strings.g.dart';
@@ -80,6 +83,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 const bool _enableSentry = bool.fromEnvironment('ENABLE_SENTRY', defaultValue: false);
 const String gitCommit = String.fromEnvironment('GIT_COMMIT');
 const String _sentryEnvironment = String.fromEnvironment('SENTRY_ENVIRONMENT');
+const String _sentryDist = String.fromEnvironment('SENTRY_DIST');
 
 // Workaround for Flutter bug #177992: iPadOS 26.1+ misinterprets fake touch events
 // at (0,0) as barrier taps, causing modals to dismiss immediately.
@@ -130,6 +134,7 @@ Future<void> main() async {
           ? 'plezy@${gitCommit.substring(0, 7)}'
           : 'plezy@${packageInfo.version}+${packageInfo.buildNumber}';
       if (_sentryEnvironment.isNotEmpty) options.environment = _sentryEnvironment;
+      if (_sentryDist.isNotEmpty) options.dist = _sentryDist;
       options.tracesSampleRate = 0;
       options.attachStacktrace = true;
       options.enableAutoSessionTracking = false;
@@ -153,6 +158,21 @@ Future<void> _bootstrapApp() async {
   unawaited(LocaleSettings.setLocale(savedLocale));
 
   await initializeDateFormatting(savedLocale.languageCode, null);
+
+  // One-time cleanup of the old flutter_cache_manager image cache directory
+  // (replaced by cached_network_image_ce in a prior refactor).
+  if (!settings.read(SettingsService.cleanedOldImageCache)) {
+    try {
+      final tempDir = await getTemporaryDirectory();
+      final oldCacheDir = Directory('${tempDir.path}/plexImageCache');
+      if (await oldCacheDir.exists()) {
+        await oldCacheDir.delete(recursive: true);
+      }
+    } catch (_) {
+      // Best-effort; the directory may be locked or already partial.
+    }
+    await settings.write(SettingsService.cleanedOldImageCache, true);
+  }
 
   // Configure image cache — keep budget modest to leave headroom for Skia decode buffers
   if (PlatformDetector.isDesktopOS()) {
@@ -421,6 +441,7 @@ class _MainAppState extends State<MainApp> with WidgetsBindingObserver {
   final Set<String> _pendingSyncKeys = <String>{};
   bool _isAutoDeleteRunning = false;
   bool _lastConnectivityWasWifi = false;
+  bool _shutdownStarted = false;
 
   /// Last time server health probes ran from a resume event (cooldown for desktop)
   DateTime _lastResumeProbe = DateTime(0);
@@ -468,11 +489,33 @@ class _MainAppState extends State<MainApp> with WidgetsBindingObserver {
 
     _appLifecycleListener = AppLifecycleListener(
       onExitRequested: () async {
-        httpClient.close();
-        await _appDatabase.close();
+        await _shutdownForExit();
         return AppExitResponse.exit;
       },
     );
+  }
+
+  Future<void> _shutdownForExit() async {
+    if (_shutdownStarted) return;
+    _shutdownStarted = true;
+
+    _syncDebounce?.cancel();
+    await _watchStateSubscription?.cancel();
+    await _connectivitySubscription?.cancel();
+    _memoryCheckTimer?.cancel();
+
+    _downloadManager.dispose();
+    TrackerCoordinator.instance.cancelInFlight();
+    TraktScrobbleService.instance.cancelInFlight();
+    await TraktSyncService.instance.dispose();
+
+    await _serverManager.disconnectAllGracefully();
+    await Future.wait([
+      httpClient.closeGracefully(drainTimeout: const Duration(seconds: 5)),
+      closeArtworkHttpClientGracefully(),
+    ], eagerError: false);
+    await ManagedHttpClient.closeAllGracefully();
+    await _appDatabase.close();
   }
 
   @override
@@ -482,8 +525,10 @@ class _MainAppState extends State<MainApp> with WidgetsBindingObserver {
     _connectivitySubscription?.cancel();
     _memoryCheckTimer?.cancel();
     _appLifecycleListener.dispose();
-    _downloadManager.dispose();
-    _serverManager.dispose();
+    if (!_shutdownStarted) {
+      _downloadManager.dispose();
+      _serverManager.dispose();
+    }
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
@@ -1081,7 +1126,21 @@ class _SetupScreenState extends State<SetupScreen> with MountedSetStateMixin {
     // through `context` after async gaps trip the use_build_context_synchronously
     // lint, and reading early is safe because the registry is a singleton.
     final connectionRegistry = context.read<ConnectionRegistry>();
-    final allConnections = await connectionRegistry.list();
+    final List<Connection> allConnections;
+    try {
+      allConnections = await connectionRegistry.list();
+    } catch (e, st) {
+      // Defence-in-depth: a DB-open failure here used to propagate
+      // uncaught and strand the splash forever (#1022). Route to auth so
+      // the user is never trapped, and surface to Sentry so an unknown
+      // regression doesn't go silent.
+      appLogger.e('Setup: failed to load connections; returning to auth', error: e, stackTrace: st);
+      unawaited(Sentry.captureException(e, stackTrace: st));
+      if (mounted) {
+        unawaited(Navigator.pushReplacement(context, fadeRoute(const AuthScreen())));
+      }
+      return;
+    }
 
     if (allConnections.isEmpty) {
       if (mounted) {

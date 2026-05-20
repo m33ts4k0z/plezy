@@ -64,6 +64,68 @@ void main() {
     expect(find.byType(PinEntryDialog), findsNothing);
   });
 
+  testWidgets('mobile duplicate submit does not pop route below PIN dialog', (tester) async {
+    TvDetectionService.debugSetAppleTVOverride(false);
+    String? pinResult;
+    bool? boolRouteResult;
+
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: ThemeData(platform: TargetPlatform.iOS),
+        home: Builder(
+          builder: (context) {
+            return Scaffold(
+              body: TextButton(
+                onPressed: () async {
+                  boolRouteResult = await Navigator.of(context).push<bool>(
+                    MaterialPageRoute(
+                      builder: (routeContext) {
+                        return Scaffold(
+                          body: Column(
+                            children: [
+                              const Text('Bool Route'),
+                              TextButton(
+                                onPressed: () async {
+                                  pinResult = await showPinEntryDialog(routeContext, 'Protected Profile');
+                                },
+                                child: const Text('Open PIN'),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+                  );
+                },
+                child: const Text('Open Bool Route'),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+
+    await tester.tap(find.text('Open Bool Route'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Bool Route'), findsOneWidget);
+
+    await tester.tap(find.text('Open PIN'));
+    await tester.pumpAndSettle();
+
+    final field = find.byType(TextField);
+    await tester.showKeyboard(field);
+    await tester.enterText(field, '1234');
+    await tester.testTextInput.receiveAction(TextInputAction.done);
+    await tester.pumpAndSettle();
+
+    expect(tester.takeException(), isNull);
+    expect(pinResult, '1234');
+    expect(boolRouteResult, isNull);
+    expect(find.text('Bool Route'), findsOneWidget);
+    expect(find.byType(PinEntryDialog), findsNothing);
+  });
+
   testWidgets('D-pad keypad enters and submits PIN', (tester) async {
     TvDetectionService.debugSetAppleTVOverride(true);
     String? result;
@@ -91,6 +153,68 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(result, '1234');
+    expect(find.byType(PinEntryDialog), findsNothing);
+  });
+
+  testWidgets('Android TV keyboard-mapped enter/select activates highlighted PIN key', (tester) async {
+    TvDetectionService.debugSetAppleTVOverride(true);
+    String? result;
+
+    await _pumpPinDialogLauncher(tester, onResult: (pin) => result = pin);
+    await tester.tap(find.text('Open'));
+    await tester.pumpAndSettle();
+
+    await _pressKeyboardMappedKey(tester, LogicalKeyboardKey.enter, PhysicalKeyboardKey.enter); // 1
+    await _pressKeyboardMappedKey(tester, LogicalKeyboardKey.arrowRight, PhysicalKeyboardKey.arrowRight);
+    await _pressKeyboardMappedKey(tester, LogicalKeyboardKey.select, PhysicalKeyboardKey.select); // 2
+    await _pressKeyboardMappedKey(tester, LogicalKeyboardKey.arrowRight, PhysicalKeyboardKey.arrowRight);
+    await _pressKeyboardMappedKey(tester, LogicalKeyboardKey.enter, PhysicalKeyboardKey.enter); // 3
+    await _pressKeyboardMappedKey(tester, LogicalKeyboardKey.arrowLeft, PhysicalKeyboardKey.arrowLeft);
+    await _pressKeyboardMappedKey(tester, LogicalKeyboardKey.arrowLeft, PhysicalKeyboardKey.arrowLeft);
+    await _pressKeyboardMappedKey(tester, LogicalKeyboardKey.arrowDown, PhysicalKeyboardKey.arrowDown);
+    await _pressKeyboardMappedKey(tester, LogicalKeyboardKey.select, PhysicalKeyboardKey.select); // 4
+    await tester.pumpAndSettle();
+
+    expect(result, '1234');
+    expect(find.byType(PinEntryDialog), findsNothing);
+  });
+
+  testWidgets('TV PIN keypad reclaims focus after activation', (tester) async {
+    TvDetectionService.debugSetAppleTVOverride(true);
+    final underlyingFocusNode = FocusNode(debugLabel: 'UnderlyingProfileScreen');
+    final leakedKeys = <LogicalKeyboardKey>[];
+    String? result;
+    addTearDown(underlyingFocusNode.dispose);
+
+    await _pumpPinDialogLauncher(
+      tester,
+      onResult: (pin) => result = pin,
+      underlyingFocusNode: underlyingFocusNode,
+      onUnderlyingKey: (_, event) {
+        if (event is KeyDownEvent) leakedKeys.add(event.logicalKey);
+        return KeyEventResult.handled;
+      },
+    );
+    await tester.tap(find.text('Open'));
+    await tester.pumpAndSettle();
+
+    await _pressKeyboardMappedKey(tester, LogicalKeyboardKey.enter, PhysicalKeyboardKey.enter); // 1
+    underlyingFocusNode.requestFocus();
+    await tester.pump();
+    await tester.pump();
+
+    await _pressKeyboardMappedKey(tester, LogicalKeyboardKey.arrowRight, PhysicalKeyboardKey.arrowRight);
+    await _pressKeyboardMappedKey(tester, LogicalKeyboardKey.select, PhysicalKeyboardKey.select); // 2
+    await _pressKeyboardMappedKey(tester, LogicalKeyboardKey.arrowRight, PhysicalKeyboardKey.arrowRight);
+    await _pressKeyboardMappedKey(tester, LogicalKeyboardKey.select, PhysicalKeyboardKey.select); // 3
+    await _pressKeyboardMappedKey(tester, LogicalKeyboardKey.arrowLeft, PhysicalKeyboardKey.arrowLeft);
+    await _pressKeyboardMappedKey(tester, LogicalKeyboardKey.arrowLeft, PhysicalKeyboardKey.arrowLeft);
+    await _pressKeyboardMappedKey(tester, LogicalKeyboardKey.arrowDown, PhysicalKeyboardKey.arrowDown);
+    await _pressKeyboardMappedKey(tester, LogicalKeyboardKey.select, PhysicalKeyboardKey.select); // 4
+    await tester.pumpAndSettle();
+
+    expect(result, '1234');
+    expect(leakedKeys, isEmpty);
     expect(find.byType(PinEntryDialog), findsNothing);
   });
 
@@ -141,19 +265,26 @@ void main() {
   });
 }
 
-Future<void> _pumpPinDialogLauncher(WidgetTester tester, {required ValueChanged<String?> onResult}) async {
+Future<void> _pumpPinDialogLauncher(
+  WidgetTester tester, {
+  required ValueChanged<String?> onResult,
+  FocusNode? underlyingFocusNode,
+  FocusOnKeyEventCallback? onUnderlyingKey,
+}) async {
   await tester.pumpWidget(
     MaterialApp(
       home: Builder(
         builder: (context) {
-          return Scaffold(
-            body: TextButton(
-              onPressed: () async {
-                onResult(await showPinEntryDialog(context, 'Protected Profile'));
-              },
-              child: const Text('Open'),
-            ),
+          Widget body = TextButton(
+            onPressed: () async {
+              onResult(await showPinEntryDialog(context, 'Protected Profile'));
+            },
+            child: const Text('Open'),
           );
+          if (underlyingFocusNode != null) {
+            body = Focus(focusNode: underlyingFocusNode, onKeyEvent: onUnderlyingKey, child: body);
+          }
+          return Scaffold(body: body);
         },
       ),
     ),
@@ -172,6 +303,22 @@ Future<void> _pressDpadKey(WidgetTester tester, LogicalKeyboardKey logicalKey, P
       logicalKey: logicalKey,
       timeStamp: Duration.zero,
       deviceType: ui.KeyEventDeviceType.directionalPad,
+    ),
+  );
+  await tester.pump();
+}
+
+Future<void> _pressKeyboardMappedKey(
+  WidgetTester tester,
+  LogicalKeyboardKey logicalKey,
+  PhysicalKeyboardKey physicalKey,
+) async {
+  _dispatchKey(
+    KeyDownEvent(
+      physicalKey: physicalKey,
+      logicalKey: logicalKey,
+      timeStamp: Duration.zero,
+      deviceType: ui.KeyEventDeviceType.keyboard,
     ),
   );
   await tester.pump();

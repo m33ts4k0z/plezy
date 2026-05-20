@@ -6,9 +6,12 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:plezy/connection/connection.dart';
 import 'package:plezy/database/app_database.dart';
+import 'package:plezy/models/plex/plex_config.dart';
 import 'package:plezy/services/data_aggregation_service.dart';
 import 'package:plezy/services/jellyfin_client.dart';
 import 'package:plezy/services/multi_server_manager.dart';
+import 'package:plezy/services/plex_api_cache.dart';
+import 'package:plezy/services/plex_client.dart';
 
 JellyfinConnection _conn() => JellyfinConnection(
   id: 'srv-1/user-1',
@@ -36,6 +39,7 @@ void main() {
 
   setUp(() {
     db = AppDatabase.forTesting(NativeDatabase.memory());
+    PlexApiCache.initialize(db);
     manager = MultiServerManager();
     service = DataAggregationService(manager);
   });
@@ -53,6 +57,111 @@ void main() {
     test('searchAcrossServers and getOnDeckFromAllServers return empty when no clients', () async {
       expect(await service.searchAcrossServers('hello'), isEmpty);
       expect(await service.getOnDeckFromAllServers(), isEmpty);
+    });
+
+    test('searchAcrossServers overfetches and ranks before trimming across backends', () async {
+      final plexRequests = <Uri>[];
+      final jellyfinRequests = <Uri>[];
+
+      final plexClient = PlexClient.forTesting(
+        config: PlexConfig(
+          baseUrl: 'https://plex.example.com',
+          token: 'token',
+          clientIdentifier: 'client-id',
+          product: 'Plezy',
+          version: 'test',
+        ),
+        serverId: 'plex-1',
+        serverName: 'Plex',
+        httpClient: MockClient((req) async {
+          plexRequests.add(req.url);
+          if (req.url.path == '/library/search') {
+            return _json({
+              'MediaContainer': {
+                'SearchResult': [
+                  {
+                    'score': 100,
+                    'Metadata': {'ratingKey': 'plex-movie', 'type': 'movie', 'title': 'The Boys in the Boat'},
+                  },
+                ],
+              },
+            });
+          }
+          return http.Response('unexpected request', 500);
+        }),
+      );
+      addTearDown(plexClient.close);
+      manager.debugRegisterClientForTesting(plexClient);
+
+      final jellyfinClient = JellyfinClient.forTesting(
+        connection: _conn(),
+        httpClient: MockClient((req) async {
+          jellyfinRequests.add(req.url);
+          if (req.url.path == '/Items') {
+            return _json({
+              'Items': [
+                {'Id': 'jf-show', 'Type': 'Series', 'Name': 'The Boys'},
+              ],
+            });
+          }
+          return http.Response('unexpected request', 500);
+        }),
+      );
+      addTearDown(jellyfinClient.close);
+      manager.debugRegisterJellyfinClientForTesting(jellyfinClient);
+
+      final results = await service.searchAcrossServers('The Boys', limit: 1);
+
+      expect(results.map((item) => item.id), ['jf-show']);
+      expect(plexRequests.single.queryParameters['limit'], '100');
+      expect(plexRequests.single.queryParameters['searchTypes'], 'movies,tv');
+      expect(jellyfinRequests.single.queryParameters['Limit'], '100');
+    });
+
+    test('getOnDeckFromAllServers forwards preview limit to clients', () async {
+      final captured = <Uri>[];
+
+      final client = PlexClient.forTesting(
+        config: PlexConfig(
+          baseUrl: 'https://plex.example.com',
+          token: 'token',
+          clientIdentifier: 'client-id',
+          product: 'Plezy',
+          version: 'test',
+        ),
+        serverId: 'plex-1',
+        serverName: 'Plex',
+        httpClient: MockClient((req) async {
+          captured.add(req.url);
+          if (req.url.path == '/hubs') {
+            return _json({
+              'MediaContainer': {
+                'Hub': [
+                  {
+                    'key': '/hubs/home/continueWatching',
+                    'title': 'Continue Watching',
+                    'type': 'mixed',
+                    'hubIdentifier': 'home.continue',
+                    'size': 1,
+                    'Metadata': [
+                      {'ratingKey': 'movie-1', 'type': 'movie', 'title': 'Movie 1'},
+                    ],
+                  },
+                ],
+              },
+            });
+          }
+          return http.Response('unexpected request', 500);
+        }),
+      );
+      addTearDown(client.close);
+      manager.debugRegisterClientForTesting(client);
+
+      final items = await service.getOnDeckFromAllServers(limit: 21);
+
+      expect(items.map((item) => item.id), ['movie-1']);
+      expect(captured.single.path, '/hubs');
+      expect(captured.single.queryParameters['count'], '21');
     });
 
     test('per-library hubs skip playback rows and fetch in bounded batches', () async {
@@ -158,6 +267,64 @@ void main() {
         captured.where((uri) => uri.path == '/Users/user-1/Items/Latest').map((uri) => uri.queryParameters['ParentId']),
         ['movies', 'shows'],
       );
+    });
+
+    test('Plex home layout keeps promoted hubs instead of splitting by preview libraries', () async {
+      final captured = <Uri>[];
+
+      final client = PlexClient.forTesting(
+        config: PlexConfig(
+          baseUrl: 'https://plex.example.com',
+          token: 'token',
+          clientIdentifier: 'client-id',
+          product: 'Plezy',
+          version: 'test',
+        ),
+        serverId: 'plex-1',
+        serverName: 'Plex',
+        promotedHubKey: '/hubs/promoted',
+        httpClient: MockClient((req) async {
+          captured.add(req.url);
+          if (req.url.path == '/hubs/promoted') {
+            return _json({
+              'MediaContainer': {
+                'Hub': [
+                  {
+                    'key': '/hubs/home/recentlyAdded?type=2',
+                    'title': 'Recently Added TV',
+                    'type': 'mixed',
+                    'hubIdentifier': 'home.television.recent',
+                    'size': 7,
+                    'more': true,
+                    'Metadata': [
+                      for (var i = 1; i <= 7; i++)
+                        {
+                          'ratingKey': 'show-$i',
+                          'type': 'show',
+                          'title': 'Show $i',
+                          'librarySectionID': i,
+                          'librarySectionTitle': 'Library $i',
+                        },
+                    ],
+                  },
+                ],
+              },
+            });
+          }
+          return http.Response('unexpected request', 500);
+        }),
+      );
+      addTearDown(client.close);
+      manager.debugRegisterClientForTesting(client);
+
+      final hubs = await service.getHubsFromAllServers(useGlobalHubs: true, includePlaybackHubs: false);
+
+      expect(hubs, hasLength(1));
+      expect(hubs.single.title, 'Recently Added TV');
+      expect(hubs.single.identifier, 'home.television.recent');
+      expect(hubs.single.libraryId, isNull);
+      expect(hubs.single.items, hasLength(7));
+      expect(captured.map((uri) => uri.path), ['/hubs/promoted']);
     });
   });
 }

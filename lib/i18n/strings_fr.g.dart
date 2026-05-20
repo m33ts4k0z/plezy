@@ -49,6 +49,7 @@ class TranslationsFr extends Translations with BaseTranslations<AppLocale, Trans
 	@override late final _TranslationsHotkeysFr hotkeys = _TranslationsHotkeysFr._(_root);
 	@override late final _TranslationsFileInfoFr fileInfo = _TranslationsFileInfoFr._(_root);
 	@override late final _TranslationsMediaMenuFr mediaMenu = _TranslationsMediaMenuFr._(_root);
+	@override late final _TranslationsRateSheetFr rateSheet = _TranslationsRateSheetFr._(_root);
 	@override late final _TranslationsAccessibilityFr accessibility = _TranslationsAccessibilityFr._(_root);
 	@override late final _TranslationsTooltipsFr tooltips = _TranslationsTooltipsFr._(_root);
 	@override late final _TranslationsVideoControlsFr videoControls = _TranslationsVideoControlsFr._(_root);
@@ -375,6 +376,12 @@ class _TranslationsSettingsFr extends TranslationsSettingsEn {
 	@override String get displaySwitchDelay => 'Délai de changement d\'affichage';
 	@override String get tunneledPlayback => 'Lecture tunnelée';
 	@override String get tunneledPlaybackDescription => 'Utiliser le tunneling vidéo. Désactivez si la lecture HDR affiche un écran noir.';
+	@override String get dvConversionMode => 'Conversion Dolby Vision';
+	@override String get dvConversionModeDescription => 'Choisissez comment ExoPlayer gère les fichiers Dolby Vision Profile 7.';
+	@override String get dvConversionAuto => 'Auto';
+	@override String get dvConversionNative => 'Natif / désactivé';
+	@override String get dvConversionDv81 => 'P7 → P8.1';
+	@override String get dvConversionHevcStrip => 'P7 → HEVC';
 	@override String get requireProfileSelectionOnOpen => 'Demander le profil à l\'ouverture';
 	@override String get requireProfileSelectionOnOpenDescription => 'Afficher la sélection de profil à chaque ouverture de l\'application';
 	@override String get forceTvMode => 'Forcer le mode TV';
@@ -481,6 +488,26 @@ class _TranslationsMediaMenuFr extends TranslationsMediaMenuEn {
 	@override String get playVersion => 'Lire la version...';
 }
 
+// Path: rateSheet
+class _TranslationsRateSheetFr extends TranslationsRateSheetEn {
+	_TranslationsRateSheetFr._(TranslationsFr root) : this._root = root, super.internal(root);
+
+	final TranslationsFr _root; // ignore: unused_field
+
+	// Translations
+	@override String get title => 'Noter';
+	@override String get server => 'Serveur';
+	@override String starValue({required Object rating}) => '${rating} / 5';
+	@override String scoreValue({required Object score}) => '${score} / 10';
+	@override String get setScore => 'Définir une note';
+	@override String get notRated => 'Non noté';
+	@override String get liked => 'Aimé';
+	@override String get notLiked => 'Non aimé';
+	@override String get saved => 'Enregistré';
+	@override String get notAvailable => 'Aucune correspondance trouvée';
+	@override String get noConnectedTrackers => 'Connectez un tracker dans Paramètres pour y noter.';
+}
+
 // Path: accessibility
 class _TranslationsAccessibilityFr extends TranslationsAccessibilityEn {
 	_TranslationsAccessibilityFr._(TranslationsFr root) : this._root = root, super.internal(root);
@@ -574,6 +601,7 @@ class _TranslationsVideoControlsFr extends TranslationsVideoControlsEn {
 	@override String endsAt({required Object time}) => 'Fin à ${time}';
 	@override String get pipActive => 'Lecture en mode image dans l\'image';
 	@override String get pipFailed => 'Échec du démarrage du mode image dans l\'image';
+	@override String get screenshotSaved => 'Capture d\'écran enregistrée';
 	@override late final _TranslationsVideoControlsPipErrorsFr pipErrors = _TranslationsVideoControlsPipErrorsFr._(_root);
 	@override String get chapters => 'Chapitres';
 	@override String get noChaptersAvailable => 'Aucun chapitre disponible';
@@ -736,18 +764,32 @@ class _TranslationsProfilesFr extends TranslationsProfilesEn {
 	@override String get pinManagedByPlex => 'PIN géré par Plex. Modifier sur plex.tv.';
 	@override String get noPinSetEditOnPlex => 'Aucun PIN défini. Pour en exiger un, modifiez l\'utilisateur Home sur plex.tv.';
 	@override String get setPin => 'Définir un PIN';
+	@override String get setPinTitle => 'Définir un PIN';
+	@override String get confirmPinTitle => 'Confirmer le PIN';
+	@override String get pinSet => 'PIN défini';
+	@override String get changePin => 'Modifier';
+	@override String get removePin => 'Retirer';
 	@override String get connectionsLabel => 'Connexions';
 	@override String get add => 'Ajouter';
 	@override String get deleteProfileButton => 'Supprimer le profil';
 	@override String get noConnectionsHint => 'Aucune connexion — ajoutez-en une pour utiliser ce profil.';
+	@override String get noConnections => 'Aucune connexion';
 	@override String get plexHomeAccount => 'Compte Plex Home';
 	@override String get connectionDefault => 'Par défaut';
+	@override String connectionAs({required Object displayName}) => 'en tant que ${displayName}';
 	@override String get makeDefault => 'Définir par défaut';
 	@override String get removeConnection => 'Retirer';
+	@override String get profileRenamed => 'Profil renommé.';
 	@override String borrowAddTo({required Object displayName}) => 'Ajouter à ${displayName}';
 	@override String get borrowExplain => 'Emprunter la connexion d\'un autre profil. Les profils protégés par PIN exigent un PIN.';
 	@override String get borrowEmpty => 'Rien à emprunter pour le moment.';
 	@override String get borrowEmptySubtitle => 'Connectez d\'abord Plex ou Jellyfin à un autre profil.';
+	@override String borrowFromProfile({required Object displayName}) => 'De ${displayName}';
+	@override String get borrowConnectionBorrowed => 'Connexion empruntée.';
+	@override String get borrowFailed => 'Impossible d\'emprunter la connexion.';
+	@override String get incorrectPin => 'PIN incorrect.';
+	@override String get sourceProfileMissingParentAccount => 'Le profil source n\'a pas son compte parent.';
+	@override String get failedToVerifyPin => 'Impossible de vérifier le PIN.';
 	@override String get newProfile => 'Nouveau profil';
 	@override String get profileNameHint => 'ex. Invités, Enfants, Salon familial';
 	@override String get pinProtectionOptional => 'Protection par PIN (optionnelle)';
@@ -1521,6 +1563,7 @@ class _TranslationsHotkeysActionsFr extends TranslationsHotkeysActionsEn {
 	@override String get subSeekPrev => 'Rechercher le sous-titre précédent';
 	@override String get shaderToggle => 'Activer/désactiver les shaders';
 	@override String get skipMarker => 'Passer l\'intro/le générique';
+	@override String get screenshot => 'Prendre une capture d\'écran';
 }
 
 // Path: videoControls.pipErrors
@@ -1592,8 +1635,18 @@ class _TranslationsLibrariesSortLabelsFr extends TranslationsLibrariesSortLabels
 	@override String get dateAdded => 'Date d\'ajout';
 	@override String get releaseDate => 'Date de sortie';
 	@override String get rating => 'Note';
+	@override String get communityRating => 'Note communautaire';
+	@override String get criticRating => 'Note critique';
 	@override String get lastPlayed => 'Dernière lecture';
+	@override String get datePlayed => 'Date de lecture';
 	@override String get playCount => 'Lectures';
+	@override String get productionYear => 'Année de production';
+	@override String get runtime => 'Durée';
+	@override String get officialRating => 'Classification officielle';
+	@override String get premiereDate => 'Date de première';
+	@override String get startDate => 'Date de début';
+	@override String get airTime => 'Heure de diffusion';
+	@override String get studio => 'Studio';
 	@override String get random => 'Aléatoire';
 	@override String get dateShared => 'Date de partage';
 	@override String get latestEpisodeAirDate => 'Dernière date de diffusion';
@@ -1986,6 +2039,12 @@ extension on TranslationsFr {
 			'settings.displaySwitchDelay' => 'Délai de changement d\'affichage',
 			'settings.tunneledPlayback' => 'Lecture tunnelée',
 			'settings.tunneledPlaybackDescription' => 'Utiliser le tunneling vidéo. Désactivez si la lecture HDR affiche un écran noir.',
+			'settings.dvConversionMode' => 'Conversion Dolby Vision',
+			'settings.dvConversionModeDescription' => 'Choisissez comment ExoPlayer gère les fichiers Dolby Vision Profile 7.',
+			'settings.dvConversionAuto' => 'Auto',
+			'settings.dvConversionNative' => 'Natif / désactivé',
+			'settings.dvConversionDv81' => 'P7 → P8.1',
+			'settings.dvConversionHevcStrip' => 'P7 → HEVC',
 			'settings.requireProfileSelectionOnOpen' => 'Demander le profil à l\'ouverture',
 			'settings.requireProfileSelectionOnOpenDescription' => 'Afficher la sélection de profil à chaque ouverture de l\'application',
 			'settings.forceTvMode' => 'Forcer le mode TV',
@@ -2034,6 +2093,7 @@ extension on TranslationsFr {
 			'hotkeys.actions.subSeekPrev' => 'Rechercher le sous-titre précédent',
 			'hotkeys.actions.shaderToggle' => 'Activer/désactiver les shaders',
 			'hotkeys.actions.skipMarker' => 'Passer l\'intro/le générique',
+			'hotkeys.actions.screenshot' => 'Prendre une capture d\'écran',
 			'fileInfo.title' => 'Informations sur le fichier',
 			'fileInfo.video' => 'Vidéo',
 			'fileInfo.audio' => 'Audio',
@@ -2074,6 +2134,17 @@ extension on TranslationsFr {
 			'mediaMenu.rate' => 'Noter',
 			'mediaMenu.playFromBeginning' => 'Lire depuis le début',
 			'mediaMenu.playVersion' => 'Lire la version...',
+			'rateSheet.title' => 'Noter',
+			'rateSheet.server' => 'Serveur',
+			'rateSheet.starValue' => ({required Object rating}) => '${rating} / 5',
+			'rateSheet.scoreValue' => ({required Object score}) => '${score} / 10',
+			'rateSheet.setScore' => 'Définir une note',
+			'rateSheet.notRated' => 'Non noté',
+			'rateSheet.liked' => 'Aimé',
+			'rateSheet.notLiked' => 'Non aimé',
+			'rateSheet.saved' => 'Enregistré',
+			'rateSheet.notAvailable' => 'Aucune correspondance trouvée',
+			'rateSheet.noConnectedTrackers' => 'Connectez un tracker dans Paramètres pour y noter.',
 			'accessibility.mediaCardMovie' => ({required Object title}) => '${title}, film',
 			'accessibility.mediaCardShow' => ({required Object title}) => '${title}, show TV',
 			'accessibility.mediaCardEpisode' => ({required Object title, required Object episodeInfo}) => '${title}, ${episodeInfo}',
@@ -2142,6 +2213,7 @@ extension on TranslationsFr {
 			'videoControls.endsAt' => ({required Object time}) => 'Fin à ${time}',
 			'videoControls.pipActive' => 'Lecture en mode image dans l\'image',
 			'videoControls.pipFailed' => 'Échec du démarrage du mode image dans l\'image',
+			'videoControls.screenshotSaved' => 'Capture d\'écran enregistrée',
 			'videoControls.pipErrors.androidVersion' => 'Nécessite Android 8.0 ou plus récent',
 			'videoControls.pipErrors.iosVersion' => 'Nécessite iOS 15.0 ou plus récent',
 			'videoControls.pipErrors.permissionDisabled' => 'Picture-in-picture est désactivé. Activez-le dans les paramètres système.',
@@ -2241,6 +2313,8 @@ extension on TranslationsFr {
 			'profiles.signOut' => 'Se déconnecter',
 			'profiles.signOutPlexTitle' => 'Se déconnecter de Plex ?',
 			'profiles.signOutPlexMessage' => ({required Object displayName}) => 'Supprimer ${displayName} et tous les utilisateurs Plex Home ? Reconnexion possible à tout moment.',
+			_ => null,
+		} ?? switch (path) {
 			'profiles.signedOutPlex' => 'Déconnecté de Plex.',
 			'profiles.signOutFailed' => 'Échec de la déconnexion.',
 			'profiles.sectionTitle' => 'Profils',
@@ -2256,20 +2330,32 @@ extension on TranslationsFr {
 			'profiles.pinManagedByPlex' => 'PIN géré par Plex. Modifier sur plex.tv.',
 			'profiles.noPinSetEditOnPlex' => 'Aucun PIN défini. Pour en exiger un, modifiez l\'utilisateur Home sur plex.tv.',
 			'profiles.setPin' => 'Définir un PIN',
+			'profiles.setPinTitle' => 'Définir un PIN',
+			'profiles.confirmPinTitle' => 'Confirmer le PIN',
+			'profiles.pinSet' => 'PIN défini',
+			'profiles.changePin' => 'Modifier',
+			'profiles.removePin' => 'Retirer',
 			'profiles.connectionsLabel' => 'Connexions',
 			'profiles.add' => 'Ajouter',
 			'profiles.deleteProfileButton' => 'Supprimer le profil',
 			'profiles.noConnectionsHint' => 'Aucune connexion — ajoutez-en une pour utiliser ce profil.',
-			_ => null,
-		} ?? switch (path) {
+			'profiles.noConnections' => 'Aucune connexion',
 			'profiles.plexHomeAccount' => 'Compte Plex Home',
 			'profiles.connectionDefault' => 'Par défaut',
+			'profiles.connectionAs' => ({required Object displayName}) => 'en tant que ${displayName}',
 			'profiles.makeDefault' => 'Définir par défaut',
 			'profiles.removeConnection' => 'Retirer',
+			'profiles.profileRenamed' => 'Profil renommé.',
 			'profiles.borrowAddTo' => ({required Object displayName}) => 'Ajouter à ${displayName}',
 			'profiles.borrowExplain' => 'Emprunter la connexion d\'un autre profil. Les profils protégés par PIN exigent un PIN.',
 			'profiles.borrowEmpty' => 'Rien à emprunter pour le moment.',
 			'profiles.borrowEmptySubtitle' => 'Connectez d\'abord Plex ou Jellyfin à un autre profil.',
+			'profiles.borrowFromProfile' => ({required Object displayName}) => 'De ${displayName}',
+			'profiles.borrowConnectionBorrowed' => 'Connexion empruntée.',
+			'profiles.borrowFailed' => 'Impossible d\'emprunter la connexion.',
+			'profiles.incorrectPin' => 'PIN incorrect.',
+			'profiles.sourceProfileMissingParentAccount' => 'Le profil source n\'a pas son compte parent.',
+			'profiles.failedToVerifyPin' => 'Impossible de vérifier le PIN.',
 			'profiles.newProfile' => 'Nouveau profil',
 			'profiles.profileNameHint' => 'ex. Invités, Enfants, Salon familial',
 			'profiles.pinProtectionOptional' => 'Protection par PIN (optionnelle)',
@@ -2372,8 +2458,18 @@ extension on TranslationsFr {
 			'libraries.sortLabels.dateAdded' => 'Date d\'ajout',
 			'libraries.sortLabels.releaseDate' => 'Date de sortie',
 			'libraries.sortLabels.rating' => 'Note',
+			'libraries.sortLabels.communityRating' => 'Note communautaire',
+			'libraries.sortLabels.criticRating' => 'Note critique',
 			'libraries.sortLabels.lastPlayed' => 'Dernière lecture',
+			'libraries.sortLabels.datePlayed' => 'Date de lecture',
 			'libraries.sortLabels.playCount' => 'Lectures',
+			'libraries.sortLabels.productionYear' => 'Année de production',
+			'libraries.sortLabels.runtime' => 'Durée',
+			'libraries.sortLabels.officialRating' => 'Classification officielle',
+			'libraries.sortLabels.premiereDate' => 'Date de première',
+			'libraries.sortLabels.startDate' => 'Date de début',
+			'libraries.sortLabels.airTime' => 'Heure de diffusion',
+			'libraries.sortLabels.studio' => 'Studio',
 			'libraries.sortLabels.random' => 'Aléatoire',
 			'libraries.sortLabels.dateShared' => 'Date de partage',
 			'libraries.sortLabels.latestEpisodeAirDate' => 'Dernière date de diffusion',
@@ -2731,6 +2827,8 @@ extension on TranslationsFr {
 			'metadataEdit.summary' => 'Résumé',
 			'metadataEdit.poster' => 'Affiche',
 			'metadataEdit.background' => 'Arrière-plan',
+			_ => null,
+		} ?? switch (path) {
 			'metadataEdit.logo' => 'Logo',
 			'metadataEdit.squareArt' => 'Image carrée',
 			'metadataEdit.selectPoster' => 'Sélectionner l\'affiche',
@@ -2774,8 +2872,6 @@ extension on TranslationsFr {
 			'metadataEdit.metadataLanguage' => 'Langue des métadonnées',
 			'metadataEdit.useOriginalTitle' => 'Utiliser le titre original',
 			'metadataEdit.preferredAudioLanguage' => 'Langue audio préférée',
-			_ => null,
-		} ?? switch (path) {
 			'metadataEdit.preferredSubtitleLanguage' => 'Langue de sous-titres préférée',
 			'metadataEdit.subtitleMode' => 'Sélection automatique des sous-titres',
 			'metadataEdit.manuallySelected' => 'Sélectionné manuellement',
