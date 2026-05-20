@@ -697,12 +697,12 @@ class _MediaDetailScreenState extends State<MediaDetailScreen>
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
-    if (_isRouteObserverSubscribed) return;
     final route = ModalRoute.of(context);
-    if (route is PageRoute) {
-      routeObserver.subscribe(this, route);
-      _isRouteObserverSubscribed = true;
-    }
+    if (route is! PageRoute<dynamic> || route == _route) return;
+    if (_route != null) routeObserver.unsubscribe(this);
+    _route = route;
+    routeObserver.subscribe(this, route);
+    _isRouteObserverSubscribed = true;
   }
 
   @override
@@ -721,6 +721,12 @@ class _MediaDetailScreenState extends State<MediaDetailScreen>
   void didPopNext() {
     _isRouteVisible = true;
     _syncThemeMusic();
+    _suppressBackAfterPop = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _suppressBackAfterPop = false;
+      });
+    });
   }
 
   @override
@@ -739,25 +745,6 @@ class _MediaDetailScreenState extends State<MediaDetailScreen>
     _scrollOffset.value = _scrollController.offset;
   }
 
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    final route = ModalRoute.of(context);
-    if (route is! PageRoute<dynamic> || route == _route) return;
-    if (_route != null) routeObserver.unsubscribe(this);
-    _route = route;
-    routeObserver.subscribe(this, route);
-  }
-
-  @override
-  void didPopNext() {
-    _suppressBackAfterPop = true;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) _suppressBackAfterPop = false;
-      });
-    });
-  }
 
   bool _consumeBackAfterChildPop(KeyEvent event) {
     if (!_suppressBackAfterPop || !event.logicalKey.isBackKey) return false;
