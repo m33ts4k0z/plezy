@@ -2976,6 +2976,85 @@ class PlexClient
     }
   }
 
+  /// Build a single-file transcoded **download** URL for [ratingKey] /
+  /// [mediaIndex] at [preset]. The result points at the universal
+  /// transcoder's MKV endpoint (`start.mkv?protocol=http`) so a single
+  /// HTTP GET yields a Matroska byte stream the background downloader can
+  /// write to a file.
+  ///
+  /// This is the download sibling of [buildTranscodeStartPath]: same
+  /// profile-extra clauses (add-limitation + add-transcode-target) but
+  /// targeted at the `http` protocol + `matroska` container rather than
+  /// HLS segments. We deliberately skip the `/decision` pre-flight — a
+  /// failed transcode here surfaces as the download itself returning a
+  /// non-200 or wrong content type, which the download manager will
+  /// report. Adding a pre-flight is straightforward (see
+  /// [buildTranscodeStartPath]) but isn't worth the extra round trip for
+  /// the v1 of this feature.
+  ///
+  /// Returns `null` for the original preset (caller should fall through
+  /// to the direct-play part URL).
+  Uri? buildTranscodeDownloadUrl({
+    required String ratingKey,
+    required int mediaIndex,
+    required TranscodeQualityPreset preset,
+  }) {
+    if (preset.isOriginal || preset.videoBitrateKbps == null || preset.videoResolution == null) {
+      return null;
+    }
+
+    final sessionId = generateSessionIdentifier();
+    final metadataPath = '/library/metadata/$ratingKey';
+
+    final profileExtraClauses = <String>[
+      'add-limitation(scope=videoCodec&scopeName=*&type=upperBound'
+          '&name=video.bitrate&value=${preset.videoBitrateKbps}&replace=true)',
+      // Matroska/HTTP target — single-file download equivalent of the
+      // HLS/MPEG-TS clause used by [buildTranscodeStartPath].
+      'add-transcode-target(type=videoProfile&context=streaming'
+          '&protocol=http&container=matroska&videoCodec=h264%2Chevc&audioCodec=aac)',
+    ];
+
+    final params = <String, String>{
+      'path': metadataPath,
+      'mediaIndex': mediaIndex.toString(),
+      'partIndex': '0',
+      'protocol': 'http',
+      'fastSeek': '1',
+      'directPlay': '0',
+      'directStream': '0',
+      'subtitleSize': '100',
+      'audioBoost': '100',
+      'location': 'lan',
+      'maxVideoBitrate': preset.videoBitrateKbps!.toString(),
+      'videoBitrate': preset.videoBitrateKbps!.toString(),
+      'videoResolution': preset.videoResolution!,
+      if (preset.videoQuality != null) 'videoQuality': preset.videoQuality!.toString(),
+      'autoAdjustQuality': '0',
+      'directStreamAudio': '0',
+      'session': sessionId,
+      // Embed subtitles aren't great for downloads (player can't switch
+      // tracks), but the cleanest minimum is to drop them — sidecar
+      // subtitle files are already attached separately by
+      // [resolveDownload].
+      'subtitles': 'none',
+      'copyts': '1',
+      'X-Plex-Session-Identifier': sessionId,
+      'X-Plex-Client-Profile-Extra': profileExtraClauses.join('+'),
+      'X-Plex-Features': 'external-media,indirect-media',
+      'X-Plex-Model': 'standalone',
+      'X-Plex-Product': config.product,
+      'X-Plex-Version': config.version,
+      'X-Plex-Client-Identifier': config.clientIdentifier,
+      'X-Plex-Platform': _transcodePlatformName(),
+      if (config.device != null) 'X-Plex-Device': config.device!,
+      if (config.token != null) 'X-Plex-Token': config.token!,
+    };
+
+    final query = params.entries.map((e) => '${_plexEncode(e.key)}=${_plexEncode(e.value)}').join('&');
+    return Uri.parse('${config.baseUrl}/video/:/transcode/universal/start.mkv?$query');
+  }
+
   /// Platform name Plex Media Server accepts on the transcode decision
   /// endpoint for arbitrary clients. Our default "Flutter" returns HTTP 400,
   /// and the known-OS names (`MacOSX`, `Mac`, `Linux`) are also rejected.
@@ -3819,7 +3898,11 @@ class PlexClient
   }
 
   @override
-  Future<DownloadResolution> resolveDownload(MediaItem item, {int mediaIndex = 0}) async {
+  Future<DownloadResolution> resolveDownload(
+    MediaItem item, {
+    int mediaIndex = 0,
+    TranscodeQualityPreset? qualityPreset,
+  }) async {
     final playbackData = await getVideoPlaybackData(item.id, mediaIndex: mediaIndex);
     final subtitles = <DownloadSubtitleSpec>[];
     final mediaInfo = playbackData.mediaInfo;
@@ -3841,6 +3924,22 @@ class PlexClient
         );
       }
     }
+
+    // Non-original preset: ask the server to transcode and download the
+    // single-file MKV output. The direct-play URL is still available via
+    // playbackData if we ever want to fall back automatically.
+    final preset = qualityPreset;
+    if (preset != null && !preset.isOriginal) {
+      final transcodedUrl = buildTranscodeDownloadUrl(
+        ratingKey: item.id,
+        mediaIndex: mediaIndex,
+        preset: preset,
+      );
+      if (transcodedUrl != null) {
+        return DownloadResolution(videoUrl: transcodedUrl.toString(), externalSubtitles: subtitles);
+      }
+    }
+
     return DownloadResolution(videoUrl: playbackData.videoUrl, externalSubtitles: subtitles);
   }
 

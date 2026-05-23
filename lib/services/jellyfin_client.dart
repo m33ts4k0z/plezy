@@ -22,6 +22,7 @@ import '../media/media_library.dart';
 import '../media/media_playlist.dart';
 import '../media/media_server_client.dart';
 import '../media/server_capabilities.dart';
+import '../models/transcode_quality_preset.dart';
 import '../models/jellyfin/jellyfin_user_profile.dart';
 import '../models/livetv_channel.dart';
 import '../models/livetv_dvr.dart';

@@ -808,6 +808,28 @@ class DownloadManagerService {
     await _database.updateDownloadProgress(globalKey, 0, 0, 0);
   }
 
+  /// Throws a [DownloadStorageLimitReachedException] when the user has set
+  /// a non-zero `downloadStorageLimitGb` and current on-disk usage under
+  /// the active download path is already at-or-over the limit. Silently
+  /// returns when the cap is unset, when usage can't be measured (SAF),
+  /// or when usage is below the threshold.
+  Future<void> _enforceStorageLimitOrThrow() async {
+    final settings = await SettingsService.getInstance();
+    final limitGb = settings.read(SettingsService.downloadStorageLimitGb);
+    if (limitGb <= 0) return;
+
+    final usageBytes = await _storageService.getDownloadedBytesUnderCurrentPath();
+    if (usageBytes == null) {
+      appLogger.d('Storage cap not enforced: usage unavailable (likely SAF)');
+      return;
+    }
+
+    final limitBytes = limitGb * 1024 * 1024 * 1024;
+    if (usageBytes >= limitBytes) {
+      throw DownloadStorageLimitReachedException(usageBytes: usageBytes, limitBytes: limitBytes);
+    }
+  }
+
   /// Resolve metadata, video URL, and file path, then enqueue a background download task.
   /// Returns true if successfully enqueued, false if it failed immediately.
   Future<bool> _prepareAndEnqueueDownload(
@@ -825,6 +847,13 @@ class DownloadManagerService {
         await _database.removeFromQueue(globalKey);
         return true;
       }
+
+      // Storage cap check — block the download up front so we don't move
+      // it to `downloading`, hit the server, and then fail late. The cap
+      // is set in Downloads settings and counts current on-disk usage
+      // under the active download path. SAF returns null usage (can't
+      // walk content:// URIs), in which case the cap silently no-ops.
+      await _enforceStorageLimitOrThrow();
 
       appLogger.i('Preparing download for $globalKey');
       if (existing.bgTaskId != null) await _cleanupStaleDownload(globalKey);
@@ -851,13 +880,28 @@ class DownloadManagerService {
       }
 
       final selectedMediaIndex = existing.mediaIndex;
-      var resolution = await client.resolveDownload(metadata, mediaIndex: selectedMediaIndex);
+      // Per-download quality preset is read from the global Downloads
+      // setting — original (default) routes through direct play; any
+      // other preset asks the server to transcode and stream a single
+      // MKV file. Per-download override could be added later by reading
+      // a value off DownloadQueueItem instead.
+      final settings = await SettingsService.getInstance();
+      final qualityPreset = settings.read(SettingsService.downloadQualityPreset);
+      var resolution = await client.resolveDownload(
+        metadata,
+        mediaIndex: selectedMediaIndex,
+        qualityPreset: qualityPreset,
+      );
       if (resolution.videoUrl == null) {
         // Cache miss for the per-version fields — refresh from network.
         appLogger.w('No video URL from cache for $globalKey, retrying via network');
         final fetched = await client.fetchItem(ratingKey);
         if (fetched != null) metadata = fetched.copyWith(serverId: serverId);
-        resolution = await client.resolveDownload(metadata, mediaIndex: selectedMediaIndex);
+        resolution = await client.resolveDownload(
+          metadata,
+          mediaIndex: selectedMediaIndex,
+          qualityPreset: qualityPreset,
+        );
         if (resolution.videoUrl == null) throw Exception('Could not get video URL for $globalKey');
       }
 
@@ -874,7 +918,6 @@ class DownloadManagerService {
           : metadata.displayTitle;
 
       // Get WiFi-only setting for native enforcement
-      final settings = await SettingsService.getInstance();
       final requiresWiFi = settings.read(SettingsService.downloadOnWifiOnly);
 
       if (_storageService.isUsingSaf) {
@@ -2363,6 +2406,26 @@ class DownloadManagerService {
     _pausingKeys.clear();
     _progressController.close();
     _deletionProgressController.close();
+  }
+}
+
+/// Thrown by [DownloadManagerService] when a new download is refused because
+/// the user-configured storage cap has been reached. The exception message
+/// is surfaced to the user via the standard `DownloadStatus.failed`
+/// errorMessage field, so the wording is intentionally end-user friendly.
+class DownloadStorageLimitReachedException implements Exception {
+  final int usageBytes;
+  final int limitBytes;
+  DownloadStorageLimitReachedException({required this.usageBytes, required this.limitBytes});
+
+  double get _usageGb => usageBytes / (1024 * 1024 * 1024);
+  double get _limitGb => limitBytes / (1024 * 1024 * 1024);
+
+  @override
+  String toString() {
+    return 'Storage limit reached: ${_usageGb.toStringAsFixed(1)} GB used '
+        'of ${_limitGb.toStringAsFixed(0)} GB cap. Raise it in Settings → '
+        'Downloads → Storage limit, or free up space.';
   }
 }
 
