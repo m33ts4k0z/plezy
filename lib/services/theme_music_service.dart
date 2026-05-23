@@ -24,7 +24,7 @@ class ThemeMusicService {
 
   static final ThemeMusicService instance = ThemeMusicService._();
 
-  final AudioPlayer _player = AudioPlayer()..setReleaseMode(ReleaseMode.loop);
+  final AudioPlayer _player = AudioPlayer()..setReleaseMode(ReleaseMode.release);
 
   String? _activeOwnerId;
   String? _activeUrl;
