@@ -41,6 +41,7 @@ extension _VideoPlayerPlaybackServiceMethods on VideoPlayerScreenState {
         playMethod: playMethod ?? (_isTranscoding ? 'Transcode' : 'DirectPlay'),
         playSessionId: playSessionId,
         mediaInfo: mediaInfo,
+        onTerminated: _handleServerTermination,
       );
       _progressTracker!.startTracking();
     }
