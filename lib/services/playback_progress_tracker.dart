@@ -2,6 +2,7 @@ import 'dart:async';
 
 import '../mpv/mpv.dart';
 
+import '../exceptions/media_server_exceptions.dart';
 import '../media/media_backend.dart';
 import '../media/media_item.dart';
 import '../media/media_server_client.dart';
@@ -47,6 +48,14 @@ class PlaybackProgressTracker {
   /// Jellyfin stream indexes in playback-progress reports.
   final MediaSourceInfo? mediaInfo;
 
+  /// Fired once when the server signals that this session has been
+  /// terminated from outside the app (Plex Web "Terminate Session",
+  /// Tautulli, etc.). The tracker stops itself before invoking the
+  /// callback so the player can react without racing further heartbeats.
+  final void Function(PlaybackTerminatedException reason)? onTerminated;
+
+  bool _terminated = false;
+
   /// Timer for periodic progress updates
   Timer? _progressTimer;
 
@@ -85,6 +94,7 @@ class PlaybackProgressTracker {
     this.playMethod,
     this.playSessionId,
     this.mediaInfo,
+    this.onTerminated,
     this.updateInterval = const Duration(seconds: 10),
   }) : assert(!isOffline || offlineWatchService != null, 'offlineWatchService is required when isOffline is true'),
        assert(isOffline || client != null, 'client is required when isOffline is false'),
@@ -158,6 +168,7 @@ class PlaybackProgressTracker {
   }
 
   Future<void> _sendProgress(String state) async {
+    if (_terminated) return;
     try {
       final position = player.state.position;
       final duration = player.state.duration;
@@ -189,6 +200,10 @@ class PlaybackProgressTracker {
                 }
               })
               .catchError((Object e) {
+                if (e is PlaybackTerminatedException) {
+                  _handleTermination(e);
+                  return;
+                }
                 _consecutiveFailures++;
                 // Exponential backoff: skip 1, 2, 4, 8... ticks (capped at 6 ≈ 60s)
                 _ticksToSkip = (1 << (_consecutiveFailures - 1)).clamp(1, 6);
@@ -200,6 +215,8 @@ class PlaybackProgressTracker {
               }),
         );
       }
+    } on PlaybackTerminatedException catch (e) {
+      _handleTermination(e);
     } catch (e) {
       if (!isOffline) {
         _consecutiveFailures++;
@@ -213,6 +230,14 @@ class PlaybackProgressTracker {
         appLogger.d('Failed to send progress update (non-critical)', error: e);
       }
     }
+  }
+
+  void _handleTermination(PlaybackTerminatedException reason) {
+    if (_terminated) return;
+    _terminated = true;
+    appLogger.i('Server terminated playback session: ${reason.code} ${reason.reason}');
+    stopTracking();
+    onTerminated?.call(reason);
   }
 
   void _resetBackoff() {

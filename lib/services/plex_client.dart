@@ -1600,6 +1600,18 @@ class PlexClient
     // Surface non-2xx instead of swallowing — progress is the cornerstone
     // of resume/Continue Watching, so silent failures hurt the user later.
     throwIfHttpError(response);
+
+    // When the owner terminates the stream from Plex Web or Tautulli, the
+    // server keeps responding 200 to subsequent timeline pings but stamps
+    // a `terminationCode` + `terminationText` on the MediaContainer. Lift
+    // that out so the player can react instead of looping forever.
+    final container = _getMediaContainer(response);
+    if (container != null && container['terminationCode'] != null) {
+      throw PlaybackTerminatedException(
+        code: container['terminationCode']?.toString(),
+        reason: container['terminationText']?.toString(),
+      );
+    }
   }
 
   /// Remove item from Continue Watching (On Deck) without affecting watch status or progress

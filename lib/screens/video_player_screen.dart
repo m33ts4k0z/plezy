@@ -14,6 +14,7 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import '../mpv/mpv.dart';
 import '../mpv/player/platform/player_android.dart';
 
+import '../exceptions/media_server_exceptions.dart';
 import '../services/scrub_preview_source.dart';
 import '../media/media_backend.dart';
 import '../media/media_item.dart';
@@ -975,6 +976,26 @@ class VideoPlayerScreenState extends State<VideoPlayerScreen> with WidgetsBindin
   // session — either via the pre-playback primary path (Plex metadata fps) or
   // via the post-`playbackRestart` fallback. Prevents double-switching.
   bool _frameRateMatchingApplied = false;
+
+  bool _serverTerminationHandled = false;
+
+  /// Fired by [PlaybackProgressTracker] when the `/:/timeline` heartbeat
+  /// returns a `terminationCode`. The owner pressed "Terminate Session"
+  /// in Plex Web or Tautulli — pause locally, surface a snackbar, then
+  /// exit the player.
+  void _handleServerTermination(PlaybackTerminatedException reason) {
+    if (_serverTerminationHandled) return;
+    _serverTerminationHandled = true;
+    if (!mounted) return;
+
+    final text = (reason.reason != null && reason.reason!.isNotEmpty)
+        ? reason.reason!
+        : 'The server stopped this stream.';
+    showGlobalErrorSnackBar(text);
+
+    unawaited(player?.pause());
+    unawaited(_handleBackButton());
+  }
 
   /// Handle back button press
   /// For non-host participants in Watch Together, shows leave session confirmation

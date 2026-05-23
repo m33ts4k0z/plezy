@@ -37,6 +37,18 @@ class MediaServerPinExpiredException extends MediaServerAuthException {
   const MediaServerPinExpiredException() : super('PIN expired before sign-in');
 }
 
+/// The server told us mid-playback that this session has been terminated
+/// (e.g. the Plex owner stopped the stream from the Web dashboard or
+/// Tautulli). Plex reports this inline in the `/:/timeline` response via
+/// `terminationCode` + `terminationText`; the playback layer catches this
+/// exception to stop the player instead of treating it as a transient
+/// network failure.
+class PlaybackTerminatedException extends MediaServerException {
+  final String? code;
+  final String? reason;
+  PlaybackTerminatedException({this.code, this.reason}) : super(reason ?? 'Playback session terminated by the server');
+}
+
 /// HTTP transport / non-2xx errors. Carries the status code (when known),
 /// the parsed response body, and the originating URI so callers can log
 /// useful diagnostics. Both Plex and Jellyfin route their HTTP failures
