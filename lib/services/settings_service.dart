@@ -153,6 +153,8 @@ String? _trimEmptyAsNull(String? v) {
   return (t == null || t.isEmpty) ? null : t;
 }
 
+int _clampNonNegative(int v) => v < 0 ? 0 : v;
+
 String _legacyMpvEntriesToText(List<dynamic> entries) {
   final lines = <String>[];
   for (final item in entries) {
@@ -315,6 +317,25 @@ class SettingsService extends BaseSharedPreferencesService {
   static const customDownloadPathType = NullableStringPref('custom_download_path_type');
   static const downloadOnWifiOnly = BoolPref('download_on_wifi_only');
   static const autoRemoveWatchedDownloads = BoolPref('auto_remove_watched_downloads');
+
+  /// Quality preset applied to all new downloads. Mirrors the playback
+  /// preset's shape (see [defaultQualityPreset]) so the picker UI and the
+  /// transcode parameter mapping stay in lockstep. `original` bypasses the
+  /// server transcoder and pulls the direct-play file.
+  static const downloadQualityPreset = EnumPref<TranscodeQualityPreset>(
+    'download_quality_preset',
+    values: TranscodeQualityPreset.values,
+    defaultValue: TranscodeQualityPreset.original,
+  );
+
+  /// Maximum bytes (in GB) we'll let downloads occupy under the currently
+  /// selected download path. 0 disables the cap. Counted against on-disk
+  /// usage of [DownloadStorageService.getDownloadedBytesUnderCurrentPath]
+  /// — see that method for the scope (per-path, all profiles combined).
+  static const downloadStorageLimitGb = IntPref(
+    'download_storage_limit_gb',
+    transform: _clampNonNegative,
+  );
   static const autoCheckUpdatesOnStartup = BoolPref('auto_check_updates_on_startup', defaultValue: true);
   static const showPerformanceOverlay = BoolPref('show_performance_overlay');
   static const autoHidePerformanceOverlay = BoolPref('auto_hide_performance_overlay', defaultValue: true);
@@ -422,6 +443,20 @@ class SettingsService extends BaseSharedPreferencesService {
   );
   static final mediaVersionPreferences = JsonPref<Map<String, int>>(
     'media_version_preferences',
+    defaultValue: const {},
+    encode: json.encode,
+    decode: (raw) => (raw as Map<String, dynamic>).map((k, v) => MapEntry(k, v as int)),
+  );
+
+  /// Per-server Plex downloadQueue id. Plezy POSTs `/downloadQueue` once
+  /// per server to create its own queue (keyed by `X-Plex-Client-Identifier`)
+  /// and caches the returned id here so subsequent
+  /// `/downloadQueue/{N}/add`, `…/items`, `…/item/{itemId}/media`, and
+  /// DELETE calls all target Plezy's queue instead of accidentally
+  /// reusing another client's (e.g. the official Android app's).
+  /// Key: Plex serverId, value: queue id assigned by the server.
+  static final plexDownloadQueueIds = JsonPref<Map<String, int>>(
+    'plex_download_queue_ids',
     defaultValue: const {},
     encode: json.encode,
     decode: (raw) => (raw as Map<String, dynamic>).map((k, v) => MapEntry(k, v as int)),

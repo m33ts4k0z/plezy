@@ -2,6 +2,7 @@ import 'dart:typed_data';
 
 import '../media/media_source_info.dart';
 import '../media/media_sort.dart';
+import '../models/transcode_quality_preset.dart';
 import '../services/api_cache.dart';
 import '../services/playback_initialization_types.dart';
 import '../utils/app_logger.dart';
@@ -531,7 +532,16 @@ abstract class MediaServerClient {
   /// any external subtitle tracks that should be saved alongside it.
   ///
   /// [mediaIndex] selects among multiple media versions when an item has them.
-  Future<DownloadResolution> resolveDownload(MediaItem item, {int mediaIndex = 0});
+  ///
+  /// [qualityPreset] requests a server-side transcoded copy. When `null` or
+  /// [TranscodeQualityPreset.original] the backend returns the direct-play
+  /// part URL. Currently only Plex honours non-original presets — Jellyfin
+  /// falls back to direct-stream regardless.
+  Future<DownloadResolution> resolveDownload(
+    MediaItem item, {
+    int mediaIndex = 0,
+    TranscodeQualityPreset? qualityPreset,
+  });
 
   /// The artwork files the download pipeline should persist for [item] so
   /// the offline UI can render its poster, clear logo, and background art.

@@ -27,7 +27,10 @@ import '../../providers/theme_provider.dart';
 import '../../providers/trackers_provider.dart';
 import '../../providers/trakt_account_provider.dart';
 import '../../services/keyboard_shortcuts_service.dart';
+import '../../models/transcode_quality_preset.dart';
 import '../../services/settings_service.dart' as settings;
+import '../../utils/quality_preset_labels.dart';
+import 'settings_utils.dart';
 import '../../services/update_service.dart';
 import '../../utils/dialogs.dart';
 import '../../utils/snackbar_helper.dart';
@@ -336,9 +339,53 @@ class _SettingsScreenState extends State<SettingsScreen> with FocusableTab, Moun
           title: t.settings.autoRemoveWatchedDownloads,
           subtitle: t.settings.autoRemoveWatchedDownloadsDescription,
         ),
+        // Quality preset reuses the playback enum (TranscodeQualityPreset)
+        // so the picker, label formatter, and transcode-decision mapping
+        // can't drift between download and playback flows. Selecting
+        // anything other than Original routes the download through Plex's
+        // transcoder; Jellyfin falls back to direct-stream (no transcoded
+        // download endpoint wired yet).
+        SettingSelectionTile<TranscodeQualityPreset, TranscodeQualityPreset>(
+          pref: settings.SettingsService.downloadQualityPreset,
+          icon: Symbols.high_quality_rounded,
+          title: 'Download quality',
+          subtitleBuilder: qualityPresetLabel,
+          options: TranscodeQualityPreset.displayOrder
+              .map((p) => DialogOption(value: p, title: qualityPresetLabel(p)))
+              .toList(),
+          decode: (p) => p,
+          encode: (p) => p,
+        ),
+        // Storage cap is scoped to the currently selected download path.
+        // 0 means "no cap"; any positive value blocks new downloads once
+        // on-disk usage under the path reaches the limit. Measured by
+        // DownloadStorageService.getDownloadedBytesUnderCurrentPath, which
+        // returns null on Android SAF (we can't walk content:// URIs) —
+        // in that case the cap silently no-ops with a debug log.
+        SettingSelectionTile<int, int>(
+          pref: settings.SettingsService.downloadStorageLimitGb,
+          icon: Symbols.sd_storage_rounded,
+          title: 'Storage limit',
+          subtitleBuilder: _formatStorageLimitGb,
+          options: [
+            DialogOption(value: 0, title: 'No limit'),
+            DialogOption(value: 1, title: '1 GB'),
+            DialogOption(value: 5, title: '5 GB'),
+            DialogOption(value: 10, title: '10 GB'),
+            DialogOption(value: 20, title: '20 GB'),
+            DialogOption(value: 50, title: '50 GB'),
+            DialogOption(value: 100, title: '100 GB'),
+            DialogOption(value: 250, title: '250 GB'),
+            DialogOption(value: 500, title: '500 GB'),
+          ],
+          decode: (v) => v,
+          encode: (v) => v,
+        ),
       ],
     );
   }
+
+  String _formatStorageLimitGb(int gb) => gb <= 0 ? 'No limit' : '$gb GB';
 
   Widget _buildKeyboardShortcutsSection() {
     if (_keyboardService == null) return const SizedBox.shrink();

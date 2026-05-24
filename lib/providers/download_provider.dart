@@ -703,6 +703,13 @@ class DownloadProvider extends ChangeNotifier with DisposableChangeNotifierMixin
     int downloadingCount = 0;
     int queuedCount = 0;
     int failedCount = 0;
+    // `preparing` covers Plex server-side transcodes waiting for the
+    // server to finish converting before any bytes can be fetched. We
+    // roll it up into `downloading` at the parent level: from the
+    // user's point of view "the show has something in flight" is the
+    // useful signal, and the parent doesn't need to distinguish
+    // server-prep from local-fetch.
+    int preparingCount = 0;
 
     for (final ep in episodes) {
       switch (ep.status) {
@@ -710,6 +717,8 @@ class DownloadProvider extends ChangeNotifier with DisposableChangeNotifierMixin
           completedCount++;
         case DownloadStatus.downloading:
           downloadingCount++;
+        case DownloadStatus.preparing:
+          preparingCount++;
         case DownloadStatus.queued:
           queuedCount++;
         case DownloadStatus.failed:
@@ -719,13 +728,15 @@ class DownloadProvider extends ChangeNotifier with DisposableChangeNotifierMixin
       }
     }
 
+    final int inFlightCount = downloadingCount + preparingCount;
+
     // Determine overall status
     final DownloadStatus overallStatus;
     if (completedCount == totalEpisodes) {
       overallStatus = DownloadStatus.completed;
-    } else if (completedCount > 0 && downloadingCount == 0 && queuedCount == 0 && completedCount < totalEpisodes) {
+    } else if (completedCount > 0 && inFlightCount == 0 && queuedCount == 0 && completedCount < totalEpisodes) {
       overallStatus = DownloadStatus.partial;
-    } else if (downloadingCount > 0) {
+    } else if (inFlightCount > 0) {
       overallStatus = DownloadStatus.downloading;
     } else if (queuedCount > 0) {
       overallStatus = DownloadStatus.queued;
@@ -741,6 +752,7 @@ class DownloadProvider extends ChangeNotifier with DisposableChangeNotifierMixin
     appLogger.d(
       'Aggregate progress for $entityType $ratingKey: $overallProgress% '
       '($completedCount completed, $downloadingCount downloading, '
+      '$preparingCount preparing, '
       '$queuedCount queued of $totalEpisodes total) - Status: $overallStatus',
     );
 

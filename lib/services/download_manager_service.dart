@@ -16,6 +16,7 @@ import '../media/media_kind.dart';
 import '../media/media_server_client.dart';
 import 'api_cache.dart';
 import 'download_artwork_helpers.dart';
+import 'plex_client.dart';
 import 'settings_service.dart';
 import 'saf_storage_service.dart';
 import 'package:saf_util/saf_util_platform_interface.dart' show SafDocumentFile;
@@ -41,6 +42,17 @@ class _DownloadContext {
   final int? showYear;
   final bool isSafMode;
   final List<DownloadSubtitleSpec>? subtitles;
+  // When true the URL points at a server transcoder rather than a static
+  // file. The system-cancel re-queue path treats those as terminal so we
+  // don't spin up a fresh transcode session every ~15 s in a loop.
+  final bool isTranscoded;
+
+  // Plex downloadQueue identifiers, set only for server-side transcoded
+  // downloads. Used to (a) poll for `preparing → downloading` transition
+  // and (b) DELETE the queue item on cancel or after successful
+  // completion so the server-side transcode is stopped / cleaned up.
+  final int? serverTranscodeQueueId;
+  final int? serverTranscodeItemId;
 
   _DownloadContext({
     required this.metadata,
@@ -51,6 +63,9 @@ class _DownloadContext {
     this.showYear,
     this.isSafMode = false,
     this.subtitles,
+    this.isTranscoded = false,
+    this.serverTranscodeQueueId,
+    this.serverTranscodeItemId,
   });
 }
 
@@ -104,6 +119,24 @@ class DownloadManagerService {
   // App-level auto-retry timers for downloads that exhausted native retries.
   // Keyed by globalKey; each timer fires a fresh re-enqueue after a delay.
   final Map<String, Timer> _autoRetryTimers = {};
+
+  // Polling timers for Plex server-side transcodes that are still in the
+  // `preparing` state. Keyed by globalKey. Cancelled when the transcode
+  // becomes `available` (we then start the background download task),
+  // when the user cancels the download, or on dispose.
+  final Map<String, Timer> _serverTranscodePollers = {};
+  static const _serverTranscodePollInterval = Duration(seconds: 3);
+
+  // Consecutive `notFound` responses from
+  // [PlexClient.pollServerSideTranscode] per download. A single
+  // notFound can be a server-side race (item just-purged after our
+  // last sighting, or backend cache lag); we only mark the download
+  // failed once we see [_maxConsecutiveNotFound] in a row, which at
+  // the 3-second poll interval is ~15s of confidence the item is
+  // really gone. Transient HTTP errors are handled separately by the
+  // PlexPollTransientError branch and never bump this counter.
+  final Map<String, int> _serverTranscodeNotFoundCounts = {};
+  static const _maxConsecutiveNotFound = 5;
 
   // Circuit breaker: consecutive instant failures in _processQueue.
   // Stops the queue when all items fail with the same error (e.g. DNS).
@@ -410,6 +443,20 @@ class DownloadManagerService {
     // Plex servers can reject concurrent media downloads.
     await FileDownloader().configure(globalConfig: (Config.holdingQueue, (1, 1, 1)));
 
+    // Force every download to run as an Android foreground service. Without
+    // this the package defaults to -1 (foreground disabled), and any task
+    // whose response lacks a Content-Length — notably Plex's transcoder,
+    // which streams MKV chunks of unknown total size — gets cancelled the
+    // moment Android's WorkManager re-evaluates the (background-only) work
+    // and decides it's no longer needed. The threshold is in MB; 0 means
+    // "always foreground". See HoldingQueue + determineRunInForeground in
+    // the package's Kotlin source.
+    if (Platform.isAndroid) {
+      await FileDownloader().configure(
+        androidConfig: (Config.runInForeground, Config.always),
+      );
+    }
+
     await FileDownloader().trackTasks();
     // Deliver status updates from iOS background-to-foreground transitions
     await FileDownloader().resumeFromBackground();
@@ -611,6 +658,23 @@ class DownloadManagerService {
   void _cancelDownloadTimers(String key) {
     _progressDebounceTimers.remove(key)?.cancel();
     _autoRetryTimers.remove(key)?.cancel();
+    _serverTranscodePollers.remove(key)?.cancel();
+    _serverTranscodeNotFoundCounts.remove(key);
+  }
+
+  /// Tell PMS to drop a server-side transcode queue item so ffmpeg
+  /// stops and the temporary file is cleaned up. Best-effort — failures
+  /// only burn server disk, not user data, so we just log. Invoked from
+  /// both cancel and successful-completion paths.
+  Future<void> _cleanupServerTranscodeIfNeeded(String globalKey) async {
+    final context = _pendingDownloadContext[globalKey];
+    if (context == null) return;
+    final queueId = context.serverTranscodeQueueId;
+    final itemId = context.serverTranscodeItemId;
+    if (queueId == null || itemId == null) return;
+    final client = context.client;
+    if (client is! PlexClient) return;
+    await client.cancelServerSideTranscode(queueId: queueId, itemId: itemId);
   }
 
   /// Delete a file if it exists and log the deletion
@@ -808,6 +872,28 @@ class DownloadManagerService {
     await _database.updateDownloadProgress(globalKey, 0, 0, 0);
   }
 
+  /// Throws a [DownloadStorageLimitReachedException] when the user has set
+  /// a non-zero `downloadStorageLimitGb` and current on-disk usage under
+  /// the active download path is already at-or-over the limit. Silently
+  /// returns when the cap is unset, when usage can't be measured (SAF),
+  /// or when usage is below the threshold.
+  Future<void> _enforceStorageLimitOrThrow() async {
+    final settings = await SettingsService.getInstance();
+    final limitGb = settings.read(SettingsService.downloadStorageLimitGb);
+    if (limitGb <= 0) return;
+
+    final usageBytes = await _storageService.getDownloadedBytesUnderCurrentPath();
+    if (usageBytes == null) {
+      appLogger.d('Storage cap not enforced: usage unavailable (likely SAF)');
+      return;
+    }
+
+    final limitBytes = limitGb * 1024 * 1024 * 1024;
+    if (usageBytes >= limitBytes) {
+      throw DownloadStorageLimitReachedException(usageBytes: usageBytes, limitBytes: limitBytes);
+    }
+  }
+
   /// Resolve metadata, video URL, and file path, then enqueue a background download task.
   /// Returns true if successfully enqueued, false if it failed immediately.
   Future<bool> _prepareAndEnqueueDownload(
@@ -826,9 +912,19 @@ class DownloadManagerService {
         return true;
       }
 
+      // Storage cap check — block the download up front so we don't move
+      // it to `downloading`, hit the server, and then fail late. The cap
+      // is set in Downloads settings and counts current on-disk usage
+      // under the active download path. SAF returns null usage (can't
+      // walk content:// URIs), in which case the cap silently no-ops.
+      await _enforceStorageLimitOrThrow();
+
       appLogger.i('Preparing download for $globalKey');
       if (existing.bgTaskId != null) await _cleanupStaleDownload(globalKey);
-      await _transitionStatus(globalKey, DownloadStatus.downloading);
+      // Don't transition to `downloading` yet — we may need to sit in
+      // the `preparing` state while a server-side transcode runs. The
+      // correct status is set after resolveDownload tells us which path
+      // we're on.
 
       final parsed = parseGlobalKey(globalKey);
       if (parsed == null) throw Exception('Invalid globalKey: $globalKey');
@@ -851,13 +947,28 @@ class DownloadManagerService {
       }
 
       final selectedMediaIndex = existing.mediaIndex;
-      var resolution = await client.resolveDownload(metadata, mediaIndex: selectedMediaIndex);
+      // Per-download quality preset is read from the global Downloads
+      // setting — original (default) routes through direct play; any
+      // other preset asks the server to transcode and stream a single
+      // MKV file. Per-download override could be added later by reading
+      // a value off DownloadQueueItem instead.
+      final settings = await SettingsService.getInstance();
+      final qualityPreset = settings.read(SettingsService.downloadQualityPreset);
+      var resolution = await client.resolveDownload(
+        metadata,
+        mediaIndex: selectedMediaIndex,
+        qualityPreset: qualityPreset,
+      );
       if (resolution.videoUrl == null) {
         // Cache miss for the per-version fields — refresh from network.
         appLogger.w('No video URL from cache for $globalKey, retrying via network');
         final fetched = await client.fetchItem(ratingKey);
         if (fetched != null) metadata = fetched.copyWith(serverId: serverId);
-        resolution = await client.resolveDownload(metadata, mediaIndex: selectedMediaIndex);
+        resolution = await client.resolveDownload(
+          metadata,
+          mediaIndex: selectedMediaIndex,
+          qualityPreset: qualityPreset,
+        );
         if (resolution.videoUrl == null) throw Exception('Could not get video URL for $globalKey');
       }
 
@@ -874,110 +985,44 @@ class DownloadManagerService {
           : metadata.displayTitle;
 
       // Get WiFi-only setting for native enforcement
-      final settings = await SettingsService.getInstance();
       final requiresWiFi = settings.read(SettingsService.downloadOnWifiOnly);
 
-      if (_storageService.isUsingSaf) {
-        // SAF mode: use UriDownloadTask (writes directly to content:// URI, no pause/resume)
-        final List<String> pathComponents;
-        final String safFileName;
-        if (metadata.isMovie) {
-          pathComponents = _storageService.getMovieSafPathComponents(metadata);
-          safFileName = _storageService.getMovieSafFileName(metadata, ext);
-        } else if (metadata.isEpisode) {
-          pathComponents = _storageService.getEpisodeSafPathComponents(metadata, showYear: showYear);
-          safFileName = _storageService.getEpisodeSafFileName(metadata, ext);
-        } else {
-          pathComponents = [serverId, metadata.id];
-          safFileName = 'video.$ext';
-        }
-
-        final safDirUri = await SafStorageService.instance.createNestedDirectories(
-          _storageService.safBaseUri!,
-          pathComponents,
-        );
-        if (safDirUri == null) throw Exception('Failed to create SAF directory');
-
-        await _cleanupSafTargetFile(safDirUri, safFileName);
-
-        final task = UriDownloadTask(
-          url: resolution.videoUrl!,
-          filename: safFileName,
-          directoryUri: Uri.parse(safDirUri),
-          group: _downloadGroup,
-          updates: Updates.statusAndProgress,
-          requiresWiFi: requiresWiFi,
-          retries: _nativeRetries,
-          allowPause: true,
-          metaData: globalKey,
-          displayName: displayName,
-        );
-
-        _pendingDownloadContext[globalKey] = _DownloadContext(
-          metadata: metadata,
-          queueItem: queueItem,
-          filePath: safDirUri,
-          extension: ext,
+      // Fork: if PMS is still transcoding (server-side download queue),
+      // hold off on creating the background_downloader task. Sit in
+      // `preparing` state, poll the queue every few seconds, and only
+      // start the actual file fetch once the server reports
+      // `status=available`. The polled progress percent is forwarded
+      // to the downloads UI via the progress stream.
+      if (resolution.needsServerTranscodePolling) {
+        await _transitionStatus(globalKey, DownloadStatus.preparing);
+        _startServerTranscodePoller(
+          globalKey: globalKey,
           client: client,
-          showYear: showYear,
-          isSafMode: true,
-          subtitles: resolution.externalSubtitles,
-        );
-
-        await _database.updateBgTaskId(globalKey, task.taskId);
-        final success = await FileDownloader().enqueue(task);
-        if (!success) throw Exception('Failed to enqueue SAF download task');
-        appLogger.i('Enqueued SAF download task ${task.taskId} for $globalKey');
-      } else {
-        // Normal mode: use DownloadTask with pause/resume support
-        String downloadFilePath;
-        if (metadata.isMovie) {
-          downloadFilePath = await _storageService.getMovieVideoPath(metadata, ext);
-        } else if (metadata.isEpisode) {
-          downloadFilePath = await _storageService.getEpisodeVideoPath(metadata, ext, showYear: showYear);
-        } else {
-          downloadFilePath = await _storageService.getVideoFilePath(serverId, metadata.id, ext);
-        }
-
-        // Clean up partial files from previous attempts to prevent
-        // background_downloader from creating numbered copies (File (1).mp4)
-        await Future.wait([
-          _deleteFileIfExists(File(downloadFilePath), 'stale video before re-download'),
-          _deleteFileIfExists(File('$downloadFilePath.part'), 'stale .part before re-download'),
-        ]);
-
-        await File(downloadFilePath).parent.create(recursive: true);
-
-        final task = DownloadTask(
-          url: resolution.videoUrl!,
-          filename: path.basename(downloadFilePath),
-          directory: path.dirname(downloadFilePath),
-          baseDirectory: BaseDirectory.root,
-          group: _downloadGroup,
-          updates: Updates.statusAndProgress,
-          requiresWiFi: requiresWiFi,
-          retries: _nativeRetries,
-          allowPause: true,
-          metaData: globalKey,
-          displayName: displayName,
-        );
-
-        _pendingDownloadContext[globalKey] = _DownloadContext(
-          metadata: metadata,
           queueItem: queueItem,
-          filePath: downloadFilePath,
-          extension: ext,
-          client: client,
+          metadata: metadata,
+          resolution: resolution,
+          serverId: serverId,
+          ext: ext,
           showYear: showYear,
-          subtitles: resolution.externalSubtitles,
+          displayName: displayName,
+          requiresWiFi: requiresWiFi,
         );
-
-        await _database.updateBgTaskId(globalKey, task.taskId);
-        final success = await FileDownloader().enqueue(task);
-        if (!success) throw Exception('Failed to enqueue download task');
-        appLogger.i('Enqueued download task ${task.taskId} for $globalKey');
+        return true;
       }
-      return true;
+
+      await _transitionStatus(globalKey, DownloadStatus.downloading);
+      return await _startBackgroundDownloadTask(
+        globalKey: globalKey,
+        client: client,
+        queueItem: queueItem,
+        metadata: metadata,
+        resolution: resolution,
+        serverId: serverId,
+        ext: ext,
+        showYear: showYear,
+        displayName: displayName,
+        requiresWiFi: requiresWiFi,
+      );
     } catch (e) {
       appLogger.e('Failed to prepare download for $globalKey', error: e);
       await _transitionStatus(globalKey, DownloadStatus.failed, errorMessage: e.toString());
@@ -985,6 +1030,271 @@ class DownloadManagerService {
       _pendingDownloadContext.remove(globalKey);
       return false;
     }
+  }
+
+  /// Build and enqueue the background_downloader task using a fully
+  /// resolved [DownloadResolution]. Split out of [_prepareAndEnqueueDownload]
+  /// so the server-side-transcode poller can call it once the file
+  /// becomes available without re-doing metadata lookup or
+  /// resolveDownload (the latter would create a duplicate queue item
+  /// on PMS).
+  Future<bool> _startBackgroundDownloadTask({
+    required String globalKey,
+    required MediaServerClient client,
+    required DownloadQueueItem queueItem,
+    required MediaItem metadata,
+    required DownloadResolution resolution,
+    required String serverId,
+    required String ext,
+    required int? showYear,
+    required String displayName,
+    required bool requiresWiFi,
+  }) async {
+    if (_storageService.isUsingSaf) {
+      // SAF mode: use UriDownloadTask (writes directly to content:// URI, no pause/resume)
+      final List<String> pathComponents;
+      final String safFileName;
+      if (metadata.isMovie) {
+        pathComponents = _storageService.getMovieSafPathComponents(metadata);
+        safFileName = _storageService.getMovieSafFileName(metadata, ext);
+      } else if (metadata.isEpisode) {
+        pathComponents = _storageService.getEpisodeSafPathComponents(metadata, showYear: showYear);
+        safFileName = _storageService.getEpisodeSafFileName(metadata, ext);
+      } else {
+        pathComponents = [serverId, metadata.id];
+        safFileName = 'video.$ext';
+      }
+
+      final safDirUri = await SafStorageService.instance.createNestedDirectories(
+        _storageService.safBaseUri!,
+        pathComponents,
+      );
+      if (safDirUri == null) throw Exception('Failed to create SAF directory');
+
+      await _cleanupSafTargetFile(safDirUri, safFileName);
+
+      final task = UriDownloadTask(
+        url: resolution.videoUrl!,
+        filename: safFileName,
+        directoryUri: Uri.parse(safDirUri),
+        group: _downloadGroup,
+        updates: Updates.statusAndProgress,
+        headers: resolution.extraHeaders,
+        requiresWiFi: requiresWiFi,
+        retries: _nativeRetries,
+        // Transcoded streams have no Range support and no
+        // Content-Length — the downloader can't pause/resume them, and
+        // retries would just re-spawn a fresh transcode session per
+        // attempt. Keep pause/retries for direct-play only.
+        allowPause: !resolution.isTranscoded,
+        metaData: globalKey,
+        displayName: displayName,
+      );
+
+      _pendingDownloadContext[globalKey] = _DownloadContext(
+        metadata: metadata,
+        queueItem: queueItem,
+        filePath: safDirUri,
+        extension: ext,
+        client: client,
+        showYear: showYear,
+        isSafMode: true,
+        subtitles: resolution.externalSubtitles,
+        isTranscoded: resolution.isTranscoded,
+        serverTranscodeQueueId: resolution.serverTranscodeQueueId,
+        serverTranscodeItemId: resolution.serverTranscodeItemId,
+      );
+
+      await _database.updateBgTaskId(globalKey, task.taskId);
+      final success = await FileDownloader().enqueue(task);
+      if (!success) throw Exception('Failed to enqueue SAF download task');
+      appLogger.i('Enqueued SAF download task ${task.taskId} for $globalKey');
+    } else {
+      // Normal mode: use DownloadTask with pause/resume support
+      String downloadFilePath;
+      if (metadata.isMovie) {
+        downloadFilePath = await _storageService.getMovieVideoPath(metadata, ext);
+      } else if (metadata.isEpisode) {
+        downloadFilePath = await _storageService.getEpisodeVideoPath(metadata, ext, showYear: showYear);
+      } else {
+        downloadFilePath = await _storageService.getVideoFilePath(serverId, metadata.id, ext);
+      }
+
+      // Clean up partial files from previous attempts to prevent
+      // background_downloader from creating numbered copies (File (1).mp4)
+      await Future.wait([
+        _deleteFileIfExists(File(downloadFilePath), 'stale video before re-download'),
+        _deleteFileIfExists(File('$downloadFilePath.part'), 'stale .part before re-download'),
+      ]);
+
+      await File(downloadFilePath).parent.create(recursive: true);
+
+      final task = DownloadTask(
+        url: resolution.videoUrl!,
+        filename: path.basename(downloadFilePath),
+        directory: path.dirname(downloadFilePath),
+        baseDirectory: BaseDirectory.root,
+        group: _downloadGroup,
+        updates: Updates.statusAndProgress,
+        headers: resolution.extraHeaders,
+        requiresWiFi: requiresWiFi,
+        retries: _nativeRetries,
+        // Transcoded streams have no Range support and no
+        // Content-Length — the downloader can't pause/resume them, and
+        // retries would just re-spawn a fresh transcode session per
+        // attempt. Keep pause/retries for direct-play only.
+        allowPause: !resolution.isTranscoded,
+        metaData: globalKey,
+        displayName: displayName,
+      );
+
+      _pendingDownloadContext[globalKey] = _DownloadContext(
+        metadata: metadata,
+        queueItem: queueItem,
+        filePath: downloadFilePath,
+        extension: ext,
+        client: client,
+        showYear: showYear,
+        subtitles: resolution.externalSubtitles,
+        isTranscoded: resolution.isTranscoded,
+        serverTranscodeQueueId: resolution.serverTranscodeQueueId,
+        serverTranscodeItemId: resolution.serverTranscodeItemId,
+      );
+
+      await _database.updateBgTaskId(globalKey, task.taskId);
+      final success = await FileDownloader().enqueue(task);
+      if (!success) throw Exception('Failed to enqueue download task');
+      appLogger.i('Enqueued download task ${task.taskId} for $globalKey');
+    }
+    return true;
+  }
+
+  /// Start (or replace) a polling timer for a Plex server-side
+  /// transcode. Calls [PlexClient.pollServerSideTranscode] every
+  /// [_serverTranscodePollInterval] and:
+  ///   - emits the polled progress percent on [progressStream] (status=preparing)
+  ///   - when status flips to `available`, transitions to `downloading`
+  ///     and hands off to [_startBackgroundDownloadTask]
+  ///   - on failure / removal, marks the download failed and cleans up
+  void _startServerTranscodePoller({
+    required String globalKey,
+    required MediaServerClient client,
+    required DownloadQueueItem queueItem,
+    required MediaItem metadata,
+    required DownloadResolution resolution,
+    required String serverId,
+    required String ext,
+    required int? showYear,
+    required String displayName,
+    required bool requiresWiFi,
+  }) {
+    final plexClient = client is PlexClient ? client : null;
+    final queueId = resolution.serverTranscodeQueueId;
+    final itemId = resolution.serverTranscodeItemId;
+    if (plexClient == null || queueId == null || itemId == null) {
+      appLogger.w('Server transcode poller: missing PlexClient or queue/item id for $globalKey');
+      return;
+    }
+
+    _serverTranscodePollers[globalKey]?.cancel();
+    appLogger.i('Polling Plex transcode queue=$queueId item=$itemId for $globalKey');
+
+    Future<void> tick() async {
+      if (_disposed) return;
+      // If the row was deleted out from under us (e.g. user removed the
+      // download), stop polling and clean up the server-side queue
+      // item so ffmpeg doesn't keep running.
+      final existing = await _database.getDownloadedMedia(globalKey);
+      if (existing == null ||
+          existing.status == DownloadStatus.cancelled.index ||
+          existing.status == DownloadStatus.completed.index) {
+        _serverTranscodePollers.remove(globalKey)?.cancel();
+        await plexClient.cancelServerSideTranscode(queueId: queueId, itemId: itemId);
+        return;
+      }
+
+      final pollResult = await plexClient.pollServerSideTranscode(queueId: queueId, itemId: itemId);
+
+      // Transient network / HTTP error — could be a backgrounded app,
+      // a DNS hiccup, a server restart. Don't touch the download state;
+      // the next tick will retry. This is the single most-important
+      // resilience step: previously these errors were conflated with
+      // "item gone" and caused false-positive failures + duplicate
+      // server-side transcodes on user retry.
+      if (pollResult is PlexPollTransientError) {
+        appLogger.d('Plex transcode poll transient error for $globalKey, will retry next tick');
+        return;
+      }
+
+      if (pollResult is PlexPollNotFound) {
+        final n = (_serverTranscodeNotFoundCounts[globalKey] ?? 0) + 1;
+        _serverTranscodeNotFoundCounts[globalKey] = n;
+        appLogger.d('Plex transcode item $itemId not in queue $queueId ($n/$_maxConsecutiveNotFound)');
+        if (n < _maxConsecutiveNotFound) return; // give it a few more cycles before giving up
+        _serverTranscodePollers.remove(globalKey)?.cancel();
+        _serverTranscodeNotFoundCounts.remove(globalKey);
+        appLogger.w('Plex transcode item $itemId genuinely gone from queue $queueId for $globalKey');
+        await _transitionStatus(globalKey, DownloadStatus.failed, errorMessage: 'Server transcode disappeared');
+        await _database.removeFromQueue(globalKey);
+        return;
+      }
+
+      // Got a present result — reset notFound counter and react to status.
+      _serverTranscodeNotFoundCounts.remove(globalKey);
+      final status = (pollResult as PlexPollPresent).item;
+
+      if (status.isFailed) {
+        _serverTranscodePollers.remove(globalKey)?.cancel();
+        appLogger.w('Plex transcode failed for $globalKey: ${status.status}');
+        await plexClient.cancelServerSideTranscode(queueId: queueId, itemId: itemId);
+        await _transitionStatus(globalKey, DownloadStatus.failed, errorMessage: 'Server transcode ${status.status}');
+        await _database.removeFromQueue(globalKey);
+        return;
+      }
+
+      if (status.isAvailable) {
+        _serverTranscodePollers.remove(globalKey)?.cancel();
+        appLogger.i('Plex transcode available for $globalKey, starting download');
+        await _transitionStatus(globalKey, DownloadStatus.downloading);
+        try {
+          await _startBackgroundDownloadTask(
+            globalKey: globalKey,
+            client: client,
+            queueItem: queueItem,
+            metadata: metadata,
+            resolution: resolution,
+            serverId: serverId,
+            ext: ext,
+            showYear: showYear,
+            displayName: displayName,
+            requiresWiFi: requiresWiFi,
+          );
+        } catch (e) {
+          appLogger.e('Failed to start background task after server transcode ready for $globalKey', error: e);
+          await plexClient.cancelServerSideTranscode(queueId: queueId, itemId: itemId);
+          await _transitionStatus(globalKey, DownloadStatus.failed, errorMessage: e.toString());
+          await _database.removeFromQueue(globalKey);
+          _pendingDownloadContext.remove(globalKey);
+        }
+        return;
+      }
+
+      // Still processing — emit progress so the UI can render percent.
+      final percent = status.progress?.round().clamp(0, 100) ?? 0;
+      _progressController.add(
+        DownloadProgress(
+          globalKey: globalKey,
+          status: DownloadStatus.preparing,
+          progress: percent,
+          currentFile: 'transcoding',
+        ),
+      );
+    }
+
+    // Fire once immediately so the UI doesn't sit at 0% for the first
+    // poll interval, then run on the periodic schedule.
+    unawaited(tick());
+    _serverTranscodePollers[globalKey] = Timer.periodic(_serverTranscodePollInterval, (_) => unawaited(tick()));
   }
 
   /// Callback: background_downloader progress update
@@ -1074,6 +1384,23 @@ class DownloadManagerService {
     final existing = await _database.getDownloadedMedia(globalKey);
     if (existing?.status == DownloadStatus.completed.index) return;
 
+    // Transcoded downloads can't be safely re-queued automatically. The
+    // URL embeds a fresh transcode session id (Plex spins up a new
+    // ffmpeg) and there's no Content-Length/Range, so each re-queue
+    // would restart the transcode from scratch and re-trip the same
+    // no-progress timer in a tight loop. Mark the download as failed
+    // and let the user retry from the UI when they want.
+    if (ctx.isTranscoded) {
+      appLogger.w('Transcoded download cancelled by system for $globalKey; marking failed (no auto-retry)');
+      await _database.updateBgTaskId(globalKey, null);
+      await _transitionStatus(
+        globalKey,
+        DownloadStatus.failed,
+        errorMessage: 'Transcoded download was interrupted. Try Original quality or retry from Downloads.',
+      );
+      return;
+    }
+
     appLogger.w('Download cancelled by system for $globalKey, re-queuing');
     await _database.updateBgTaskId(globalKey, null);
     await _transitionStatus(globalKey, DownloadStatus.queued);
@@ -1090,6 +1417,10 @@ class DownloadManagerService {
       return;
     }
     _cancelDownloadTimers(globalKey);
+    // Drop the server-side transcode if the local fetch failed; the
+    // file isn't going to be downloaded so we shouldn't leave ffmpeg
+    // running or the temp file on the server's disk.
+    await _cleanupServerTranscodeIfNeeded(globalKey);
     _pendingDownloadContext.remove(globalKey);
 
     final existing = await _database.getDownloadedMedia(globalKey);
@@ -1144,6 +1475,7 @@ class DownloadManagerService {
       return;
     }
     _cancelDownloadTimers(globalKey);
+    await _cleanupServerTranscodeIfNeeded(globalKey);
     _pendingDownloadContext.remove(globalKey);
 
     final existing = await _database.getDownloadedMedia(globalKey);
@@ -1290,6 +1622,20 @@ class DownloadManagerService {
         }
       } catch (e) {
         appLogger.w('Supplementary downloads failed for $globalKey (video is saved)', error: e);
+      }
+
+      // For Plex server-side transcodes, also delete the queue item
+      // from PMS now that we have the bytes locally — otherwise the
+      // optimized file sits in the server's transcode dir indefinitely.
+      // Read queueId/itemId off `ctx` directly: line 1507 already
+      // removed the entry from `_pendingDownloadContext`, so the
+      // map-based [_cleanupServerTranscodeIfNeeded] helper would
+      // silently no-op here.
+      final cleanupClient = ctx?.client;
+      final cleanupQueueId = ctx?.serverTranscodeQueueId;
+      final cleanupItemId = ctx?.serverTranscodeItemId;
+      if (cleanupClient is PlexClient && cleanupQueueId != null && cleanupItemId != null) {
+        await cleanupClient.cancelServerSideTranscode(queueId: cleanupQueueId, itemId: cleanupItemId);
       }
 
       // Mark as completed — video is saved regardless of supplementary outcome
@@ -1627,6 +1973,10 @@ class DownloadManagerService {
   /// Cancel a download
   Future<void> cancelDownload(String globalKey) async {
     _cancelDownloadTimers(globalKey);
+    // Stop the Plex server-side transcode (if any) BEFORE the context
+    // is dropped — _cleanupServerTranscodeIfNeeded reads queue/item
+    // ids out of _pendingDownloadContext.
+    await _cleanupServerTranscodeIfNeeded(globalKey);
     final bgTaskId = await _database.getBgTaskId(globalKey);
     if (bgTaskId != null) {
       if (downloadsSupported) {
@@ -1641,6 +1991,7 @@ class DownloadManagerService {
 
   Future<void> deleteDownload(String globalKey) async {
     _cancelDownloadTimers(globalKey);
+    await _cleanupServerTranscodeIfNeeded(globalKey);
     final bgTaskId = await _database.getBgTaskId(globalKey);
     if (bgTaskId != null) {
       if (downloadsSupported) {
@@ -2363,6 +2714,26 @@ class DownloadManagerService {
     _pausingKeys.clear();
     _progressController.close();
     _deletionProgressController.close();
+  }
+}
+
+/// Thrown by [DownloadManagerService] when a new download is refused because
+/// the user-configured storage cap has been reached. The exception message
+/// is surfaced to the user via the standard `DownloadStatus.failed`
+/// errorMessage field, so the wording is intentionally end-user friendly.
+class DownloadStorageLimitReachedException implements Exception {
+  final int usageBytes;
+  final int limitBytes;
+  DownloadStorageLimitReachedException({required this.usageBytes, required this.limitBytes});
+
+  double get _usageGb => usageBytes / (1024 * 1024 * 1024);
+  double get _limitGb => limitBytes / (1024 * 1024 * 1024);
+
+  @override
+  String toString() {
+    return 'Storage limit reached: ${_usageGb.toStringAsFixed(1)} GB used '
+        'of ${_limitGb.toStringAsFixed(0)} GB cap. Raise it in Settings → '
+        'Downloads → Storage limit, or free up space.';
   }
 }
 

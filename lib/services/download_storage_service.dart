@@ -127,6 +127,40 @@ class DownloadStorageService {
     return _baseDownloadsDir!;
   }
 
+  /// Total bytes occupied by previously-downloaded files under the current
+  /// downloads directory. Used by the storage cap enforced before queueing
+  /// new downloads (see `DownloadManagerService`).
+  ///
+  /// Returns `null` when usage cannot be measured — currently only on
+  /// Android SAF (`isUsingSaf`), where the downloads live behind a
+  /// `content://` URI that Dart's `File` APIs can't traverse. Callers
+  /// must treat `null` as "no signal" and skip the cap, not as "zero".
+  Future<int?> getDownloadedBytesUnderCurrentPath() async {
+    if (isUsingSaf) return null;
+    try {
+      final dir = await getDownloadsDirectory();
+      if (!await dir.exists()) return 0;
+
+      var total = 0;
+      await for (final entity in dir.list(recursive: true, followLinks: false)) {
+        if (entity is File) {
+          try {
+            total += await entity.length();
+          } catch (e) {
+            // A file may vanish between list and length (e.g. concurrent
+            // delete from another task). Skip it rather than aborting the
+            // whole walk — the cap is advisory, not exact.
+            appLogger.d('Skipping file in size walk: ${entity.path}', error: e);
+          }
+        }
+      }
+      return total;
+    } catch (e, st) {
+      appLogger.w('Failed to compute downloads usage', error: e, stackTrace: st);
+      return null;
+    }
+  }
+
   /// Get centralized artwork directory for offline artwork caching
   /// This directory stores artwork files with hashed filenames for deduplication
   Future<Directory> getArtworkDirectory() async {

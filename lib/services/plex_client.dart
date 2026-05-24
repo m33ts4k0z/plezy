@@ -66,6 +66,7 @@ import 'plex_api_cache.dart';
 import 'plex_mappers.dart';
 import 'plex_playback_mapper.dart';
 import 'playback_initialization_types.dart';
+import 'settings_service.dart';
 
 part 'plex_client/parts/live_tv.dart';
 
@@ -186,6 +187,51 @@ class ConnectionTestResult {
   final bool? transcoderVideo;
 
   ConnectionTestResult({required this.success, required this.latencyMs, this.error, this.transcoderVideo});
+}
+
+/// Snapshot of a single Plex downloadQueue item returned by
+/// [PlexClient.pollServerSideTranscode]. The `status` string mirrors
+/// what PMS reports verbatim — typically `processing`, `available`,
+/// `failed`, `expired`, or `cancelled`. `progress` is 0–100 (or null
+/// when the server hasn't started transcoding yet).
+class PlexDownloadQueueItem {
+  final int id;
+  final String status;
+  final double? progress;
+
+  const PlexDownloadQueueItem({required this.id, required this.status, this.progress});
+
+  bool get isAvailable => status == 'available';
+  bool get isProcessing => status == 'processing';
+  bool get isFailed => status == 'failed' || status == 'error' || status == 'expired';
+}
+
+/// Three-way result from [PlexClient.pollServerSideTranscode], used by
+/// the download manager to decide between "react to status",
+/// "the item is genuinely gone", and "keep polling — network blip".
+///
+/// Without this distinction a transient backgrounded-app network
+/// error looked identical to "item purged from server", causing the
+/// download manager to fail the download and the user to re-trigger
+/// it — duplicating the server-side transcode work each time.
+sealed class PlexPollResult {
+  const PlexPollResult();
+  const factory PlexPollResult.present(PlexDownloadQueueItem item) = PlexPollPresent;
+  const factory PlexPollResult.notFound() = PlexPollNotFound;
+  const factory PlexPollResult.transientError() = PlexPollTransientError;
+}
+
+class PlexPollPresent extends PlexPollResult {
+  final PlexDownloadQueueItem item;
+  const PlexPollPresent(this.item);
+}
+
+class PlexPollNotFound extends PlexPollResult {
+  const PlexPollNotFound();
+}
+
+class PlexPollTransientError extends PlexPollResult {
+  const PlexPollTransientError();
 }
 
 class PlexClient
@@ -3086,6 +3132,237 @@ class PlexClient
     }
   }
 
+  /// Lazily creates a per-server Plex downloadQueue owned by Plezy and
+  /// returns its id. The first call POSTs `/downloadQueue` with the
+  /// stable Plezy `X-Plex-Client-Identifier`; the server assigns a fresh
+  /// queue id and we cache it in [SettingsService.plexDownloadQueueIds]
+  /// keyed by Plex serverId. Subsequent calls return the cached id
+  /// without hitting the network.
+  ///
+  /// Each Plex client has its own queue, so without this the
+  /// `/downloadQueue/{N}/add` calls would target whichever existing
+  /// queue happened to have id `N` — most commonly the official Android
+  /// app's, which would surface Plezy's downloads in that app's UI.
+  ///
+  /// Returns `null` if the POST fails (e.g. server doesn't support the
+  /// modern downloadQueue API — pre-PMS-1.40 or non-Plex-Pass).
+  Future<int?> getOrCreateDownloadQueueId() async {
+    final settings = SettingsService.instanceOrNull;
+    final cached = settings?.read(SettingsService.plexDownloadQueueIds) ?? const <String, int>{};
+    final cachedId = cached[serverId];
+    if (cachedId != null) return cachedId;
+
+    try {
+      final response = await _http.post('/downloadQueue');
+      final container = _getMediaContainer(response);
+      final queues = container?['DownloadQueue'];
+      if (queues is! List || queues.isEmpty) {
+        appLogger.w('POST /downloadQueue returned no queue: $container');
+        return null;
+      }
+      final newId = flexibleInt((queues.first as Map)['id']);
+      if (newId == null) {
+        appLogger.w('POST /downloadQueue returned queue without id: ${queues.first}');
+        return null;
+      }
+      final updated = Map<String, int>.from(cached)..[serverId] = newId;
+      await settings?.write(SettingsService.plexDownloadQueueIds, updated);
+      appLogger.i('Created Plex download queue $newId for server $serverId');
+      return newId;
+    } catch (e, st) {
+      appLogger.e('Failed to create Plex download queue for $serverId', error: e, stackTrace: st);
+      return null;
+    }
+  }
+
+  /// Triggers a server-side transcoded download via the modern
+  /// `/downloadQueue/{N}/add` endpoint. Returns the queue item id the
+  /// server assigns, which the caller uses to poll status and build the
+  /// final download URL.
+  ///
+  /// Mirrors the parameter set captured from the official Plex Android
+  /// app on PMS 1.43: `videoQuality`, `videoResolution`, and
+  /// `maxVideoBitrate` come from [preset]; the rest are stable.
+  /// `location=wan` matches the official client and ensures the server
+  /// applies the requested bitrate cap (otherwise Plex assumes a LAN
+  /// peer and may upgrade quality).
+  ///
+  /// Returns `null` for original preset (caller should use direct-play
+  /// Part URL instead), if no queue id is available, or on any HTTP error.
+  Future<int?> enqueueServerSideTranscode({
+    required String ratingKey,
+    required int mediaIndex,
+    required TranscodeQualityPreset preset,
+  }) async {
+    if (preset.isOriginal || preset.videoBitrateKbps == null || preset.videoResolution == null) {
+      return null;
+    }
+    final queueId = await getOrCreateDownloadQueueId();
+    if (queueId == null) return null;
+
+    final sessionId = generateSessionIdentifier();
+    final metadataPath = '/library/metadata/$ratingKey';
+    final params = <String, String>{
+      'keys': metadataPath,
+      'path': metadataPath,
+      'videoQuality': (preset.videoQuality ?? 60).toString(),
+      'videoResolution': preset.videoResolution!,
+      'maxVideoBitrate': preset.videoBitrateKbps!.toString(),
+      'directPlay': '0',
+      'directStream': '0',
+      'directStreamAudio': '0',
+      'protocol': 'http',
+      'fastSeek': '1',
+      'session': sessionId,
+      'mediaIndex': mediaIndex.toString(),
+      'partIndex': '0',
+      'mediaBufferSize': '50000',
+      'hasMDE': '1',
+      // `subtitles=none` tells PMS not to embed or burn ANY subtitle
+      // into the transcoded output. Without it (e.g. with the default
+      // `subtitleSize=0` we used to send) PMS burns the default
+      // subtitle track into the video, and since we also save the
+      // sidecar .srt/.ass files alongside the file, the playback ends
+      // up with double subtitles.
+      'subtitles': 'none',
+      'audioBoost': '0',
+      'copyts': '1',
+      'location': 'wan',
+    };
+    // Spoof the Plex client identity as Android via REQUEST HEADERS
+    // (not query params — the default headers from config.headers
+    // would shadow query-param copies). PMS's MDE picks a transcode
+    // profile from `X-Plex-Client-Profile-Name`; our usual `Generic`
+    // profile has no pre-registered HTTP+matroska download target,
+    // so the decision fails with `transcodeDecisionCode=4005, "No
+    // conversion profile found for protocol http"`. Spoofing as
+    // Android (which has those targets baked in) lets us reuse the
+    // profile PMS already ships with.
+    //
+    // `X-Plex-Client-Profile-Name` is the load-bearing override —
+    // confirmed against PMS 1.43.2 that overriding only Platform but
+    // leaving profile-name as Generic still fails 4005. Plex-Platform
+    // and Plex-Product are overridden alongside for consistency.
+    final spoofHeaders = <String, String>{
+      'X-Plex-Platform': 'Android',
+      'X-Plex-Product': 'Plex for Android',
+      'X-Plex-Client-Profile-Name': 'Android',
+    };
+
+    try {
+      appLogger.i('downloadQueue add: queue=$queueId rk=$ratingKey preset=${preset.name} spoofHeaders=$spoofHeaders');
+      final response = await _http.post(
+        '/downloadQueue/$queueId/add',
+        queryParameters: params,
+        headers: spoofHeaders,
+      );
+      appLogger.i('downloadQueue add response [${response.statusCode}]: ${response.data}');
+      final container = _getMediaContainer(response);
+      // PMS returns `AddedQueueItems` here (not `DownloadQueueItem` like
+      // the GET items endpoint). Each entry is `{key, id}`.
+      final items = container?['AddedQueueItems'];
+      if (items is! List || items.isEmpty) {
+        appLogger.w('POST /downloadQueue/$queueId/add returned no items: $container');
+        return null;
+      }
+      final itemId = flexibleInt((items.first as Map)['id']);
+      if (itemId == null) {
+        appLogger.w('Add response missing item id: ${items.first}');
+        return null;
+      }
+      appLogger.i('Queued server-side transcode item $itemId on queue $queueId for $ratingKey');
+      return itemId;
+    } catch (e, st) {
+      appLogger.e('Failed to enqueue server-side transcode for $ratingKey', error: e, stackTrace: st);
+      return null;
+    }
+  }
+
+  /// Polls the downloadQueue for a single item and returns its current
+  /// state. The server reports `status` as one of `processing` (transcode
+  /// in flight), `available` (file ready to fetch via [serverSideTranscodeDownloadUrl]),
+  /// `failed`, or `cancelled`. When `processing`, the embedded
+  /// `TranscodeSession.progress` gives a 0–100 percent that the
+  /// downloads UI can render while waiting.
+  ///
+  /// Returns a [PlexPollResult] union that distinguishes
+  /// `present` (item is in the queue, may be processing or available),
+  /// `notFound` (GET succeeded but the itemId is no longer listed —
+  /// server purged or it was cancelled out-of-band), and
+  /// `transientError` (GET failed due to network or HTTP error — caller
+  /// should keep polling instead of treating as terminal).
+  Future<PlexPollResult> pollServerSideTranscode({
+    required int queueId,
+    required int itemId,
+  }) async {
+    try {
+      final response = await _http.get('/downloadQueue/$queueId/items');
+      final container = _getMediaContainer(response);
+      final items = container?['DownloadQueueItem'];
+      if (items is! List) return const PlexPollResult.notFound();
+      for (final entry in items) {
+        if (entry is! Map) continue;
+        if (flexibleInt(entry['id']) != itemId) continue;
+        final session = entry['TranscodeSession'];
+        double? progress;
+        if (session is Map && session['progress'] != null) {
+          final raw = session['progress'];
+          progress = raw is num ? raw.toDouble() : double.tryParse(raw.toString());
+        }
+        return PlexPollResult.present(
+          PlexDownloadQueueItem(
+            id: itemId,
+            status: entry['status']?.toString() ?? 'unknown',
+            progress: progress,
+          ),
+        );
+      }
+      return const PlexPollResult.notFound();
+    } catch (e, st) {
+      // Network / HTTP error — could be a backgrounded app, a temporary
+      // DNS hiccup, or a slow server. Don't conflate this with
+      // "item not in queue" — the caller will keep polling rather than
+      // marking the download failed.
+      appLogger.w('Failed to poll downloadQueue item $itemId (transient)', error: e, stackTrace: st);
+      return const PlexPollResult.transientError();
+    }
+  }
+
+  /// Builds the GET URL used to actually fetch the completed transcoded
+  /// file once [pollServerSideTranscode] reports `status == 'available'`.
+  ///
+  /// Note the singular `/item/` path segment — the polling endpoint uses
+  /// the plural `/items` but the per-item download endpoint is singular.
+  /// Captured from the official Plex Android app's request:
+  ///   `GET /downloadQueue/4/item/20/media`
+  Uri serverSideTranscodeDownloadUrl({required int queueId, required int itemId}) {
+    return Uri.parse(
+      '${config.baseUrl}/downloadQueue/$queueId/item/$itemId/media',
+    ).replace(queryParameters: {if (config.token != null) 'X-Plex-Token': config.token!});
+  }
+
+  /// Cancels and removes a queued/active download from the server.
+  /// Calling this during the `processing` phase stops the ffmpeg
+  /// transcode and frees the temporary on-disk file; calling it after
+  /// `available` just removes the entry AND deletes the cached
+  /// transcoded file on the server. Idempotent — a 404 (item already
+  /// gone) is treated as success.
+  ///
+  /// Note the inconsistent path: GET uses singular
+  /// (`/downloadQueue/{N}/item/{id}/media`), but DELETE uses plural
+  /// (`/downloadQueue/{N}/items/{id}`). Verified against PMS 1.43.2;
+  /// singular `/item/{id}` returns 404 on DELETE.
+  Future<void> cancelServerSideTranscode({required int queueId, required int itemId}) async {
+    try {
+      await _http.delete('/downloadQueue/$queueId/items/$itemId');
+      appLogger.d('Deleted downloadQueue item $itemId on queue $queueId');
+    } catch (e) {
+      // Best-effort — if the item was already gone the server returns
+      // 404, which throws here. We don't surface it.
+      appLogger.d('cancelServerSideTranscode($queueId/$itemId) ignored error: $e');
+    }
+  }
+
   /// Platform name Plex Media Server accepts on the transcode decision
   /// endpoint for arbitrary clients. Our default "Flutter" returns HTTP 400,
   /// and the known-OS names (`MacOSX`, `Mac`, `Linux`) are also rejected.
@@ -4015,7 +4292,11 @@ class PlexClient
   }
 
   @override
-  Future<DownloadResolution> resolveDownload(MediaItem item, {int mediaIndex = 0}) async {
+  Future<DownloadResolution> resolveDownload(
+    MediaItem item, {
+    int mediaIndex = 0,
+    TranscodeQualityPreset? qualityPreset,
+  }) async {
     final playbackData = await getVideoPlaybackData(item.id, mediaIndex: mediaIndex);
     final subtitles = <DownloadSubtitleSpec>[];
     final mediaInfo = playbackData.mediaInfo;
@@ -4037,6 +4318,49 @@ class PlexClient
         );
       }
     }
+
+    // Non-original preset: queue a server-side transcode via the modern
+    // /downloadQueue endpoint. The actual file URL won't be ready
+    // immediately — the download manager polls
+    // [PlexClient.pollServerSideTranscode] until status="available"
+    // before kicking off the byte fetch at `videoUrl`. If the enqueue
+    // fails for any reason we fall through to the direct-play URL so
+    // the user still gets *something*.
+    final preset = qualityPreset;
+    if (preset != null && !preset.isOriginal) {
+      final queueId = await getOrCreateDownloadQueueId();
+      final itemId = queueId == null
+          ? null
+          : await enqueueServerSideTranscode(
+              ratingKey: item.id,
+              mediaIndex: mediaIndex,
+              preset: preset,
+            );
+      if (queueId != null && itemId != null) {
+        final downloadUrl = serverSideTranscodeDownloadUrl(queueId: queueId, itemId: itemId);
+        // Estimate output file size: PMS doesn't emit a real
+        // Content-Length for `/downloadQueue/.../media`, and without
+        // `Known-Content-Length` the background_downloader package
+        // treats every transcoded download as malformed and Android
+        // cancels the work. bitrate (kbps) x duration (s) / 8 → bytes;
+        // +20% safety margin for audio overhead. Falls back to 8 GB
+        // when duration is unknown.
+        final durationMs = item.durationMs;
+        final bitrateKbps = preset.videoBitrateKbps;
+        final estimatedBytes = (durationMs != null && bitrateKbps != null)
+            ? ((bitrateKbps * 1000 * durationMs ~/ 8000) * 12 ~/ 10)
+            : 8 * 1024 * 1024 * 1024;
+        return DownloadResolution(
+          videoUrl: downloadUrl.toString(),
+          externalSubtitles: subtitles,
+          isTranscoded: true,
+          extraHeaders: {'Known-Content-Length': estimatedBytes.toString()},
+          serverTranscodeQueueId: queueId,
+          serverTranscodeItemId: itemId,
+        );
+      }
+    }
+
     return DownloadResolution(videoUrl: playbackData.videoUrl, externalSubtitles: subtitles);
   }
 

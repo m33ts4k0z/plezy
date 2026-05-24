@@ -58,7 +58,15 @@ mixin _JellyfinImageDownloadMethods on MediaServerCacheMixin {
   }
 
   @override
-  Future<DownloadResolution> resolveDownload(MediaItem item, {int mediaIndex = 0}) async {
+  Future<DownloadResolution> resolveDownload(
+    MediaItem item, {
+    int mediaIndex = 0,
+    TranscodeQualityPreset? qualityPreset,
+  }) async {
+    // Jellyfin doesn't yet route transcoded downloads — the param is
+    // accepted to satisfy the neutral interface, but the URL we produce
+    // is always direct-stream (`Static=true`). Future work could swap to
+    // `/Videos/{id}/stream.mkv?VideoBitrate=&MaxVideoHeight=` here.
     final bundle = await fetchPlaybackBundle(item.id, sourceIndex: mediaIndex);
     final selectedSourceId = bundle?.selectedSourceId;
     final pinnedSourceId = selectedSourceId != null && selectedSourceId != item.id ? selectedSourceId : null;
