@@ -115,6 +115,34 @@ class DownloadStatusIcon extends StatelessWidget {
         );
       case DownloadStatus.partial:
         return AppIcon(Symbols.downloading_rounded, fill: 1, size: size, color: _tint(Colors.orange));
+      case DownloadStatus.preparing:
+        // Server-side transcoding before bytes start flowing. Reuse the
+        // dual-ring progress UI if we have a percent from the server,
+        // otherwise show a queued-style spinner icon.
+        if (progress == null) {
+          return AppIcon(Symbols.hourglass_top_rounded, fill: 1, size: size, color: _tint(Colors.blue));
+        }
+        final primary = overrideColor ?? Theme.of(context).colorScheme.primary;
+        final tinted = _tint(primary);
+        return SizedBox(
+          width: size,
+          height: size,
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              CircularProgressIndicator(
+                value: 1.0,
+                strokeWidth: size * 0.1,
+                valueColor: AlwaysStoppedAnimation<Color>(tinted.withValues(alpha: 0.3)),
+              ),
+              CircularProgressIndicator(
+                value: progress,
+                strokeWidth: size * 0.1,
+                valueColor: AlwaysStoppedAnimation<Color>(tinted),
+              ),
+            ],
+          ),
+        );
     }
   }
 }

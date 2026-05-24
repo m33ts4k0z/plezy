@@ -13,6 +13,13 @@ enum DownloadStatus {
   failed,
   cancelled,
   partial, // Some episodes downloaded, but not all (for shows/seasons)
+  /// Server is transcoding the file before Plezy can fetch any bytes.
+  /// Only used for Plex server-side transcoded downloads (the
+  /// `/downloadQueue` flow): once we POST to enqueue the transcode, the
+  /// download sits in this state until status flips to `available`, then
+  /// transitions to [downloading]. The `progress` field reports the
+  /// server-side transcode percent so the downloads UI can show it.
+  preparing,
 }
 
 @freezed

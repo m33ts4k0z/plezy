@@ -258,7 +258,13 @@ class _EpisodeCardState extends State<EpisodeCard> with ContextMenuTapMixin<Epis
                               if (slice.isQueueing) {
                                 downloadStatusIcon = DownloadQueueingSpinner(size: 12, color: mutedBase);
                               } else if (status != null) {
-                                final iconSize = status == DownloadStatus.downloading ? 14.0 : 12.0;
+                                // Same enlarged size for both byte-fetch
+                                // and server-side-transcode states so the
+                                // dual-ring progress reads at a glance.
+                                final iconSize =
+                                    (status == DownloadStatus.downloading || status == DownloadStatus.preparing)
+                                    ? 14.0
+                                    : 12.0;
                                 downloadStatusIcon = DownloadStatusIcon(
                                   status: status,
                                   size: iconSize,

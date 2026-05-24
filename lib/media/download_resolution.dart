@@ -49,5 +49,45 @@ class DownloadResolution {
   final String? videoUrl;
   final List<DownloadSubtitleSpec> externalSubtitles;
 
-  const DownloadResolution({required this.videoUrl, this.externalSubtitles = const []});
+  /// True when [videoUrl] points at a server-side transcoder rather than
+  /// the original file. Transcoded streams aren't seekable (no Range
+  /// support, no Content-Length) so the download manager must disable
+  /// pause/resume and tighten retry semantics to avoid restarting the
+  /// transcode in a loop.
+  final bool isTranscoded;
+
+  /// Extra headers to attach to the download task. Used by Plex
+  /// transcoded downloads to set `Known-Content-Length`, which the
+  /// background_downloader package picks up when the server doesn't
+  /// send a real Content-Length — without it the package treats the
+  /// task as "size unknown" and Android cancels the background work.
+  final Map<String, String> extraHeaders;
+
+  /// Plex downloadQueue queue id. Non-null only when the resolution
+  /// represents a server-side transcoded download that has already been
+  /// queued on PMS but isn't ready yet — the download manager polls
+  /// [PlexClient.pollServerSideTranscode] until the file is `available`
+  /// before starting the actual byte fetch at [videoUrl]. Must appear
+  /// together with [serverTranscodeItemId].
+  final int? serverTranscodeQueueId;
+
+  /// Plex downloadQueue item id paired with [serverTranscodeQueueId].
+  /// Also used to DELETE the queue item from the server when the local
+  /// download is cancelled, so the server-side ffmpeg stops and disk
+  /// is freed.
+  final int? serverTranscodeItemId;
+
+  const DownloadResolution({
+    required this.videoUrl,
+    this.externalSubtitles = const [],
+    this.isTranscoded = false,
+    this.extraHeaders = const {},
+    this.serverTranscodeQueueId,
+    this.serverTranscodeItemId,
+  });
+
+  /// Whether the caller must poll the server's downloadQueue before
+  /// kicking off the byte download — true for in-flight server-side
+  /// transcodes, false for direct downloads or already-ready files.
+  bool get needsServerTranscodePolling => serverTranscodeQueueId != null && serverTranscodeItemId != null;
 }

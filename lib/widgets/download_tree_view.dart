@@ -278,11 +278,17 @@ class _DownloadTreeViewState extends State<DownloadTreeView> {
   }
 
   /// Determine aggregate status from child statuses
-  /// Priority: downloading > queued > paused > completed > failed
+  /// Priority: downloading/preparing > queued > paused > completed > failed
   DownloadStatus _determineAggregateStatus(List<DownloadStatus> statuses) {
     if (statuses.isEmpty) return DownloadStatus.queued;
 
-    if (statuses.any((s) => s == DownloadStatus.downloading)) {
+    // `preparing` and `downloading` are both "in flight" from the
+    // parent row's point of view — roll either up as `downloading` so
+    // the show/season gets the spinning progress indicator instead of
+    // the green check. Without this branch a season whose only episode
+    // is mid-transcode falls through to the bottom `completed` return
+    // and looks (incorrectly) finished.
+    if (statuses.any((s) => s == DownloadStatus.downloading || s == DownloadStatus.preparing)) {
       return DownloadStatus.downloading;
     }
     if (statuses.any((s) => s == DownloadStatus.queued)) {
@@ -726,6 +732,24 @@ class _DownloadTreeItemState extends State<_DownloadTreeItem> {
                 ],
               ],
 
+              // Server-side transcode progress (Plex downloadQueue)
+              if (_effectiveStatus == DownloadStatus.preparing) ...[
+                const SizedBox(height: 8),
+                LinearProgressIndicator(
+                  value: widget.node.progress > 0 ? widget.node.progress : null,
+                  backgroundColor: theme.colorScheme.surfaceContainerHighest,
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  widget.node.progress > 0
+                      ? 'Transcoding on server… ${(widget.node.progress * 100).toStringAsFixed(0)}%'
+                      : 'Transcoding on server…',
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.onSurface.withValues(alpha: 0.6),
+                  ),
+                ),
+              ],
+
               // Queued label
               if (_effectiveStatus == DownloadStatus.queued) ...[
                 const SizedBox(height: 4),
@@ -753,7 +777,13 @@ class _DownloadTreeItemState extends State<_DownloadTreeItem> {
   }
 
   Widget _buildStatusIcon(DownloadStatus status) {
-    return DownloadStatusIcon(status: status, size: 20);
+    // Forward the polled progress fraction for live states (downloading
+    // OR preparing — the server-side transcode poller emits a 0-100
+    // percent we want to render as the dual-ring). For terminal states
+    // the icon ignores `progress` and renders a static glyph.
+    final double? progressFraction =
+        (status == DownloadStatus.downloading || status == DownloadStatus.preparing) ? widget.node.progress : null;
+    return DownloadStatusIcon(status: status, size: 20, progress: progressFraction);
   }
 
   String _getNodeSummary() {

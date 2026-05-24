@@ -431,6 +431,20 @@ class SettingsService extends BaseSharedPreferencesService {
     encode: json.encode,
     decode: (raw) => (raw as Map<String, dynamic>).map((k, v) => MapEntry(k, v as int)),
   );
+
+  /// Per-server Plex downloadQueue id. Plezy POSTs `/downloadQueue` once
+  /// per server to create its own queue (keyed by `X-Plex-Client-Identifier`)
+  /// and caches the returned id here so subsequent
+  /// `/downloadQueue/{N}/add`, `…/items`, `…/item/{itemId}/media`, and
+  /// DELETE calls all target Plezy's queue instead of accidentally
+  /// reusing another client's (e.g. the official Android app's).
+  /// Key: Plex serverId, value: queue id assigned by the server.
+  static final plexDownloadQueueIds = JsonPref<Map<String, int>>(
+    'plex_download_queue_ids',
+    defaultValue: const {},
+    encode: json.encode,
+    decode: (raw) => (raw as Map<String, dynamic>).map((k, v) => MapEntry(k, v as int)),
+  );
   static final customShaderPresets = JsonPref<List<Map<String, dynamic>>>(
     'custom_shader_presets',
     defaultValue: const [],
