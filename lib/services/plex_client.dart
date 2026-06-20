@@ -3448,7 +3448,15 @@ class PlexClient
       'subtitleSize': '100',
       'audioBoost': '100',
       'location': 'lan',
+      // Send the resolution ceiling + quality alongside the bitrate cap, exactly
+      // like Plex Web and the server-side download path do. Without
+      // `videoResolution` Plex's decision engine sizes the output from bitrate
+      // alone and lands a tier low (720p preset → SD, lowest 1080p → 720p on the
+      // dashboard). The [TranscodeQualityPreset] table is curated assuming this
+      // ceiling is present.
       if (!isOriginal && preset.videoBitrateKbps != null) 'maxVideoBitrate': preset.videoBitrateKbps.toString(),
+      if (!isOriginal && preset.videoResolution != null) 'videoResolution': preset.videoResolution!,
+      if (!isOriginal && preset.videoQuality != null) 'videoQuality': preset.videoQuality.toString(),
       'addDebugOverlay': '0',
       'autoAdjustQuality': '0',
       'directStreamAudio': '0',
