@@ -1,4 +1,5 @@
 import 'dart:async';
+import '../media/ids.dart';
 import 'dart:io' show Platform;
 
 import 'package:flutter/material.dart';
@@ -16,6 +17,7 @@ import '../providers/hidden_libraries_provider.dart';
 import '../providers/libraries_provider.dart';
 import '../services/settings_service.dart';
 import '../utils/platform_detector.dart';
+import '../utils/scroll_utils.dart';
 import '../utils/library_grouping.dart';
 import '../providers/multi_server_provider.dart';
 import '../services/fullscreen_state_manager.dart';
@@ -59,6 +61,8 @@ class NavigationRailItem extends StatelessWidget {
   final bool autofocus;
   final BorderRadius borderRadius;
   final double iconSize;
+  final double horizontalPadding;
+  final bool suppressSelectedBackground;
 
   /// Called when RIGHT arrow is pressed to navigate to content area.
   final VoidCallback? onNavigateRight;
@@ -77,12 +81,15 @@ class NavigationRailItem extends StatelessWidget {
     this.autofocus = false,
     this.borderRadius = const BorderRadius.all(Radius.circular(12)),
     this.iconSize = 22,
+    this.horizontalPadding = 17,
+    this.suppressSelectedBackground = false,
     this.onNavigateRight,
   });
 
   @override
   Widget build(BuildContext context) {
     final t = tokens(context);
+    final showSelectedBackground = isSelected && !suppressSelectedBackground;
 
     return Focus(
       focusNode: focusNode,
@@ -108,22 +115,22 @@ class NavigationRailItem extends StatelessWidget {
           child: Container(
             decoration: BoxDecoration(
               color: () {
-                if (isSelected && isFocused) return t.text.withValues(alpha: 0.15);
-                if (isSelected) return t.text.withValues(alpha: 0.1);
-                if (isFocused) return t.text.withValues(alpha: 0.12);
+                if (isCollapsed) return isFocused ? t.text.withValues(alpha: 0.12) : null;
+                if (isFocused) return t.text.withValues(alpha: showSelectedBackground ? 0.15 : 0.12);
+                if (showSelectedBackground) return t.text.withValues(alpha: 0.1);
                 return null;
               }(),
               borderRadius: borderRadius,
             ),
             clipBehavior: Clip.hardEdge,
             child: UnconstrainedBox(
-              alignment: Alignment.centerLeft,
+              alignment: .centerLeft,
               constrainedAxis: Axis.vertical,
               clipBehavior: Clip.hardEdge,
               child: SizedBox(
                 width: SideNavigationRailState.expandedWidth - 24,
                 child: Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 17),
+                  padding: .symmetric(vertical: 12, horizontal: horizontalPadding),
                   child: Row(
                     children: [
                       AppIcon(
@@ -166,6 +173,9 @@ class SideNavigationRail extends StatefulWidget {
   /// Called when RIGHT arrow is pressed to navigate to content without selecting.
   final VoidCallback? onNavigateToContent;
 
+  /// Called when hover/touch expansion changes, so the shell can reserve width.
+  final ValueChanged<bool>? onInteractionExpandedChanged;
+
   /// Called when the user taps the reconnect button in offline mode.
   final VoidCallback? onReconnect;
 
@@ -180,6 +190,7 @@ class SideNavigationRail extends StatefulWidget {
     required this.onDestinationSelected,
     required this.onLibrarySelected,
     this.onNavigateToContent,
+    this.onInteractionExpandedChanged,
     this.onReconnect,
   });
 
@@ -192,21 +203,30 @@ class SideNavigationRailState extends State<SideNavigationRail> with MountedSetS
 
   bool _isHovered = false;
   bool _isTouchExpanded = false;
+  bool _lastReportedInteractionExpanded = false;
   Timer? _collapseTimer;
   static const double collapsedWidth = 80.0;
-  static const double tvCollapsedWidth = 64.0;
+  static const double tvCollapsedWidth = 48.0;
   static const double expandedWidth = 220.0;
   static const double _horizontalPadding = 12.0;
   static const double _itemHorizontalPadding = 17.0;
   static const double _defaultIconSize = 22.0;
   static const Duration _collapseDelay = Duration(milliseconds: 150);
 
-  static double collapsedWidthForContext(BuildContext context) =>
-      PlatformDetector.isTV() ? tvCollapsedWidth : collapsedWidth;
+  static double collapsedWidthForContext(BuildContext _) => PlatformDetector.isTV() ? tvCollapsedWidth : collapsedWidth;
+
+  static double itemHorizontalPaddingForContext(BuildContext context, {required bool isCollapsed}) {
+    if (isCollapsed && PlatformDetector.isTV()) {
+      return ((tvCollapsedWidth - _defaultIconSize) / 2).clamp(0.0, _itemHorizontalPadding).toDouble();
+    }
+    return _itemHorizontalPadding;
+  }
 
   static double horizontalPaddingForContext(BuildContext context, {required bool isCollapsed}) {
     if (!isCollapsed) return _horizontalPadding;
-    final centeredPadding = ((collapsedWidthForContext(context) - _defaultIconSize) / 2) - _itemHorizontalPadding;
+    final centeredPadding =
+        ((collapsedWidthForContext(context) - _defaultIconSize) / 2) -
+        itemHorizontalPaddingForContext(context, isCollapsed: isCollapsed);
     return centeredPadding.clamp(0.0, _horizontalPadding).toDouble();
   }
 
@@ -229,6 +249,10 @@ class SideNavigationRailState extends State<SideNavigationRail> with MountedSetS
 
   /// Whether the sidebar should be expanded (always, hover, or focus)
   bool get _shouldExpand => widget.alwaysExpanded || _isHovered || _isTouchExpanded || widget.isSidebarFocused;
+
+  bool get _interactionExpanded => _isHovered || _isTouchExpanded;
+
+  bool get _showDownloads => !PlatformDetector.isAppleTV();
 
   /// macOS has the system green button; mobile/TV have no OS fullscreen toggle.
   bool get _showFullscreenToggle => Platform.isWindows || Platform.isLinux;
@@ -257,16 +281,36 @@ class SideNavigationRailState extends State<SideNavigationRail> with MountedSetS
     super.didUpdateWidget(oldWidget);
     // Auto-collapse after navigation (selection changed)
     if (oldWidget.selectedTab != widget.selectedTab || oldWidget.selectedLibraryKey != widget.selectedLibraryKey) {
+      final wasInteractionExpanded = _interactionExpanded;
       _isTouchExpanded = false;
+      if (wasInteractionExpanded != _interactionExpanded) {
+        _scheduleInteractionExpandedNotification();
+      }
     }
+  }
+
+  void _scheduleInteractionExpandedNotification() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _notifyInteractionExpandedIfNeeded();
+    });
+  }
+
+  void _notifyInteractionExpandedIfNeeded() {
+    final expanded = _interactionExpanded;
+    if (_lastReportedInteractionExpanded == expanded) return;
+    _lastReportedInteractionExpanded = expanded;
+    widget.onInteractionExpandedChanged?.call(expanded);
   }
 
   void _onHoverEnter() {
     _collapseTimer?.cancel();
-    _isTouchExpanded = false; // Mouse takes over
-    if (!_isHovered) {
-      setState(() => _isHovered = true);
-    }
+    if (_isHovered && !_isTouchExpanded) return;
+    setState(() {
+      _isTouchExpanded = false; // Mouse takes over
+      _isHovered = true;
+    });
+    _notifyInteractionExpandedIfNeeded();
   }
 
   void _onHoverExit() {
@@ -274,8 +318,15 @@ class SideNavigationRailState extends State<SideNavigationRail> with MountedSetS
     _collapseTimer = Timer(_collapseDelay, () {
       if (mounted && _isHovered) {
         setState(() => _isHovered = false);
+        _notifyInteractionExpandedIfNeeded();
       }
     });
+  }
+
+  void _expandForTouch() {
+    if (_isTouchExpanded) return;
+    setState(() => _isTouchExpanded = true);
+    _notifyInteractionExpandedIfNeeded();
   }
 
   /// The key of the last focused sidebar item (for pre-capture before focus shifts).
@@ -285,26 +336,72 @@ class SideNavigationRailState extends State<SideNavigationRail> with MountedSetS
   /// If [targetKey] is provided, try it first (used when the caller captured
   /// the intended target before a focus-scope switch overwrote it).
   void focusActiveItem({String? targetKey}) {
-    if (targetKey != null) {
-      final node = _focusTracker.nodeFor(targetKey);
-      if (node != null) {
-        node.requestFocus();
-        return;
-      }
-    }
-    _focusTracker.restoreFocus(fallbackKey: _kHome);
+    final node = _resolveFocusNode(targetKey) ?? _mountedFocusNodeFor(_kHome);
+    if (node == null) return;
+    _requestFocusAndReveal(node);
   }
 
-  String _serverHeaderFocusKey(_LibraryNavSection section, String serverId) =>
+  /// Resolve the best mounted focus node in priority order:
+  /// 1. Explicit [targetKey] (captured before scope switch)
+  /// 2. Last focused key still in the tracker
+  /// 3. Currently selected navigation item (tab / library)
+  /// 4. Home fallback
+  FocusNode? _resolveFocusNode(String? targetKey) {
+    return _mountedFocusNodeFor(targetKey) ??
+        _mountedFocusNodeFor(_focusTracker.lastFocusedKey) ??
+        _mountedFocusNodeFor(_resolveSelectedFocusKey());
+  }
+
+  FocusNode? _mountedFocusNodeFor(String? key) {
+    if (key == null) return null;
+    final node = _focusTracker.nodeFor(key);
+    return node?.context == null ? null : node;
+  }
+
+  /// Derive a focus key from the current selection state (tab + library).
+  /// Returns null if no meaningful selected item exists.
+  String? _resolveSelectedFocusKey() {
+    switch (widget.selectedTab) {
+      case NavigationTabId.discover:
+        return _kHome;
+      case NavigationTabId.libraries:
+        final libKey = widget.selectedLibraryKey;
+        if (libKey != null && _librariesExpanded) {
+          final visibleKey = '$_kLibraryItemPrefix:${_LibraryNavSection.visible.name}:$libKey';
+          if (_mountedFocusNodeFor(visibleKey) != null) return visibleKey;
+          if (_hiddenLibrariesExpanded) {
+            final hiddenKey = '$_kLibraryItemPrefix:${_LibraryNavSection.hidden.name}:$libKey';
+            if (_mountedFocusNodeFor(hiddenKey) != null) return hiddenKey;
+          }
+        }
+        return _kLibraries;
+      case NavigationTabId.search:
+        return _kSearch;
+      case NavigationTabId.downloads:
+        return _showDownloads ? _kDownloads : null;
+      case NavigationTabId.settings:
+        return _kSettings;
+      case NavigationTabId.liveTv:
+        return 'liveTv';
+    }
+  }
+
+  /// Request focus on [node] and scroll it into view after the next frame.
+  void _requestFocusAndReveal(FocusNode node) {
+    node.requestFocus();
+    scrollContextToCenter(node.context);
+  }
+
+  String _serverHeaderFocusKey(_LibraryNavSection section, ServerId serverId) =>
       '$_kServerHeaderPrefix:${section.name}:$serverId';
 
   String _libraryItemFocusKey(_LibraryNavSection section, MediaLibrary library) =>
       '$_kLibraryItemPrefix:${section.name}:${library.globalKey}';
 
-  String _serverGroupStateKey(_LibraryNavSection section, String serverId) => '${section.name}:$serverId';
+  String _serverGroupStateKey(_LibraryNavSection section, ServerId serverId) => '${section.name}:$serverId';
 
   String _focusKeyForLibraryRow(_LibraryNavRow row) => switch (row) {
-    _LibraryServerHeaderRow(:final section, :final serverId) => _serverHeaderFocusKey(section, serverId),
+    _LibraryServerHeaderRow(:final section, :final serverId) => _serverHeaderFocusKey(section, ServerId(serverId)),
     _LibraryItemRow(:final section, :final library) => _libraryItemFocusKey(section, library),
   };
 
@@ -321,7 +418,7 @@ class SideNavigationRailState extends State<SideNavigationRail> with MountedSetS
       _kHome,
       _kLibraries,
       _kSearch,
-      _kDownloads,
+      if (_showDownloads) _kDownloads,
       _kSettings,
       _kReconnect,
       if (hasHiddenLibraries) _kHiddenLibraries,
@@ -362,7 +459,8 @@ class SideNavigationRailState extends State<SideNavigationRail> with MountedSetS
           ),
         );
       }
-      if (serverKey.isEmpty || !_collapsedServerGroupKeys.contains(_serverGroupStateKey(section, serverKey))) {
+      if (serverKey.isEmpty ||
+          !_collapsedServerGroupKeys.contains(_serverGroupStateKey(section, ServerId(serverKey)))) {
         for (final lib in bucket) {
           result.add(_LibraryItemRow(section: section, library: lib));
         }
@@ -380,9 +478,9 @@ class SideNavigationRailState extends State<SideNavigationRail> with MountedSetS
 
     return {
       for (final lib in visibleLibraries)
-        if (lib.serverId != null) _serverGroupStateKey(_LibraryNavSection.visible, lib.serverId!),
+        if (lib.serverId != null) _serverGroupStateKey(_LibraryNavSection.visible, ServerId(lib.serverId!)),
       for (final lib in hiddenLibraries)
-        if (lib.serverId != null) _serverGroupStateKey(_LibraryNavSection.hidden, lib.serverId!),
+        if (lib.serverId != null) _serverGroupStateKey(_LibraryNavSection.hidden, ServerId(lib.serverId!)),
     };
   }
 
@@ -408,7 +506,7 @@ class SideNavigationRailState extends State<SideNavigationRail> with MountedSetS
         if (hasLiveTv) 'liveTv',
         _kSearch,
       ],
-      _kDownloads,
+      if (_showDownloads) _kDownloads,
       _kSettings,
       if (_showFullscreenToggle) _kFullscreen,
     ];
@@ -446,14 +544,7 @@ class SideNavigationRailState extends State<SideNavigationRail> with MountedSetS
     final nextNode = _focusTracker.nodeFor(focusOrder[nextIndex]);
     if (nextNode == null) return KeyEventResult.ignored;
 
-    nextNode.requestFocus();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      final ctx = nextNode.context;
-      if (ctx != null) {
-        Scrollable.ensureVisible(ctx, alignment: 0.5, duration: const Duration(milliseconds: 200));
-      }
-    });
+    _requestFocusAndReveal(nextNode);
     return KeyEventResult.handled;
   }
 
@@ -461,6 +552,7 @@ class SideNavigationRailState extends State<SideNavigationRail> with MountedSetS
   void collapse() {
     if (_isTouchExpanded) {
       setState(() => _isTouchExpanded = false);
+      _notifyInteractionExpandedIfNeeded();
     }
   }
 
@@ -526,6 +618,7 @@ class SideNavigationRailState extends State<SideNavigationRail> with MountedSetS
     final isCollapsed = !_shouldExpand;
     final effectiveCollapsedWidth = collapsedWidthForContext(context);
     final horizontalPadding = horizontalPaddingForContext(context, isCollapsed: isCollapsed);
+    final itemHorizontalPadding = itemHorizontalPaddingForContext(context, isCollapsed: isCollapsed);
     final hasLiveTv = context.watch<MultiServerProvider>().hasLiveTv;
 
     // Listen to fullscreen + groupLibrariesByServer setting so the rail
@@ -533,11 +626,11 @@ class SideNavigationRailState extends State<SideNavigationRail> with MountedSetS
     return ListenableBuilder(
       listenable: Listenable.merge([
         FullscreenStateManager(),
-        SettingsService.instanceOrNull!.listenable(SettingsService.groupLibrariesByServer),
+        SettingsService.instance.listenable(SettingsService.groupLibrariesByServer),
       ]),
       builder: (context, _) {
         // Server grouping: only when multi-server AND the user-facing toggle is on.
-        final groupByServerSetting = SettingsService.instanceOrNull!.read(SettingsService.groupLibrariesByServer);
+        final groupByServerSetting = SettingsService.instance.read(SettingsService.groupLibrariesByServer);
         final showServerHeaders = serverIds.length > 1 && groupByServerSetting;
         _collapsedServerGroupKeys.retainAll(
           _buildServerGroupStateKeys(visibleLibraries, hiddenLibraries, showServerHeaders: showServerHeaders),
@@ -571,6 +664,7 @@ class SideNavigationRailState extends State<SideNavigationRail> with MountedSetS
           onTapOutside: (_) {
             if (_isTouchExpanded) {
               setState(() => _isTouchExpanded = false);
+              _notifyInteractionExpandedIfNeeded();
             }
           },
           child: MouseRegion(
@@ -579,124 +673,125 @@ class SideNavigationRailState extends State<SideNavigationRail> with MountedSetS
             onExit: (_) => _onHoverExit(),
             child: GestureDetector(
               behavior: HitTestBehavior.opaque,
-              onTap: isCollapsed ? () => setState(() => _isTouchExpanded = true) : null,
+              onTap: isCollapsed ? _expandForTouch : null,
               child: AnimatedContainer(
                 duration: t.normal,
                 curve: Curves.easeOutCubic,
                 width: isCollapsed ? effectiveCollapsedWidth : expandedWidth,
                 clipBehavior: Clip.hardEdge,
-                decoration: BoxDecoration(color: t.surface),
-                child: IgnorePointer(
-                  ignoring: isCollapsed,
-                  child: Focus(
-                    canRequestFocus: false,
-                    skipTraversal: true,
-                    onKeyEvent: (node, event) => _handleVerticalNavigation(node, event, focusOrder),
-                    child: Column(
-                      children: [
-                        SizedBox(height: _getTopPadding(context)),
-
-                        Expanded(
-                          child: ListView(
-                            padding: EdgeInsets.symmetric(horizontal: horizontalPadding),
-                            clipBehavior: Clip.hardEdge,
-                            children: [
-                              if (widget.isOfflineMode && widget.onReconnect != null) ...[
-                                _buildReconnectItem(isCollapsed: isCollapsed),
-                                const SizedBox(height: 8),
-                              ],
-
-                              if (!widget.isOfflineMode) ...[
-                                _buildNavItem(
-                                  icon: Symbols.home_rounded,
-                                  selectedIcon: Symbols.home_rounded,
-                                  label: Translations.of(context).common.home,
-                                  isSelected: widget.selectedTab == NavigationTabId.discover,
-                                  isFocused: _focusTracker.isFocused(_kHome),
-                                  onTap: () => widget.onDestinationSelected(NavigationTabId.discover),
-                                  focusNode: _focusTracker.get(_kHome),
-                                  isCollapsed: isCollapsed,
-                                ),
-
-                                const SizedBox(height: 8),
-
-                                _buildLibrariesSection(
-                                  visibleRows,
-                                  hiddenRows,
-                                  hiddenLibraries.length,
-                                  t,
-                                  isCollapsed: isCollapsed,
-                                ),
-
-                                const SizedBox(height: 8),
-
-                                if (context.watch<MultiServerProvider>().hasLiveTv) ...[
+                decoration: const BoxDecoration(),
+                child: Stack(
+                  children: [
+                    Positioned.fill(
+                      child: AnimatedOpacity(
+                        opacity: PlatformDetector.isTV() ? 0.0 : 1.0,
+                        duration: t.normal,
+                        curve: Curves.easeOutCubic,
+                        child: ColoredBox(color: t.surface),
+                      ),
+                    ),
+                    IgnorePointer(
+                      ignoring: isCollapsed,
+                      child: Focus(
+                        canRequestFocus: false,
+                        skipTraversal: true,
+                        onKeyEvent: (node, event) => _handleVerticalNavigation(node, event, focusOrder),
+                        child: Column(
+                          children: [
+                            SizedBox(height: _getTopPadding(context)),
+                            Expanded(
+                              child: ListView(
+                                padding: .symmetric(horizontal: horizontalPadding),
+                                clipBehavior: Clip.hardEdge,
+                                children: [
+                                  if (widget.isOfflineMode && widget.onReconnect != null) ...[
+                                    _buildReconnectItem(isCollapsed: isCollapsed),
+                                    const SizedBox(height: 8),
+                                  ],
+                                  if (!widget.isOfflineMode) ...[
+                                    _buildNavItem(
+                                      icon: Symbols.home_rounded,
+                                      selectedIcon: Symbols.home_rounded,
+                                      label: Translations.of(context).common.home,
+                                      isSelected: widget.selectedTab == NavigationTabId.discover,
+                                      isFocused: _focusTracker.isFocused(_kHome),
+                                      onTap: () => widget.onDestinationSelected(NavigationTabId.discover),
+                                      focusNode: _focusTracker.get(_kHome),
+                                      isCollapsed: isCollapsed,
+                                    ),
+                                    const SizedBox(height: 8),
+                                    _buildLibrariesSection(
+                                      visibleRows,
+                                      hiddenRows,
+                                      hiddenLibraries.length,
+                                      t,
+                                      isCollapsed: isCollapsed,
+                                      itemHorizontalPadding: itemHorizontalPadding,
+                                    ),
+                                    const SizedBox(height: 8),
+                                    if (context.watch<MultiServerProvider>().hasLiveTv) ...[
+                                      _buildNavItem(
+                                        icon: Symbols.live_tv_rounded,
+                                        selectedIcon: Symbols.live_tv_rounded,
+                                        label: Translations.of(context).navigation.liveTv,
+                                        isSelected: widget.selectedTab == NavigationTabId.liveTv,
+                                        isFocused: _focusTracker.isFocused('liveTv'),
+                                        onTap: () => widget.onDestinationSelected(NavigationTabId.liveTv),
+                                        focusNode: _focusTracker.get('liveTv'),
+                                        isCollapsed: isCollapsed,
+                                      ),
+                                      const SizedBox(height: 8),
+                                    ],
+                                    _buildNavItem(
+                                      icon: Symbols.search_rounded,
+                                      selectedIcon: Symbols.search_rounded,
+                                      label: Translations.of(context).common.search,
+                                      isSelected: widget.selectedTab == NavigationTabId.search,
+                                      isFocused: _focusTracker.isFocused(_kSearch),
+                                      onTap: () => widget.onDestinationSelected(NavigationTabId.search),
+                                      focusNode: _focusTracker.get(_kSearch),
+                                      isCollapsed: isCollapsed,
+                                    ),
+                                    const SizedBox(height: 8),
+                                  ],
+                                  // Downloads (hidden on Apple TV — no user
+                                  // file storage)
+                                  if (_showDownloads) ...[
+                                    _buildNavItem(
+                                      icon: Symbols.download_rounded,
+                                      selectedIcon: Symbols.download_rounded,
+                                      label: Translations.of(context).navigation.downloads,
+                                      isSelected: widget.selectedTab == NavigationTabId.downloads,
+                                      isFocused: _focusTracker.isFocused(_kDownloads),
+                                      onTap: () => widget.onDestinationSelected(NavigationTabId.downloads),
+                                      focusNode: _focusTracker.get(_kDownloads),
+                                      isCollapsed: isCollapsed,
+                                    ),
+                                    const SizedBox(height: 8),
+                                  ],
                                   _buildNavItem(
-                                    icon: Symbols.live_tv_rounded,
-                                    selectedIcon: Symbols.live_tv_rounded,
-                                    label: Translations.of(context).navigation.liveTv,
-                                    isSelected: widget.selectedTab == NavigationTabId.liveTv,
-                                    isFocused: _focusTracker.isFocused('liveTv'),
-                                    onTap: () => widget.onDestinationSelected(NavigationTabId.liveTv),
-                                    focusNode: _focusTracker.get('liveTv'),
+                                    icon: Symbols.settings_rounded,
+                                    selectedIcon: Symbols.settings_rounded,
+                                    label: Translations.of(context).common.settings,
+                                    isSelected: widget.selectedTab == NavigationTabId.settings,
+                                    isFocused: _focusTracker.isFocused(_kSettings),
+                                    onTap: () => widget.onDestinationSelected(NavigationTabId.settings),
+                                    focusNode: _focusTracker.get(_kSettings),
                                     isCollapsed: isCollapsed,
                                   ),
-
-                                  const SizedBox(height: 8),
                                 ],
-
-                                _buildNavItem(
-                                  icon: Symbols.search_rounded,
-                                  selectedIcon: Symbols.search_rounded,
-                                  label: Translations.of(context).common.search,
-                                  isSelected: widget.selectedTab == NavigationTabId.search,
-                                  isFocused: _focusTracker.isFocused(_kSearch),
-                                  onTap: () => widget.onDestinationSelected(NavigationTabId.search),
-                                  focusNode: _focusTracker.get(_kSearch),
-                                  isCollapsed: isCollapsed,
-                                ),
-
-                                const SizedBox(height: 8),
-                              ],
-
-                              // Downloads (hidden on Apple TV — no user
-                              // file storage)
-                              if (!PlatformDetector.isAppleTV()) ...[
-                                _buildNavItem(
-                                  icon: Symbols.download_rounded,
-                                  selectedIcon: Symbols.download_rounded,
-                                  label: Translations.of(context).navigation.downloads,
-                                  isSelected: widget.selectedTab == NavigationTabId.downloads,
-                                  isFocused: _focusTracker.isFocused(_kDownloads),
-                                  onTap: () => widget.onDestinationSelected(NavigationTabId.downloads),
-                                  focusNode: _focusTracker.get(_kDownloads),
-                                  isCollapsed: isCollapsed,
-                                ),
-                                const SizedBox(height: 8),
-                              ],
-
-                              _buildNavItem(
-                                icon: Symbols.settings_rounded,
-                                selectedIcon: Symbols.settings_rounded,
-                                label: Translations.of(context).common.settings,
-                                isSelected: widget.selectedTab == NavigationTabId.settings,
-                                isFocused: _focusTracker.isFocused(_kSettings),
-                                onTap: () => widget.onDestinationSelected(NavigationTabId.settings),
-                                focusNode: _focusTracker.get(_kSettings),
-                                isCollapsed: isCollapsed,
                               ),
-                            ],
-                          ),
+                            ),
+                            if (_showFullscreenToggle)
+                              Padding(
+                                padding: .fromLTRB(horizontalPadding, 0, horizontalPadding, 12),
+                                child: _buildFullscreenItem(isCollapsed: isCollapsed),
+                              ),
+                          ],
                         ),
-
-                        if (_showFullscreenToggle)
-                          Padding(
-                            padding: EdgeInsets.fromLTRB(horizontalPadding, 0, horizontalPadding, 12),
-                            child: _buildFullscreenItem(isCollapsed: isCollapsed),
-                          ),
-                      ],
+                      ),
                     ),
-                  ),
+                  ],
                 ),
               ),
             ),
@@ -718,6 +813,7 @@ class SideNavigationRailState extends State<SideNavigationRail> with MountedSetS
     bool autofocus = false,
   }) {
     final t = tokens(context);
+    final itemHorizontalPadding = itemHorizontalPaddingForContext(context, isCollapsed: isCollapsed);
 
     return NavigationRailItem(
       icon: icon,
@@ -729,7 +825,7 @@ class SideNavigationRailState extends State<SideNavigationRail> with MountedSetS
           fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
           color: isSelected ? t.text : t.textMuted,
         ),
-        overflow: TextOverflow.ellipsis,
+        overflow: .ellipsis,
         maxLines: 1,
       ),
       isSelected: isSelected,
@@ -738,6 +834,8 @@ class SideNavigationRailState extends State<SideNavigationRail> with MountedSetS
       onTap: onTap,
       focusNode: focusNode,
       autofocus: autofocus,
+      horizontalPadding: itemHorizontalPadding,
+      suppressSelectedBackground: widget.isSidebarFocused,
       onNavigateRight: widget.onNavigateToContent,
     );
   }
@@ -745,6 +843,7 @@ class SideNavigationRailState extends State<SideNavigationRail> with MountedSetS
   Widget _buildReconnectItem({required bool isCollapsed}) {
     final t = tokens(context);
     final isFocused = _focusTracker.isFocused(_kReconnect);
+    final itemHorizontalPadding = itemHorizontalPaddingForContext(context, isCollapsed: isCollapsed);
 
     return NavigationRailItem(
       icon: widget.isReconnecting ? Symbols.sync_rounded : Symbols.wifi_rounded,
@@ -752,8 +851,8 @@ class SideNavigationRailState extends State<SideNavigationRail> with MountedSetS
           ? SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: t.text))
           : Text(
               Translations.of(context).common.reconnect,
-              style: TextStyle(fontSize: 14, fontWeight: FontWeight.w400, color: t.textMuted),
-              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 14, fontWeight: .w400, color: t.textMuted),
+              overflow: .ellipsis,
               maxLines: 1,
             ),
       isSelected: false,
@@ -762,6 +861,7 @@ class SideNavigationRailState extends State<SideNavigationRail> with MountedSetS
       // ignore: no-empty-block - no-op tap handler while reconnecting
       onTap: widget.isReconnecting ? () {} : () => widget.onReconnect?.call(),
       focusNode: _focusTracker.get(_kReconnect),
+      horizontalPadding: itemHorizontalPadding,
       onNavigateRight: widget.onNavigateToContent,
     );
   }
@@ -770,13 +870,14 @@ class SideNavigationRailState extends State<SideNavigationRail> with MountedSetS
     final t = tokens(context);
     final isFullscreen = FullscreenStateManager().isFullscreen;
     final isFocused = _focusTracker.isFocused(_kFullscreen);
+    final itemHorizontalPadding = itemHorizontalPaddingForContext(context, isCollapsed: isCollapsed);
 
     return NavigationRailItem(
       icon: isFullscreen ? Symbols.fullscreen_exit_rounded : Symbols.fullscreen_rounded,
       label: Text(
         isFullscreen ? Translations.of(context).common.exitFullscreen : Translations.of(context).common.fullscreen,
-        style: TextStyle(fontSize: 14, fontWeight: FontWeight.w400, color: t.textMuted),
-        overflow: TextOverflow.ellipsis,
+        style: TextStyle(fontSize: 14, fontWeight: .w400, color: t.textMuted),
+        overflow: .ellipsis,
         maxLines: 1,
       ),
       isSelected: false,
@@ -784,6 +885,7 @@ class SideNavigationRailState extends State<SideNavigationRail> with MountedSetS
       isCollapsed: isCollapsed,
       onTap: () => unawaited(FullscreenStateManager().toggleFullscreen()),
       focusNode: _focusTracker.get(_kFullscreen),
+      horizontalPadding: itemHorizontalPadding,
       onNavigateRight: widget.onNavigateToContent,
     );
   }
@@ -794,15 +896,17 @@ class SideNavigationRailState extends State<SideNavigationRail> with MountedSetS
     int hiddenLibraryCount,
     dynamic t, {
     bool isCollapsed = false,
+    required double itemHorizontalPadding,
   }) {
     final librariesProvider = context.watch<LibrariesProvider>();
     final isLoading = librariesProvider.isLoading;
     final isLibrariesSelected = widget.selectedTab == NavigationTabId.libraries && widget.selectedLibraryKey == null;
     final isLibrariesFocused = _focusTracker.isFocused(_kLibraries);
+    final showLibrariesSelectedBackground = isLibrariesSelected && !widget.isSidebarFocused;
     final allEmpty = visibleRows.isEmpty && hiddenLibraryCount == 0;
 
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: .start,
       children: [
         Focus(
           focusNode: _focusTracker.get(_kLibraries),
@@ -834,7 +938,8 @@ class SideNavigationRailState extends State<SideNavigationRail> with MountedSetS
               child: Container(
                 decoration: BoxDecoration(
                   color: () {
-                    if (isLibrariesSelected) return t.text.withValues(alpha: 0.1);
+                    if (isCollapsed) return isLibrariesFocused ? t.text.withValues(alpha: 0.08) : null;
+                    if (showLibrariesSelectedBackground) return t.text.withValues(alpha: 0.1);
                     if (isLibrariesFocused) return t.text.withValues(alpha: 0.08);
                     return null;
                   }(),
@@ -842,13 +947,13 @@ class SideNavigationRailState extends State<SideNavigationRail> with MountedSetS
                 ),
                 clipBehavior: Clip.hardEdge,
                 child: UnconstrainedBox(
-                  alignment: Alignment.centerLeft,
+                  alignment: .centerLeft,
                   constrainedAxis: Axis.vertical,
                   clipBehavior: Clip.hardEdge,
                   child: SizedBox(
                     width: expandedWidth - 24,
                     child: Padding(
-                      padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 17),
+                      padding: .symmetric(vertical: 12, horizontal: itemHorizontalPadding),
                       child: Row(
                         children: [
                           AppIcon(
@@ -900,14 +1005,14 @@ class SideNavigationRailState extends State<SideNavigationRail> with MountedSetS
           curve: Curves.easeOutCubic,
           builder: (context, value, child) {
             return ClipRect(
-              child: Align(alignment: Alignment.topCenter, heightFactor: value, child: child),
+              child: Align(alignment: .topCenter, heightFactor: value, child: child),
             );
           },
           child: ExcludeFocus(
             excluding: !_librariesExpanded || isCollapsed,
             child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: .min,
+              crossAxisAlignment: .start,
               children: [
                 const SizedBox(height: 4),
                 if (isLoading)
@@ -955,12 +1060,12 @@ class SideNavigationRailState extends State<SideNavigationRail> with MountedSetS
 
   Widget _buildLibraryGroupedColumn(List<_LibraryNavRow> rows, dynamic t) {
     return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+      crossAxisAlignment: .start,
       children: rows.map((row) {
         return switch (row) {
           _LibraryServerHeaderRow(:final section, :final serverId, :final serverName) => _buildServerHeader(
             section,
-            serverId,
+            ServerId(serverId),
             serverName,
             t,
           ),
@@ -975,7 +1080,7 @@ class SideNavigationRailState extends State<SideNavigationRail> with MountedSetS
     );
   }
 
-  Widget _buildServerHeader(_LibraryNavSection section, String serverId, String serverName, dynamic t) {
+  Widget _buildServerHeader(_LibraryNavSection section, ServerId serverId, String serverName, dynamic t) {
     // Resolve backend per server so the badge matches the brand. Falls back
     // to the generic `dns` icon if the client isn't registered yet (rare —
     // can happen during a profile switch before the manager rehydrates).
@@ -986,7 +1091,7 @@ class SideNavigationRailState extends State<SideNavigationRail> with MountedSetS
       iconSize: 14,
       leading: backend == null ? null : BackendBadge(backend: backend, size: 14, color: t.textMuted),
       label: serverName,
-      labelStyle: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, letterSpacing: 0.4, color: t.textMuted),
+      labelStyle: TextStyle(fontSize: 11, fontWeight: .w600, letterSpacing: 0.4, color: t.textMuted),
       verticalPadding: 6,
       isExpanded: !_collapsedServerGroupKeys.contains(_serverGroupStateKey(section, serverId)),
       onToggle: () => _toggleServerCollapse(section, serverId),
@@ -994,7 +1099,7 @@ class SideNavigationRailState extends State<SideNavigationRail> with MountedSetS
     );
   }
 
-  void _toggleServerCollapse(_LibraryNavSection section, String serverId) {
+  void _toggleServerCollapse(_LibraryNavSection section, ServerId serverId) {
     final groupKey = _serverGroupStateKey(section, serverId);
     setState(() {
       if (!_collapsedServerGroupKeys.add(groupKey)) {
@@ -1009,7 +1114,7 @@ class SideNavigationRailState extends State<SideNavigationRail> with MountedSetS
       icon: Symbols.visibility_off_rounded,
       iconSize: 16,
       label: Translations.of(context).libraries.hiddenLibrariesCount(count: count),
-      labelStyle: TextStyle(fontSize: 12, fontWeight: FontWeight.w500, color: t.textMuted),
+      labelStyle: TextStyle(fontSize: 12, fontWeight: .w500, color: t.textMuted),
       verticalPadding: 8,
       isExpanded: _hiddenLibrariesExpanded,
       onToggle: () => setState(() => _hiddenLibrariesExpanded = !_hiddenLibrariesExpanded),
@@ -1058,19 +1163,19 @@ class SideNavigationRailState extends State<SideNavigationRail> with MountedSetS
               decoration: BoxDecoration(color: isFocused ? t.text.withValues(alpha: 0.08) : null, borderRadius: radius),
               clipBehavior: Clip.hardEdge,
               child: UnconstrainedBox(
-                alignment: Alignment.centerLeft,
+                alignment: .centerLeft,
                 constrainedAxis: Axis.vertical,
                 clipBehavior: Clip.hardEdge,
                 child: SizedBox(
                   width: expandedWidth - 24,
                   child: Padding(
-                    padding: EdgeInsets.symmetric(vertical: verticalPadding, horizontal: 17),
+                    padding: .symmetric(vertical: verticalPadding, horizontal: 17),
                     child: Row(
                       children: [
                         leading ?? AppIcon(icon, fill: 1, size: iconSize, color: t.textMuted),
                         const SizedBox(width: 11),
                         Expanded(
-                          child: Text(label, style: labelStyle, overflow: TextOverflow.ellipsis),
+                          child: Text(label, style: labelStyle, overflow: .ellipsis),
                         ),
                         AppIcon(
                           isExpanded ? Symbols.expand_less_rounded : Symbols.expand_more_rounded,
@@ -1103,8 +1208,8 @@ class SideNavigationRailState extends State<SideNavigationRail> with MountedSetS
         icon: _getLibraryIcon(library.kind.id),
         selectedIcon: _getLibraryIcon(library.kind.id),
         label: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: .start,
+          mainAxisSize: .min,
           children: [
             Text(
               library.title,
@@ -1113,13 +1218,13 @@ class SideNavigationRailState extends State<SideNavigationRail> with MountedSetS
                 fontWeight: isSelected ? FontWeight.w600 : FontWeight.w400,
                 color: isSelected ? t.text : t.textMuted,
               ),
-              overflow: TextOverflow.ellipsis,
+              overflow: .ellipsis,
             ),
             if (showServerName)
               Text(
                 library.serverName!,
                 style: TextStyle(fontSize: 9, color: t.textMuted.withValues(alpha: 0.4)),
-                overflow: TextOverflow.ellipsis,
+                overflow: .ellipsis,
               ),
           ],
         ),
@@ -1130,6 +1235,7 @@ class SideNavigationRailState extends State<SideNavigationRail> with MountedSetS
         focusNode: focusNode,
         borderRadius: BorderRadius.circular(tokens(context).radiusSm),
         iconSize: 18,
+        suppressSelectedBackground: widget.isSidebarFocused,
         onNavigateRight: widget.onNavigateToContent,
       ),
     );

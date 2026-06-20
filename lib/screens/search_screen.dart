@@ -8,9 +8,11 @@ import '../focus/focusable_text_field.dart';
 import '../i18n/strings.g.dart';
 import '../media/media_item.dart';
 import '../mixins/controller_disposer_mixin.dart';
+import '../mixins/mounted_set_state_mixin.dart';
 import '../mixins/refreshable.dart';
 import '../providers/multi_server_provider.dart';
 import '../utils/app_logger.dart';
+import '../utils/platform_detector.dart';
 import '../utils/snackbar_helper.dart';
 import '../widgets/desktop_app_bar.dart';
 import '../widgets/loading_indicator_box.dart';
@@ -28,7 +30,13 @@ class SearchScreen extends StatefulWidget {
 }
 
 class _SearchScreenState extends State<SearchScreen>
-    with Refreshable, FullRefreshable, SearchInputFocusable, FocusableTab, ControllerDisposerMixin {
+    with
+        Refreshable,
+        FullRefreshable,
+        SearchInputFocusable,
+        FocusableTab,
+        ControllerDisposerMixin,
+        MountedSetStateMixin {
   late final _searchController = createTextEditingController();
   final _searchFocusNode = FocusNode(debugLabel: 'SearchInput');
   final _firstResultFocusNode = FocusNode(debugLabel: 'SearchFirstResult');
@@ -37,6 +45,7 @@ class _SearchScreenState extends State<SearchScreen>
   bool _hasSearched = false;
   late final Debounce _searchDebounce;
   String _lastSearchedQuery = '';
+  String? _focusResultsForQuery;
 
   @override
   void initState() {
@@ -56,11 +65,14 @@ class _SearchScreenState extends State<SearchScreen>
   }
 
   void _onSearchChanged() {
+    if (!mounted) return;
+
     final query = _searchController.text;
 
     if (query.trim().isEmpty) {
       _searchDebounce.cancel();
-      setState(() {
+      _focusResultsForQuery = null;
+      setStateIfMounted(() {
         _searchResults = [];
         _hasSearched = false;
         _isSearching = false;
@@ -78,20 +90,23 @@ class _SearchScreenState extends State<SearchScreen>
   }
 
   Future<void> _performSearch(String query) async {
+    if (!mounted) return;
+
     if (query.trim().isEmpty) {
-      setState(() {
+      setStateIfMounted(() {
         _searchResults = [];
         _hasSearched = false;
       });
       return;
     }
 
-    setState(() {
+    setStateIfMounted(() {
       _isSearching = true;
       _hasSearched = true;
     });
 
     try {
+      if (!mounted) return;
       final multiServerProvider = Provider.of<MultiServerProvider>(context, listen: false);
 
       if (!multiServerProvider.hasConnectedServers) {
@@ -100,15 +115,17 @@ class _SearchScreenState extends State<SearchScreen>
 
       final neutral = await multiServerProvider.aggregationService.searchAcrossServers(query);
       if (mounted) {
-        setState(() {
+        setStateIfMounted(() {
           _searchResults = neutral;
           _isSearching = false;
           _lastSearchedQuery = query.trim();
         });
+        _maybeFocusResultsAfterSubmit(query, neutral);
       }
     } catch (e) {
+      _focusResultsForQuery = null;
       if (mounted) {
-        setState(() {
+        setStateIfMounted(() {
           _isSearching = false;
         });
         showErrorSnackBar(context, t.errors.searchFailed(error: e));
@@ -116,8 +133,37 @@ class _SearchScreenState extends State<SearchScreen>
     }
   }
 
+  /// OSK "Search" / hardware Enter on TV: jump to results, or force the
+  /// search to run now and focus results when it lands.
+  void _handleSearchSubmit() {
+    final query = _searchController.text.trim();
+    if (query.isEmpty) return;
+
+    if (_searchResults.isNotEmpty && !_isSearching && query == _lastSearchedQuery.trim()) {
+      _firstResultFocusNode.requestFocus();
+      return;
+    }
+
+    _focusResultsForQuery = query;
+    if (_searchDebounce.isPending || !_isSearching) {
+      _searchDebounce.cancel();
+      _performSearch(query);
+    }
+    // else: the in-flight search already covers the current text; its
+    // completion focuses the results.
+  }
+
+  void _maybeFocusResultsAfterSubmit(String query, List<MediaItem> results) {
+    if (_focusResultsForQuery == null || _focusResultsForQuery != query.trim()) return;
+    _focusResultsForQuery = null;
+    if (results.isEmpty) return;
+    if (_searchController.text.trim() != query.trim()) return; // user kept editing
+    FocusUtils.requestFocusAfterBuild(this, _firstResultFocusNode);
+  }
+
   @override
   void refresh() {
+    if (!mounted) return;
     if (_searchController.text.isNotEmpty) {
       _performSearch(_searchController.text);
     }
@@ -126,27 +172,32 @@ class _SearchScreenState extends State<SearchScreen>
   /// Focus the search input field
   @override
   void focusSearchInput() {
+    if (!mounted) return;
     _searchFocusNode.requestFocus();
   }
 
   @override
   void focusActiveTabIfReady() {
+    if (!mounted) return;
     _searchFocusNode.requestFocus();
   }
 
   /// Set the search query externally (e.g. from companion remote)
   @override
   void setSearchQuery(String query) {
+    if (!mounted) return;
     _searchController.text = query;
   }
 
   // Public method to fully reload all content (for profile switches)
   @override
   void fullRefresh() {
+    if (!mounted) return;
     appLogger.d('SearchScreen.fullRefresh() called - clearing search and reloading');
     // Clear search results and search text for new profile
     _searchController.clear();
-    setState(() {
+    _focusResultsForQuery = null;
+    setStateIfMounted(() {
       _searchResults.clear();
       _isSearching = false;
       _hasSearched = false;
@@ -155,6 +206,7 @@ class _SearchScreenState extends State<SearchScreen>
   }
 
   void updateItem(String _) {
+    if (!mounted) return;
     // Trigger a refresh of the search to get updated metadata
     if (_searchController.text.isNotEmpty) {
       _performSearch(_searchController.text);
@@ -163,7 +215,7 @@ class _SearchScreenState extends State<SearchScreen>
 
   /// Navigate focus to the sidebar
   void _navigateToSidebar() {
-    MainScreenFocusScope.of(context)?.focusSidebar();
+    MainScreenFocusScope.of(context, listen: false)?.focusSidebar();
   }
 
   Widget _buildResultsList(BuildContext context) {
@@ -210,6 +262,7 @@ class _SearchScreenState extends State<SearchScreen>
                   onNavigateDown: _searchResults.isNotEmpty && !_isSearching
                       ? _firstResultFocusNode.requestFocus
                       : null,
+                  onEditingComplete: PlatformDetector.isTV() ? _handleSearchSubmit : null,
                   onBack: () {
                     if (_searchController.text.isNotEmpty) {
                       _searchController.clear();

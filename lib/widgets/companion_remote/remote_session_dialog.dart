@@ -6,6 +6,7 @@ import '../../mixins/mounted_set_state_mixin.dart';
 import '../../providers/companion_remote_provider.dart';
 import '../../services/companion_remote/companion_remote_host_controller.dart';
 import '../../services/settings_service.dart';
+import '../../utils/dialogs.dart';
 import '../../focus/focusable_button.dart';
 import '../../focus/key_event_utils.dart';
 
@@ -16,7 +17,7 @@ class RemoteSessionDialog extends StatefulWidget {
   State<RemoteSessionDialog> createState() => _RemoteSessionDialogState();
 
   static Future<void> show(BuildContext context) {
-    return showDialog<void>(
+    return showScopedDialog<void>(
       context: context,
       barrierDismissible: false,
       builder: (context) => const RemoteSessionDialog(),
@@ -98,7 +99,7 @@ class _RemoteSessionDialogState extends State<RemoteSessionDialog> with MountedS
               child: Padding(
                 padding: const EdgeInsets.all(32.0),
                 child: Column(
-                  mainAxisSize: MainAxisSize.min,
+                  mainAxisSize: .min,
                   children: [
                     const CircularProgressIndicator(),
                     const SizedBox(height: 16),
@@ -113,8 +114,8 @@ class _RemoteSessionDialogState extends State<RemoteSessionDialog> with MountedS
             return AlertDialog(
               title: Text(t.common.error),
               content: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: .min,
+                crossAxisAlignment: .start,
                 children: [
                   Text(t.companionRemote.session.failedToCreate),
                   const SizedBox(height: 8),
@@ -149,8 +150,8 @@ class _RemoteSessionDialogState extends State<RemoteSessionDialog> with MountedS
               child: SingleChildScrollView(
                 padding: const EdgeInsets.all(24.0),
                 child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  mainAxisSize: .min,
+                  crossAxisAlignment: .stretch,
                   children: [
                     Row(
                       children: [
@@ -158,7 +159,7 @@ class _RemoteSessionDialogState extends State<RemoteSessionDialog> with MountedS
                         const SizedBox(width: 16),
                         Expanded(
                           child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
+                            crossAxisAlignment: .start,
                             children: [
                               Text(t.companionRemote.title, style: Theme.of(context).textTheme.headlineSmall),
                               const SizedBox(height: 4),
@@ -187,7 +188,7 @@ class _RemoteSessionDialogState extends State<RemoteSessionDialog> with MountedS
 
                     const SizedBox(height: 24),
                     Row(
-                      mainAxisAlignment: MainAxisAlignment.end,
+                      mainAxisAlignment: .end,
                       children: [
                         FocusableButton(
                           autofocus: true,
@@ -264,7 +265,7 @@ class _RemoteSessionDialogState extends State<RemoteSessionDialog> with MountedS
             const SizedBox(width: 16),
             Expanded(
               child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+                crossAxisAlignment: .start,
                 children: [
                   Text(
                     isRunning ? t.companionRemote.session.serverRunning : t.companionRemote.session.serverStopped,

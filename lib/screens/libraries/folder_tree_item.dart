@@ -1,26 +1,33 @@
+import 'dart:io';
 import 'dart:ui';
+import '../../media/ids.dart';
 
 import 'package:flutter/material.dart';
 import 'package:plezy/widgets/app_icon.dart';
 import 'package:material_symbols_icons/symbols.dart';
 import '../../focus/focusable_button.dart';
+import '../../providers/watch_state_store.dart';
 import '../../focus/focusable_wrapper.dart';
 import '../../media/media_item.dart';
 import '../../media/media_item_types.dart';
 import '../../media/media_kind.dart';
+import '../../mixins/context_menu_tap_mixin.dart';
 import '../../services/settings_service.dart';
 import '../../widgets/settings_builder.dart';
 import '../../utils/formatters.dart';
 import '../../utils/provider_extensions.dart';
-import '../../widgets/media_progress_bar.dart';
+import '../../widgets/app_menu.dart';
+import '../../widgets/media_context_menu.dart';
 import '../../widgets/optimized_media_image.dart';
+import '../../widgets/overlay_sheet.dart';
+import '../../widgets/watched_indicator.dart';
 import '../../theme/mono_tokens.dart';
 import '../../i18n/strings.g.dart';
 import '../../widgets/loading_indicator_box.dart';
 
 /// Individual item in the folder tree
 /// Can be either a folder (expandable) or a file (tappable)
-class FolderTreeItem extends StatelessWidget {
+class FolderTreeItem extends StatefulWidget {
   final MediaItem item;
   final int depth;
   final bool isExpanded;
@@ -32,6 +39,9 @@ class FolderTreeItem extends StatelessWidget {
   final bool isLoading;
   final FocusNode? focusNode;
   final VoidCallback? onNavigateUp;
+  final VoidCallback? onNavigateLeft;
+  final void Function(String itemId)? onRefresh;
+  final VoidCallback? onListRefresh;
   final String? serverId;
 
   const FolderTreeItem({
@@ -47,15 +57,34 @@ class FolderTreeItem extends StatelessWidget {
     this.isLoading = false,
     this.focusNode,
     this.onNavigateUp,
+    this.onNavigateLeft,
+    this.onRefresh,
+    this.onListRefresh,
     this.serverId,
   });
 
+  @override
+  State<FolderTreeItem> createState() => _FolderTreeItemState();
+}
+
+class _FolderTreeItemState extends State<FolderTreeItem> with ContextMenuTapMixin {
+  /// Whether the row is a real media item that gets the standard media
+  /// context menu. Jellyfin series/seasons act as expandable folders in the
+  /// tree but are still real media items.
+  bool get _isMediaRow =>
+      !widget.isFolder || widget.item.kind == MediaKind.show || widget.item.kind == MediaKind.season;
+
+  /// Plain folders only offer the Play/Shuffle actions of their trailing buttons.
+  bool get _hasFolderMenu => !_isMediaRow && (widget.onPlayAll != null || widget.onShuffle != null);
+
+  bool get _hasMenu => _isMediaRow || _hasFolderMenu;
+
   IconData _getIcon() {
-    if (isFolder) {
+    if (widget.isFolder) {
       return Symbols.folder_rounded;
     }
 
-    return switch (item.kind) {
+    return switch (widget.item.kind) {
       MediaKind.movie => Symbols.movie_rounded,
       MediaKind.show => Symbols.tv_rounded,
       MediaKind.season => Symbols.video_library_rounded,
@@ -65,32 +94,119 @@ class FolderTreeItem extends StatelessWidget {
     };
   }
 
+  String _rowTitle() {
+    final title = widget.item.title?.trim();
+    if (title != null && title.isNotEmpty) return title;
+    return widget.item.displayTitle;
+  }
+
+  MediaItem _effectiveItem(BuildContext context) => context.withFreshWatchState(widget.item);
+
+  String? _dedupeSubtitle(String? subtitle) {
+    final value = subtitle?.trim();
+    if (value == null || value.isEmpty || value == _rowTitle()) return null;
+    return value;
+  }
+
   void _handleTap() {
-    if (isFolder) {
-      onExpand?.call();
+    if (widget.isFolder) {
+      widget.onExpand?.call();
     } else {
-      onTap?.call();
+      widget.onTap?.call();
+    }
+  }
+
+  void _showRowMenu() {
+    if (_isMediaRow) {
+      showContextMenuFromTap();
+    } else {
+      _showFolderMenu();
+    }
+  }
+
+  /// Center of the row, used to anchor the folder menu for keyboard/d-pad
+  /// activation (mirrors [MediaContextMenuState.showContextMenu]).
+  Offset _rowCenter() {
+    final renderBox = context.findRenderObject() as RenderBox?;
+    if (renderBox == null) return Offset.zero;
+    final size = renderBox.size;
+    final topLeft = renderBox.localToGlobal(Offset.zero);
+    return Offset(topLeft.dx + size.width / 2, topLeft.dy + size.height / 2);
+  }
+
+  /// Ad-hoc Play/Shuffle menu for plain folder rows. These map to pseudo
+  /// [MediaItem]s (Plex directories, Jellyfin folders), so [MediaContextMenu]
+  /// would offer actions that don't apply to them.
+  Future<void> _showFolderMenu() async {
+    final entries = <AppMenuEntry<String>>[
+      if (widget.onPlayAll != null)
+        AppMenuItem<String>(value: 'play', icon: Symbols.play_arrow_rounded, label: t.common.play),
+      if (widget.onShuffle != null)
+        AppMenuItem<String>(value: 'shuffle', icon: Symbols.shuffle_rounded, label: t.common.shuffle),
+    ];
+    if (entries.isEmpty) return;
+
+    final previousFocus = FocusManager.instance.primaryFocus;
+    final position = lastTapPosition;
+    final fromKeyboard = position == null;
+    final useBottomSheet = Platform.isIOS || Platform.isAndroid;
+
+    String? selected;
+    if (useBottomSheet) {
+      selected = await OverlaySheetController.showAdaptive<String>(
+        context,
+        showDragHandle: true,
+        builder: (context) => AppMenuSheet<String>(title: _rowTitle(), entries: entries, focusFirstItem: fromKeyboard),
+      );
+    } else {
+      selected = await showAppMenu<String>(
+        context,
+        entries: entries,
+        position: position ?? _rowCenter(),
+        focusFirstItem: fromKeyboard,
+      );
+    }
+
+    if (!mounted) return;
+
+    if (selected == null) {
+      // Dismissed — restore focus to the row. Play/Shuffle hand off to the
+      // player instead (mirrors MediaContextMenu's didNavigate handling).
+      if (previousFocus != null && previousFocus.canRequestFocus) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (previousFocus.canRequestFocus) {
+            previousFocus.requestFocus();
+          }
+        });
+      }
+      return;
+    }
+
+    switch (selected) {
+      case 'play':
+        widget.onPlayAll?.call();
+      case 'shuffle':
+        widget.onShuffle?.call();
     }
   }
 
   String? _buildSubtitle() {
+    final item = widget.item;
     if (item.isEpisode) {
       final parts = <String>[];
       if (item.parentIndex != null && item.index != null) {
         parts.add('S${item.parentIndex} E${item.index}');
       }
-      if (item.title != null && item.title!.isNotEmpty) {
-        parts.add(item.title!);
-      }
-      return parts.isNotEmpty ? parts.join(' · ') : null;
+      return parts.isNotEmpty ? parts.join(' · ') : _dedupeSubtitle(item.displaySubtitle);
     }
     if (item.isSeason) {
-      return item.displaySubtitle;
+      return _dedupeSubtitle(item.displaySubtitle);
     }
-    return item.displaySubtitle;
+    return _dedupeSubtitle(item.displaySubtitle);
   }
 
   String _buildMetadataLine() {
+    final item = widget.item;
     final parts = <String>[];
 
     if (item.contentRating != null && item.contentRating!.isNotEmpty) {
@@ -110,26 +226,26 @@ class FolderTreeItem extends StatelessWidget {
   }
 
   Widget _buildFolderRow(BuildContext context) {
-    final indentation = depth * 24.0;
-    final expandIcon = isExpanded ? Symbols.keyboard_arrow_down_rounded : Symbols.keyboard_arrow_right_rounded;
+    final indentation = widget.depth * 24.0;
+    final expandIcon = widget.isExpanded ? Symbols.keyboard_arrow_down_rounded : Symbols.keyboard_arrow_right_rounded;
 
     return Container(
-      padding: EdgeInsets.only(left: 16.0 + indentation, right: 8.0, top: 8.0, bottom: 8.0),
+      padding: .only(left: 16.0 + indentation, right: 8.0, top: 8.0, bottom: 8.0),
       child: Row(
         children: [
           SizedBox(
             width: 24,
-            child: isLoading ? const LoadingIndicatorBox(size: 16) : AppIcon(expandIcon, fill: 1, size: 20),
+            child: widget.isLoading ? const LoadingIndicatorBox(size: 16) : AppIcon(expandIcon, fill: 1, size: 20),
           ),
           const SizedBox(width: 8),
           AppIcon(_getIcon(), fill: 1, size: 20, color: Theme.of(context).colorScheme.primary),
           const SizedBox(width: 12),
           Expanded(
             child: Text(
-              item.displayTitle,
-              style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+              _rowTitle(),
+              style: const TextStyle(fontSize: 14, fontWeight: .w500),
               maxLines: 1,
-              overflow: TextOverflow.ellipsis,
+              overflow: .ellipsis,
             ),
           ),
         ],
@@ -138,13 +254,13 @@ class FolderTreeItem extends StatelessWidget {
   }
 
   Widget _buildMediaRow(BuildContext context) {
-    final indentation = depth * 24.0;
-    final svc = SettingsService.instanceOrNull!;
+    final indentation = widget.depth * 24.0;
+    final svc = SettingsService.instance;
     final episodePosterMode = svc.read(SettingsService.episodePosterMode);
     final hideSpoilers = svc.read(SettingsService.hideSpoilers);
     final showUnwatchedCount = svc.read(SettingsService.showUnwatchedCount);
 
-    final isWide = item.usesWideAspectRatio(episodePosterMode);
+    final isWide = widget.item.usesWideAspectRatio(episodePosterMode);
     final thumbWidth = isWide ? 130.0 : 53.0;
     final thumbHeight = isWide ? 73.0 : 80.0;
 
@@ -152,9 +268,9 @@ class FolderTreeItem extends StatelessWidget {
     final metadataLine = _buildMetadataLine();
 
     return Container(
-      padding: EdgeInsets.only(left: 16.0 + indentation, right: 16.0, top: 6.0, bottom: 6.0),
+      padding: .only(left: 16.0 + indentation, right: 16.0, top: 6.0, bottom: 6.0),
       child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
+        crossAxisAlignment: .center,
         children: [
           // Thumbnail with progress overlay
           SizedBox(
@@ -177,14 +293,14 @@ class FolderTreeItem extends StatelessWidget {
           // Metadata column
           Expanded(
             child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: .start,
+              mainAxisSize: .min,
               children: [
                 Text(
-                  item.displayTitle,
-                  style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500, height: 1.2),
+                  _rowTitle(),
+                  style: const TextStyle(fontSize: 13, fontWeight: .w500, height: 1.2),
                   maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
+                  overflow: .ellipsis,
                 ),
                 if (subtitle != null) ...[
                   const SizedBox(height: 2),
@@ -196,7 +312,7 @@ class FolderTreeItem extends StatelessWidget {
                       height: 1.2,
                     ),
                     maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+                    overflow: .ellipsis,
                   ),
                 ],
                 if (metadataLine.isNotEmpty) ...[
@@ -209,7 +325,7 @@ class FolderTreeItem extends StatelessWidget {
                       height: 1.2,
                     ),
                     maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
+                    overflow: .ellipsis,
                   ),
                 ],
               ],
@@ -227,9 +343,10 @@ class FolderTreeItem extends StatelessWidget {
     double width,
     double height,
   ) {
+    final item = widget.item;
     final posterUrl = item.posterThumb(mode: episodePosterMode);
     // Backend-neutral so Jellyfin items render via Jellyfin's transcoder.
-    final client = context.tryGetMediaClientWithFallback(serverId);
+    final client = context.tryGetMediaClientWithFallback(serverIdOrNull(widget.serverId));
     final shouldBlur =
         hideSpoilers && item.shouldHideSpoiler && episodePosterMode == EpisodePosterMode.episodeThumbnail;
 
@@ -261,82 +378,20 @@ class FolderTreeItem extends StatelessWidget {
   }
 
   Widget _buildWatchOverlay(BuildContext context, bool showUnwatchedCount) {
-    final hasActiveProgress = item.hasActiveProgress;
-
-    return Stack(
-      children: [
-        // Watched checkmark
-        if (item.isWatched && !hasActiveProgress)
-          Positioned(
-            top: 3,
-            right: 3,
-            child: Container(
-              padding: const EdgeInsets.all(2),
-              decoration: BoxDecoration(
-                color: tokens(context).text,
-                shape: BoxShape.circle,
-                boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.3), blurRadius: 4)],
-              ),
-              child: AppIcon(Symbols.check_rounded, fill: 1, color: tokens(context).bg, size: 12),
-            ),
-          ),
-        // Unwatched count for shows/seasons
-        if (showUnwatchedCount &&
-            !item.isWatched &&
-            (item.kind == MediaKind.show || item.kind == MediaKind.season) &&
-            (item.leafCount != null && item.leafCount! > 0 && item.viewedLeafCount != null))
-          Positioned(
-            top: 3,
-            right: 3,
-            child: Container(
-              width: 20,
-              height: 20,
-              decoration: BoxDecoration(
-                color: tokens(context).text,
-                shape: BoxShape.circle,
-                boxShadow: [BoxShadow(color: Colors.black.withValues(alpha: 0.3), blurRadius: 4)],
-              ),
-              alignment: Alignment.center,
-              child: Text(
-                '${item.leafCount! - item.viewedLeafCount!}',
-                style: TextStyle(color: tokens(context).bg, fontSize: 10, fontWeight: FontWeight.bold),
-              ),
-            ),
-          ),
-        // Progress bar
-        if (hasActiveProgress)
-          Positioned(
-            bottom: 0,
-            left: 0,
-            right: 0,
-            child: ClipRRect(
-              borderRadius: const BorderRadius.only(bottomLeft: Radius.circular(6), bottomRight: Radius.circular(6)),
-              child: MediaProgressBar(viewOffset: item.viewOffsetMs!, duration: item.durationMs!),
-            ),
-          ),
-        // Season progress
-        if (item.isSeason && item.isPartiallyWatched)
-          Positioned(
-            bottom: 0,
-            left: 0,
-            right: 0,
-            child: ClipRRect(
-              borderRadius: const BorderRadius.only(bottomLeft: Radius.circular(6), bottomRight: Radius.circular(6)),
-              child: LinearProgressIndicator(
-                value: item.viewedLeafCount! / item.leafCount!,
-                backgroundColor: tokens(context).outline,
-                valueColor: AlwaysStoppedAnimation<Color>(Theme.of(context).colorScheme.primary),
-                minHeight: 3,
-              ),
-            ),
-          ),
-      ],
+    return WatchedIndicator(
+      // Session-fresh view of the item so the overlay reflects live patches.
+      item: _effectiveItem(context),
+      size: WatchedIndicatorSize.compact,
+      showUnwatchedCount: showUnwatchedCount,
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    final rowContent = isFolder
+    final playAll = widget.onPlayAll;
+    final shuffle = widget.onShuffle;
+    final hasMenu = _hasMenu;
+    final rowContent = widget.isFolder
         ? _buildFolderRow(context)
         : SettingsBuilder(
             prefs: const [
@@ -347,28 +402,51 @@ class FolderTreeItem extends StatelessWidget {
             builder: _buildMediaRow,
           );
 
+    Widget gesture = GestureDetector(
+      onTap: _handleTap,
+      onTapDown: hasMenu ? storeTapPosition : null,
+      onLongPress: hasMenu ? _showRowMenu : null,
+      onSecondaryTapDown: hasMenu ? storeTapPosition : null,
+      onSecondaryTap: hasMenu ? _showRowMenu : null,
+      behavior: HitTestBehavior.opaque,
+      child: rowContent,
+    );
+
+    if (_isMediaRow) {
+      gesture = MediaContextMenu(
+        key: contextMenuKey,
+        item: widget.item,
+        onRefresh: widget.onRefresh,
+        onListRefresh: widget.onListRefresh,
+        child: gesture,
+      );
+    }
+
     return Row(
       children: [
         // Main item row
         Expanded(
           child: FocusableWrapper(
-            focusNode: focusNode,
+            focusNode: widget.focusNode,
             onSelect: _handleTap,
-            onNavigateUp: onNavigateUp,
+            enableLongPress: hasMenu,
+            onLongPress: hasMenu ? _showRowMenu : null,
+            onNavigateUp: widget.onNavigateUp,
+            onNavigateLeft: widget.onNavigateLeft,
             useBackgroundFocus: true,
             disableScale: true,
             descendantsAreFocusable: false,
-            child: GestureDetector(onTap: _handleTap, behavior: HitTestBehavior.opaque, child: rowContent),
+            child: gesture,
           ),
         ),
 
-        // Play/Shuffle buttons for folders
-        if (isFolder) ...[
+        // Play/Shuffle buttons for folders when the backend supports them.
+        if (widget.isFolder && playAll != null) ...[
           FocusableButton(
             useBackgroundFocus: true,
-            onPressed: onPlayAll,
+            onPressed: playAll,
             child: IconButton(
-              onPressed: onPlayAll,
+              onPressed: playAll,
               icon: AppIcon(
                 Symbols.play_arrow_rounded,
                 fill: 1,
@@ -378,15 +456,17 @@ class FolderTreeItem extends StatelessWidget {
               tooltip: t.common.play,
               iconSize: 18,
               constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-              padding: EdgeInsets.zero,
+              padding: .zero,
               visualDensity: VisualDensity.compact,
             ),
           ),
+        ],
+        if (widget.isFolder && shuffle != null) ...[
           FocusableButton(
             useBackgroundFocus: true,
-            onPressed: onShuffle,
+            onPressed: shuffle,
             child: IconButton(
-              onPressed: onShuffle,
+              onPressed: shuffle,
               icon: AppIcon(
                 Symbols.shuffle_rounded,
                 fill: 1,
@@ -396,7 +476,7 @@ class FolderTreeItem extends StatelessWidget {
               tooltip: t.common.shuffle,
               iconSize: 18,
               constraints: const BoxConstraints(minWidth: 36, minHeight: 36),
-              padding: EdgeInsets.zero,
+              padding: .zero,
               visualDensity: VisualDensity.compact,
             ),
           ),

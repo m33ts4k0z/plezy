@@ -5,6 +5,7 @@ import 'package:provider/provider.dart';
 import '../connection/connection.dart';
 import '../connection/connection_registry.dart';
 import '../mixins/controller_disposer_mixin.dart';
+import '../profiles/active_profile_binder.dart';
 import '../profiles/active_profile_provider.dart';
 import '../profiles/plex_home_service.dart';
 import '../profiles/profile.dart';
@@ -19,11 +20,11 @@ import '../focus/focusable_button.dart';
 import '../focus/focusable_text_field.dart';
 import '../focus/key_event_utils.dart';
 import '../media/media_backend.dart';
+import '../navigation/profile_session_screen.dart';
 import '../utils/navigation_transitions.dart';
 import '../widgets/backend_badge.dart';
 import '../widgets/dialog_action_button.dart';
 import 'auth/plex_pin_auth_flow.dart';
-import 'main_screen.dart';
 import 'profile/profile_switch_screen.dart';
 import 'settings/add_jellyfin_screen.dart';
 
@@ -139,6 +140,14 @@ class _AuthScreenState extends State<AuthScreen> {
 
       if (!mounted) return;
 
+      // Start the binder before the picker/MainScreen, mirroring the
+      // cold-start SetupScreen ordering. On a fresh install SetupScreen
+      // routes here without ever starting it, so without this the profile
+      // activated above is bound only by MainScreen's post-frame start() —
+      // Discover renders a "No servers available" flash in the gap, and the
+      // picker's awaitBindingSettle resolves before anything is bound.
+      context.read<ActiveProfileBinder>().start();
+
       final settings = await SettingsService.getInstance();
       if (!mounted) return;
 
@@ -163,7 +172,9 @@ class _AuthScreenState extends State<AuthScreen> {
       await context.read<UserProfileProvider>().initialize();
 
       if (!mounted) return;
-      unawaited(Navigator.pushReplacement(context, fadeRoute(MainScreen(initialPromptHandled: promptHandled))));
+      unawaited(
+        Navigator.pushReplacement(context, fadeRoute(ProfileSessionScreen(initialPromptHandled: promptHandled))),
+      );
     } catch (e) {
       appLogger.e('Failed to connect to servers', error: e);
       if (!mounted) return;
@@ -187,7 +198,7 @@ class _AuthScreenState extends State<AuthScreen> {
     // The connection persisted and the manager registered the client; move
     // straight to the main screen. [MainScreen] reads the active client
     // from the server provider, so no client argument is needed here.
-    unawaited(Navigator.pushReplacement(context, fadeRoute(const MainScreen())));
+    unawaited(Navigator.pushReplacement(context, fadeRoute(const ProfileSessionScreen())));
   }
 
   void _showDebugTokenDialog() {
@@ -214,18 +225,18 @@ class _AuthScreenState extends State<AuthScreen> {
             padding: const EdgeInsets.all(24),
             child: isDesktop
                 ? Row(
-                    crossAxisAlignment: CrossAxisAlignment.center,
+                    crossAxisAlignment: .center,
                     children: [
                       Expanded(
                         child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          crossAxisAlignment: CrossAxisAlignment.center,
+                          mainAxisAlignment: .center,
+                          crossAxisAlignment: .center,
                           children: [
                             Image.asset('assets/plezy.png', width: 120, height: 120),
                             const SizedBox(height: 24),
                             Text(
                               t.app.title,
-                              style: Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.bold),
+                              style: Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight: .bold),
                               textAlign: TextAlign.center,
                             ),
                           ],
@@ -236,8 +247,8 @@ class _AuthScreenState extends State<AuthScreen> {
                         child: Center(
                           child: SingleChildScrollView(
                             child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              mainAxisSize: .min,
+                              crossAxisAlignment: .stretch,
                               children: [_buildAuthBody()],
                             ),
                           ),
@@ -247,14 +258,14 @@ class _AuthScreenState extends State<AuthScreen> {
                   )
                 : SingleChildScrollView(
                     child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      mainAxisSize: .min,
+                      crossAxisAlignment: .stretch,
                       children: [
                         Image.asset('assets/plezy.png', width: 120, height: 120),
                         const SizedBox(height: 24),
                         Text(
                           t.app.title,
-                          style: Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight: FontWeight.bold),
+                          style: Theme.of(context).textTheme.headlineMedium?.copyWith(fontWeight: .bold),
                           textAlign: TextAlign.center,
                         ),
                         const SizedBox(height: 48),
@@ -271,14 +282,16 @@ class _AuthScreenState extends State<AuthScreen> {
   Widget _buildAuthBody() {
     if (_isAuthenticating) {
       return Column(
-        mainAxisSize: MainAxisSize.min,
+        mainAxisSize: .min,
         children: [
           const Center(child: CircularProgressIndicator()),
           const SizedBox(height: 16),
           Text(
             t.auth.waitingForAuth,
             textAlign: TextAlign.center,
-            style: const TextStyle(color: Colors.grey),
+            style: Theme.of(
+              context,
+            ).textTheme.bodyMedium?.copyWith(color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.7)),
           ),
         ],
       );
@@ -294,8 +307,8 @@ class _AuthScreenState extends State<AuthScreen> {
     final isTV = PlatformDetector.isTV();
     final isAppleTV = PlatformDetector.isAppleTV();
     return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: .min,
+      crossAxisAlignment: .stretch,
       children: [
         if (isTV) ...[
           FocusableButton(
@@ -305,8 +318,8 @@ class _AuthScreenState extends State<AuthScreen> {
               onPressed: busy ? null : startQr,
               style: ElevatedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 16)),
               child: Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                mainAxisSize: MainAxisSize.min,
+                mainAxisAlignment: .center,
+                mainAxisSize: .min,
                 children: [
                   const BackendBadge(backend: MediaBackend.plex, size: 18),
                   const SizedBox(width: 8),
@@ -363,26 +376,15 @@ class _AuthScreenState extends State<AuthScreen> {
           ],
         ),
         const SizedBox(height: 12),
-        if (isTV)
-          FocusableButton(
+        FocusableButton(
+          onPressed: _connectToJellyfin,
+          child: OutlinedButton.icon(
             onPressed: _connectToJellyfin,
-            child: OutlinedButton.icon(
-              onPressed: _connectToJellyfin,
-              style: OutlinedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 16)),
-              icon: const BackendBadge(backend: MediaBackend.jellyfin, size: 18),
-              label: Text(t.auth.connectToJellyfin),
-            ),
-          )
-        else
-          FocusableButton(
-            onPressed: _connectToJellyfin,
-            child: OutlinedButton.icon(
-              onPressed: _connectToJellyfin,
-              style: OutlinedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 16)),
-              icon: const BackendBadge(backend: MediaBackend.jellyfin, size: 18),
-              label: Text(t.auth.connectToJellyfin),
-            ),
+            style: OutlinedButton.styleFrom(padding: const EdgeInsets.symmetric(vertical: 16)),
+            icon: const BackendBadge(backend: MediaBackend.jellyfin, size: 18),
+            label: Text(t.auth.connectToJellyfin),
           ),
+        ),
         if (kDebugMode) ...[
           const SizedBox(height: 12),
           FocusableButton(
@@ -487,7 +489,7 @@ class _DebugTokenDialogState extends State<_DebugTokenDialog> with ControllerDis
     return AlertDialog(
       title: const Text('Debug: Enter Plex Token'),
       content: Column(
-        mainAxisSize: MainAxisSize.min,
+        mainAxisSize: .min,
         children: [
           FocusableTextFormField(
             controller: _tokenController,

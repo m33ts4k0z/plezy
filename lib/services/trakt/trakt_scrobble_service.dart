@@ -73,13 +73,23 @@ class TraktScrobbleService {
   void rebindToProfile(
     TraktSession? session, {
     required void Function() onSessionInvalidated,
+    void Function(TraktSession session)? onSessionUpdated,
     http.Client? httpClient,
   }) {
     _client?.dispose();
     _client = session != null
-        ? TraktClient(session, onSessionInvalidated: onSessionInvalidated, httpClient: httpClient)
+        ? TraktClient(
+            session,
+            onSessionInvalidated: onSessionInvalidated,
+            onSessionUpdated: onSessionUpdated,
+            httpClient: httpClient,
+          )
         : null;
     cancelInFlight();
+  }
+
+  void updateSession(TraktSession session) {
+    _client?.updateSession(session);
   }
 
   Future<int?> getRating(TrackerRatingContext ctx) async {
@@ -180,7 +190,7 @@ class TraktScrobbleService {
 
   Map<String, dynamic> _ratingBody(TrackerRatingContext ctx, {int? rating}) {
     final ids = TraktIds.fromExternal(ctx.ids.external).toJson();
-    final item = {'ids': ids, if (rating != null) 'rating': rating};
+    final item = {'ids': ids, 'rating': ?rating};
 
     return switch (ctx.kind) {
       MediaKind.movie => {
@@ -194,7 +204,7 @@ class TraktScrobbleService {
           {
             'ids': ids,
             'seasons': [
-              {'number': ctx.season, if (rating != null) 'rating': rating},
+              {'number': ctx.season, 'rating': ?rating},
             ],
           },
         ],
@@ -207,7 +217,7 @@ class TraktScrobbleService {
               {
                 'number': ctx.season,
                 'episodes': [
-                  {'number': ctx.episodeNumber, if (rating != null) 'rating': rating},
+                  {'number': ctx.episodeNumber, 'rating': ?rating},
                 ],
               },
             ],

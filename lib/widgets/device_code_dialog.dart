@@ -39,8 +39,8 @@ class DeviceCodeDialog extends StatelessWidget {
     return AlertDialog(
       title: Text(t.trackers.deviceCode.title(service: serviceName)),
       content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: .min,
+        crossAxisAlignment: .start,
         children: [
           Text(t.trackers.deviceCode.body(url: code.verificationUrl), style: theme.textTheme.bodyMedium),
           const SizedBox(height: 16),
@@ -55,7 +55,7 @@ class DeviceCodeDialog extends StatelessWidget {
                   style: theme.textTheme.displaySmall?.copyWith(
                     fontFeatures: const [FontFeature.tabularFigures()],
                     letterSpacing: 4,
-                    fontWeight: FontWeight.w600,
+                    fontWeight: .w600,
                   ),
                 ),
               ),
@@ -87,7 +87,7 @@ class DeviceCodeDialog extends StatelessWidget {
         DialogActionButton(
           onPressed: () {
             onCancel();
-            Navigator.of(context, rootNavigator: true).pop();
+            Navigator.of(context).pop();
           },
           label: t.common.cancel,
         ),

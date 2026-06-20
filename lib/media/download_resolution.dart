@@ -47,6 +47,7 @@ class DownloadArtworkSpec {
 /// version.
 class DownloadResolution {
   final String? videoUrl;
+  final String? mediaSourceId;
   final List<DownloadSubtitleSpec> externalSubtitles;
 
   /// True when [videoUrl] points at a server-side transcoder rather than
@@ -79,6 +80,7 @@ class DownloadResolution {
 
   const DownloadResolution({
     required this.videoUrl,
+    this.mediaSourceId,
     this.externalSubtitles = const [],
     this.isTranscoded = false,
     this.extraHeaders = const {},

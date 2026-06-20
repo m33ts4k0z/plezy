@@ -114,7 +114,7 @@ String formatSyncOffset(double offsetMs) {
   final absMs = offsetMs.abs().round();
   final durationLocale = _getDurationLocale();
 
-  if (absMs >= 10000) {
+  if (absMs >= 10_000) {
     final seconds = (offsetMs.abs() / 1000).toStringAsFixed(1);
     final unit = durationLocale.second(1, true);
     return '$sign$seconds$unit';
@@ -171,6 +171,11 @@ String formatFinishTime(Duration remaining, {double rate = 1.0, required bool is
 
 String toBulletedString(List<String> parts) {
   return parts.join(' · ');
+}
+
+String? formatSeasonEpisodeLabel(int? season, int? episode) {
+  if (season == null || episode == null) return null;
+  return 'S$season E$episode';
 }
 
 String formatRating(double value) =>

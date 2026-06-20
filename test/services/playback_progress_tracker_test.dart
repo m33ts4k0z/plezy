@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:plezy/media/ids.dart';
 
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -7,6 +8,7 @@ import 'package:plezy/media/media_backend.dart';
 import 'package:plezy/media/media_item.dart';
 import 'package:plezy/media/media_kind.dart';
 import 'package:plezy/media/media_source_info.dart';
+import 'package:plezy/media/playback_report_metadata.dart';
 import 'package:plezy/mpv/mpv.dart';
 import 'package:plezy/services/multi_server_manager.dart';
 import 'package:plezy/services/offline_watch_sync_service.dart';
@@ -111,8 +113,18 @@ class _FakePlexClient implements PlexClient {
   @override
   int get watchedThresholdPercent => thresholdPercent;
 
+  /// markWatchedFromPlaybackStop resolves the event's cacheServerId from
+  /// [serverId] after the transport call.
+  @override
+  ServerId get serverId => ServerId('scrobbler');
+
   @override
   double get watchedThreshold => thresholdPercent / 100.0;
+
+  /// Plex relies on the explicit markWatched call (no auto-mark from the stop
+  /// report), so the scrobble path hits [markWatched].
+  @override
+  bool get marksWatchedOnPlaybackStopped => false;
 
   /// (ratingKey, time, state, duration) tuples for every updateProgress call.
   final List<({String ratingKey, int time, String state, int? duration})> updateProgressCalls = [];
@@ -136,6 +148,7 @@ class _FakePlexClient implements PlexClient {
     int? duration,
     int? playbackTime,
     String? sessionIdentifier,
+    PlaybackReportMetadata report = const PlaybackReportMetadata.live(),
   }) async {
     if (throwOnNextCall != null) {
       final err = throwOnNextCall!;
@@ -200,12 +213,15 @@ class _FakePlexClient implements PlexClient {
     Duration? duration,
     String? playSessionId,
     String? mediaSourceId,
+    PlaybackReportMetadata report = const PlaybackReportMetadata.live(),
   }) {
     playbackSessionIds.add(playSessionId);
     playbackStreamSelections.add((mediaSourceId: mediaSourceId, audioStreamIndex: null, subtitleStreamIndex: null));
     return updateProgress(itemId, time: position.inMilliseconds, state: 'stopped', duration: duration?.inMilliseconds);
   }
 
+  // Transport-only, like production: the single watch event for the stop
+  // flow is emitted by markWatchedFromPlaybackStop after this returns.
   @override
   Future<void> markWatched(MediaItem item) async {
     if (throwOnNextCall != null) {
@@ -214,20 +230,16 @@ class _FakePlexClient implements PlexClient {
       throw err;
     }
     markWatchedCalls.add(item.id);
-    WatchStateNotifier().notifyWatched(item: item, isNowWatched: true);
   }
 
   @override
-  Future<void> markAsWatched(String ratingKey, {MediaItem? item}) async {
+  Future<void> markAsWatched(String ratingKey) async {
     if (throwOnNextCall != null) {
       final err = throwOnNextCall!;
       throwOnNextCall = null;
       throw err;
     }
     markWatchedCalls.add(ratingKey);
-    if (item != null) {
-      WatchStateNotifier().notifyWatched(item: item, isNowWatched: true);
-    }
   }
 
   @override
@@ -262,12 +274,25 @@ class _DelayedStartClient extends _FakePlexClient {
   }
 }
 
-MediaItem _meta({String ratingKey = '42', String? serverId = 'srv', String? type = 'movie'}) => MediaItem(
+/// Jellyfin-style backend: the playback-stopped report marks the item played
+/// server-side, so the in-player scrobble path must emit only the local watch
+/// event and skip the explicit server mark (#1287).
+class _StopMarksWatchedClient extends _FakePlexClient {
+  @override
+  bool get marksWatchedOnPlaybackStopped => true;
+
+  @override
+  ServerId get serverId => ServerId('srv');
+}
+
+const Object _defaultServerId = Object();
+
+MediaItem _meta({String ratingKey = '42', Object? serverId = _defaultServerId, String? type = 'movie'}) => MediaItem(
   id: ratingKey,
   backend: MediaBackend.plex,
   kind: MediaKind.fromString(type),
   title: 'Test Item',
-  serverId: serverId,
+  serverId: identical(serverId, _defaultServerId) ? ServerId('srv') : serverId as ServerId?,
 );
 
 void main() {
@@ -347,6 +372,23 @@ void main() {
       expect(call.time, 30000); // 30s in ms
       expect(call.state, 'stopped');
       expect(call.duration, 100000); // 100s in ms
+    });
+
+    test('"stopped" can override stale player position for completion', () async {
+      final client = _FakePlexClient();
+      final player = _FakePlayer(position: const Duration(seconds: 12), duration: const Duration(seconds: 100));
+      final tracker = PlaybackProgressTracker(
+        client: client,
+        metadata: _meta(ratingKey: '42'),
+        player: player,
+        isOffline: false,
+      );
+      addTearDown(tracker.dispose);
+
+      await tracker.sendProgress('stopped', positionOverride: const Duration(seconds: 100));
+
+      expect(client.updateProgressCalls.single.time, 100000);
+      expect(client.markWatchedCalls, ['42']);
     });
 
     test('"playing" fires-and-forgets but eventually invokes updateProgress', () async {
@@ -638,6 +680,35 @@ void main() {
       expect(client.markWatchedCalls, ['42']);
     });
 
+    test('backend that marks watched on stop skips the explicit server mark (#1287)', () async {
+      // Jellyfin: /Sessions/Playing/Stopped marks the item played server-side,
+      // so an explicit markWatched here would double-scrobble via the Trakt
+      // plugin. The local watch event must still fire (UI + Plezy's own Trakt
+      // sync, which key on `watched` events, not progress).
+      final client = _StopMarksWatchedClient();
+      final player = _FakePlayer(position: const Duration(seconds: 95), duration: const Duration(seconds: 100));
+      final tracker = PlaybackProgressTracker(
+        client: client,
+        metadata: _meta(ratingKey: '42'),
+        player: player,
+        isOffline: false,
+      );
+      addTearDown(tracker.dispose);
+
+      final watched = <WatchStateEvent>[];
+      final sub = WatchStateNotifier()
+          .forItem('42')
+          .where((e) => e.changeType == WatchStateChangeType.watched)
+          .listen(watched.add);
+      addTearDown(sub.cancel);
+
+      await tracker.sendProgress('stopped');
+      await Future<void>.delayed(Duration.zero);
+
+      expect(client.markWatchedCalls, isEmpty);
+      expect(watched, hasLength(1));
+    });
+
     test('respects a custom server threshold (e.g. 80%)', () async {
       // 81% >= 80%, but < 90% default.
       final client = _FakePlexClient(thresholdPercent: 80);
@@ -729,7 +800,7 @@ void main() {
       final player = _FakePlayer(position: const Duration(seconds: 12), duration: const Duration(seconds: 60));
       final tracker = PlaybackProgressTracker(
         client: null,
-        metadata: _meta(ratingKey: '42', serverId: 'srv'),
+        metadata: _meta(ratingKey: '42', serverId: ServerId('srv')),
         player: player,
         isOffline: true,
         offlineWatchService: svc,
@@ -767,6 +838,34 @@ void main() {
       await tracker.sendProgress('playing');
       expect(await svc.getPendingSyncCount(), 0);
     });
+
+    test('online local playback queues fallback progress when reporting fails', () async {
+      final (svc: svc, db: db, mgr: mgr) = await makeOfflineService();
+      addTearDown(() async {
+        svc.dispose();
+        mgr.dispose();
+        await db.close();
+      });
+
+      final client = _FakePlexClient()..throwOnNextCall = StateError('offline');
+      final player = _FakePlayer(position: const Duration(seconds: 10), duration: const Duration(seconds: 100));
+      final tracker = PlaybackProgressTracker(
+        client: client,
+        metadata: _meta(ratingKey: '42', serverId: ServerId('srv')),
+        player: player,
+        isOffline: false,
+        offlineWatchService: svc,
+        queueOnOnlineFailure: true,
+      );
+      addTearDown(tracker.dispose);
+
+      await tracker.sendProgress('stopped', positionOverride: const Duration(seconds: 100));
+
+      final action = await db.getLatestWatchAction('srv:42');
+      expect(action, isNotNull);
+      expect(action!.viewOffset, 100000);
+      expect(action.shouldMarkWatched, isTrue);
+    });
   });
 
   // ============================================================
@@ -779,7 +878,7 @@ void main() {
       final player = _FakePlayer(position: const Duration(seconds: 30), duration: const Duration(seconds: 100));
       final tracker = PlaybackProgressTracker(
         client: client,
-        metadata: _meta(ratingKey: '42', serverId: 'srv'),
+        metadata: _meta(ratingKey: '42', serverId: ServerId('srv')),
         player: player,
         isOffline: false,
       );
@@ -805,7 +904,7 @@ void main() {
       final player = _FakePlayer(position: Duration.zero, duration: const Duration(seconds: 100));
       final tracker = PlaybackProgressTracker(
         client: client,
-        metadata: _meta(ratingKey: 'no-watch', serverId: 'srv'),
+        metadata: _meta(ratingKey: 'no-watch', serverId: ServerId('srv')),
         player: player,
         isOffline: false,
       );
@@ -829,7 +928,7 @@ void main() {
       final player = _FakePlayer(position: const Duration(seconds: 95), duration: const Duration(seconds: 100));
       final tracker = PlaybackProgressTracker(
         client: client,
-        metadata: _meta(ratingKey: 'scrobbler', serverId: 'srv'),
+        metadata: _meta(ratingKey: 'scrobbler', serverId: ServerId('srv')),
         player: player,
         isOffline: false,
       );
@@ -915,6 +1014,9 @@ class _ScrobblePreciseClient implements PlexClient {
   @override
   double get watchedThreshold => thresholdPercent / 100.0;
 
+  @override
+  bool get marksWatchedOnPlaybackStopped => false;
+
   bool failScrobbleFirstTime;
   int markWatchedAttempts = 0;
   int markWatchedSuccesses = 0;
@@ -927,6 +1029,7 @@ class _ScrobblePreciseClient implements PlexClient {
     int? duration,
     int? playbackTime,
     String? sessionIdentifier,
+    PlaybackReportMetadata report = const PlaybackReportMetadata.live(),
   }) async {}
 
   @override
@@ -961,6 +1064,7 @@ class _ScrobblePreciseClient implements PlexClient {
     Duration? duration,
     String? playSessionId,
     String? mediaSourceId,
+    PlaybackReportMetadata report = const PlaybackReportMetadata.live(),
   }) async {}
 
   @override

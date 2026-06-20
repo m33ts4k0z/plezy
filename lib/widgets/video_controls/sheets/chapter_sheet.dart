@@ -1,4 +1,5 @@
 import 'dart:async' show unawaited;
+import '../../../media/ids.dart';
 
 import 'package:flutter/material.dart';
 import 'package:plezy/widgets/app_icon.dart';
@@ -26,6 +27,7 @@ class ChapterSheet extends StatefulWidget {
   final List<MediaChapter> chapters;
   final bool chaptersLoaded;
   final String? serverId; // Server ID for the metadata these chapters belong to
+  final Future<void> Function(Duration position)? onSeekRequested;
   final Function(Duration position)? onSeekCompleted;
 
   const ChapterSheet({
@@ -34,6 +36,7 @@ class ChapterSheet extends StatefulWidget {
     required this.chapters,
     required this.chaptersLoaded,
     this.serverId,
+    this.onSeekRequested,
     this.onSeekCompleted,
   });
 
@@ -52,7 +55,7 @@ class _ChapterSheetState extends State<ChapterSheet> {
 
   Future<void> _handleChapterTap(Duration position) async {
     final clamped = clampSeekPosition(widget.player, position);
-    await widget.player.seek(clamped);
+    await (widget.onSeekRequested ?? widget.player.seek)(clamped);
     if (mounted) {
       widget.onSeekCompleted?.call(clamped);
       OverlaySheetController.of(context).close();
@@ -61,7 +64,7 @@ class _ChapterSheetState extends State<ChapterSheet> {
 
   /// Get the media client for chapters, or null if unavailable (offline mode).
   MediaServerClient? _tryGetClientForChapters(BuildContext context) {
-    return context.tryGetMediaClientForServer(widget.serverId);
+    return context.tryGetMediaClientForServer(serverIdOrNull(widget.serverId));
   }
 
   @override
@@ -91,7 +94,7 @@ class _ChapterSheetState extends State<ChapterSheet> {
               final isCurrentChapter = currentChapterIndex == index;
 
               final localThumbPath = widget.serverId != null && chapter.thumb != null
-                  ? DownloadStorageService.instance.getArtworkPathSync(widget.serverId!, chapter.thumb!)
+                  ? DownloadStorageService.instance.getArtworkPathSync(ServerId(widget.serverId!), chapter.thumb!)
                   : null;
 
               return FocusableListTile(

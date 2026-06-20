@@ -38,8 +38,8 @@ class OAuthProxyDialog extends StatelessWidget {
     return AlertDialog(
       title: Text(t.trackers.oauthProxy.title(service: serviceName)),
       content: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: .min,
+        crossAxisAlignment: .start,
         children: [
           Text(t.trackers.oauthProxy.body, style: theme.textTheme.bodyMedium),
           const SizedBox(height: 16),
@@ -96,7 +96,7 @@ class OAuthProxyDialog extends StatelessWidget {
         DialogActionButton(
           onPressed: () {
             onCancel();
-            Navigator.of(context, rootNavigator: true).pop();
+            Navigator.of(context).pop();
           },
           label: t.common.cancel,
         ),

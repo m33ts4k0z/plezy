@@ -4,8 +4,8 @@ import 'dart:io' show Platform, ProcessInfo;
 import 'package:flutter/scheduler.dart';
 
 import '../../../../mpv/mpv.dart';
-import '../../../../mpv/player/platform/player_android.dart';
 import '../../../../utils/app_logger.dart';
+import '../../../../utils/codec_utils.dart';
 import 'performance_stats.dart';
 
 /// Service that polls player properties and provides performance stats via a stream.
@@ -40,6 +40,7 @@ class PerformanceStatsService {
   // Values: 'exoplayer', 'mpv', or 'unknown'
   String _runtimePlayerType = 'unknown';
   StreamSubscription<void>? _backendSwitchedSubscription;
+  bool _fetchInProgress = false;
 
   PerformanceStatsService(this.player);
 
@@ -50,13 +51,12 @@ class PerformanceStatsService {
   void startPolling() {
     _pollingTimer?.cancel();
 
-    // Listen for backend switches on Android (ExoPlayer -> MPV fallback)
-    if (player is PlayerAndroid) {
-      _backendSwitchedSubscription?.cancel();
-      _backendSwitchedSubscription = player.streams.backendSwitched.listen((_) {
-        _updateRuntimePlayerType();
-      });
-    }
+    // Listen for backend switches (only the Android ExoPlayer -> MPV
+    // fallback ever emits; the stream is silent elsewhere).
+    _backendSwitchedSubscription?.cancel();
+    _backendSwitchedSubscription = player.streams.backendSwitched.listen((_) {
+      _updateRuntimePlayerType();
+    });
 
     // Start FPS tracking
     _startFpsTracking();
@@ -67,12 +67,8 @@ class PerformanceStatsService {
 
   /// Update the runtime player type by querying the native layer.
   Future<void> _updateRuntimePlayerType() async {
-    if (player is PlayerAndroid) {
-      _runtimePlayerType = await (player as PlayerAndroid).getPlayerType();
-      appLogger.d('Performance stats: runtime player type updated to $_runtimePlayerType');
-    } else {
-      _runtimePlayerType = 'mpv'; // Non-Android always uses MPV
-    }
+    _runtimePlayerType = await player.runtimePlayerType();
+    appLogger.d('Performance stats: runtime player type updated to $_runtimePlayerType');
   }
 
   /// Start tracking UI frame rate.
@@ -109,30 +105,33 @@ class PerformanceStatsService {
 
   /// Fetch all performance stats from the player.
   Future<void> _fetchStats() async {
+    if (_fetchInProgress) return;
+    _fetchInProgress = true;
     try {
       // Ensure we know the runtime type on first fetch
       if (_runtimePlayerType == 'unknown') {
         await _updateRuntimePlayerType();
       }
 
-      if (player is PlayerAndroid) {
-        // For Android (ExoPlayer or MPV fallback), always use getStats()
-        // The native side returns appropriate stats based on which backend is active
+      if (player.providesNativeStats) {
+        // Android (ExoPlayer or MPV fallback): the native side returns
+        // appropriate stats based on which backend is active.
         await _fetchAndroidStats();
       } else {
-        // For non-Android platforms, use MPV property queries
+        // For mpv-channel players, use MPV property queries
         await _fetchMpvStats();
       }
     } catch (e) {
       appLogger.w('Failed to fetch performance stats', error: e);
+    } finally {
+      _fetchInProgress = false;
     }
   }
 
   /// Fetch stats from Android player (ExoPlayer or MPV fallback).
   /// The native side returns appropriate stats based on the active backend.
   Future<void> _fetchAndroidStats() async {
-    final androidPlayer = player as PlayerAndroid;
-    final statsMap = await androidPlayer.getStats();
+    final statsMap = await player.getStats();
     final playerType = statsMap['playerType'] as String? ?? 'unknown';
 
     // Get app memory usage
@@ -158,6 +157,7 @@ class PerformanceStatsService {
         audioBitrate: _parseInt(statsMap['audio-bitrate'] as String?),
         avsyncChange: _parseDouble(statsMap['total-avsync-change'] as String?),
         cacheUsed: _parseInt(statsMap['cache-used'] as String?),
+        cacheLimit: _parseInt(statsMap['demuxer-max-bytes'] as String?),
         cacheSpeed: _parseDouble(statsMap['cache-speed'] as String?),
         displayFps: _parseDouble(statsMap['display-fps'] as String?),
         frameDropCount: _parseInt(statsMap['frame-drop-count'] as String?),
@@ -195,7 +195,7 @@ class PerformanceStatsService {
         // Audio metrics
         audioCodec: _formatCodecName(statsMap['audioCodec'] as String?),
         audioSamplerate: statsMap['audioSampleRate'] as int?,
-        audioChannels: _formatChannels(statsMap['audioChannels'] as int?),
+        audioChannels: CodecUtils.formatAudioChannels(statsMap['audioChannels'] as int?),
         audioBitrate: statsMap['audioBitrate'] as int?,
         audioDecoderName: statsMap['audioDecoderName'] as String?,
         // Tunneling
@@ -213,24 +213,15 @@ class PerformanceStatsService {
         dvRpuOutputTooSmall: (statsMap['dvRpuOutputTooSmall'] as num?)?.toInt(),
         dvAvgRpuConversionUs: (statsMap['dvAvgRpuConversionUs'] as num?)?.toInt(),
         dvAvgSampleProcessingUs: (statsMap['dvAvgSampleProcessingUs'] as num?)?.toInt(),
+        dvSourceProfile: (statsMap['dvSourceProfile'] as num?)?.toInt(),
+        dvPlaybackPath: statsMap['dvPlaybackPath'] as String?,
+        dvPlaybackReason: statsMap['dvPlaybackReason'] as String?,
         // App metrics
         appMemoryBytes: appMemory,
         uiFps: _currentUiFps,
       );
       _statsController.add(stats);
     }
-  }
-
-  /// Format channel count to string (e.g., "2" -> "Stereo", "6" -> "5.1")
-  String? _formatChannels(int? channels) {
-    if (channels == null) return null;
-    return switch (channels) {
-      1 => 'Mono',
-      2 => 'Stereo',
-      6 => '5.1',
-      8 => '7.1',
-      _ => '$channels ch',
-    };
   }
 
   /// Fetch stats from MPV via property queries.
@@ -249,10 +240,12 @@ class PerformanceStatsService {
       player.getProperty('audio-params/hr-channels'), // 9
       player.getProperty('audio-bitrate'), // 10
       player.getProperty('total-avsync-change'), // 11
-      player.getProperty('cache-speed'), // 12
-      player.getProperty('frame-drop-count'), // 13
-      player.getProperty('decoder-frame-drop-count'), // 14
-      player.getProperty('demuxer-cache-duration'), // 15
+      player.getProperty('cache-used'), // 12
+      player.getProperty('demuxer-max-bytes'), // 13
+      player.getProperty('cache-speed'), // 14
+      player.getProperty('frame-drop-count'), // 15
+      player.getProperty('decoder-frame-drop-count'), // 16
+      player.getProperty('demuxer-cache-duration'), // 17
     ]);
 
     final hasVideo = results[1] != null;
@@ -302,10 +295,12 @@ class PerformanceStatsService {
       audioChannels: results[9],
       audioBitrate: _parseInt(results[10]),
       avsyncChange: _parseDouble(results[11]),
-      cacheSpeed: _parseDouble(results[12]),
-      frameDropCount: _parseInt(results[13]),
-      decoderFrameDropCount: _parseInt(results[14]),
-      cacheDuration: _parseDouble(results[15]),
+      cacheUsed: _parseInt(results[12]),
+      cacheLimit: _parseInt(results[13]),
+      cacheSpeed: _parseDouble(results[14]),
+      frameDropCount: _parseInt(results[15]),
+      decoderFrameDropCount: _parseInt(results[16]),
+      cacheDuration: _parseDouble(results[17]),
       // Video-dependent properties
       displayFps: _parseDouble(videoResults?.first),
       pixelformat: videoResults?[1],

@@ -1,4 +1,5 @@
 import 'dart:async';
+import '../media/ids.dart';
 
 import '../mpv/mpv.dart';
 
@@ -23,7 +24,10 @@ import '../utils/watch_state_notifier.dart';
 /// crosses the client's [watchedThreshold] (per-server pref on Plex, fixed
 /// 90% on Jellyfin).
 class PlaybackProgressTracker {
-  /// Server client for online progress updates (null when offline).
+  /// Server client for online progress updates (null when offline). Pinned
+  /// for the tracker's lifetime — one playback session against the server
+  /// that started it; if that server is removed mid-playback, reports fail
+  /// and are queued/dropped rather than re-routed.
   final MediaServerClient? client;
 
   /// Metadata of the media being played
@@ -37,6 +41,10 @@ class PlaybackProgressTracker {
 
   /// Service for queuing offline progress updates
   final OfflineWatchSyncService? offlineWatchService;
+
+  /// Queue the latest progress locally if online reporting fails. Used for
+  /// downloaded/local playback where playback can continue without a server.
+  final bool queueOnOnlineFailure;
 
   final String? playMethod;
 
@@ -79,6 +87,8 @@ class PlaybackProgressTracker {
   /// Whether the final stopped progress event was already emitted locally.
   bool _stopProgressNotified = false;
 
+  Future<void>? _stoppedProgressFuture;
+
   Duration? _lastProgressNotifiedPosition;
 
   static const Duration _progressNotifyDelta = Duration(seconds: 30);
@@ -91,6 +101,7 @@ class PlaybackProgressTracker {
     required this.player,
     this.isOffline = false,
     this.offlineWatchService,
+    this.queueOnOnlineFailure = false,
     this.playMethod,
     this.playSessionId,
     this.mediaInfo,
@@ -162,16 +173,33 @@ class PlaybackProgressTracker {
     appLogger.d('Stopped progress tracking');
   }
 
-  /// [state] can be 'playing', 'paused', or 'stopped'
-  Future<void> sendProgress(String state) async {
-    await _sendProgress(state);
+  /// [state] can be 'playing', 'paused', or 'stopped'.
+  Future<void> sendProgress(String state, {Duration? positionOverride}) async {
+    await _sendProgress(state, positionOverride: positionOverride);
   }
 
-  Future<void> _sendProgress(String state) async {
+  Future<void> sendStoppedProgressOnce({Duration? positionOverride}) {
+    final existing = _stoppedProgressFuture;
+    if (existing != null) return existing;
+    final future = sendProgress('stopped', positionOverride: positionOverride);
+    _stoppedProgressFuture = future;
+    return future;
+  }
+
+  void resumeAfterStoppedReport() {
+    _stoppedProgressFuture = null;
+    _reportSession?.resetAfterStop();
+  }
+
+  Future<void> _sendProgress(String state, {Duration? positionOverride}) async {
     if (_terminated) return;
+    Duration? attemptedPosition;
+    Duration? attemptedDuration;
     try {
-      final position = player.state.position;
       final duration = player.state.duration;
+      final position = _clampPosition(positionOverride ?? player.state.position, duration);
+      attemptedPosition = position;
+      attemptedDuration = duration;
 
       // Don't send progress if no duration (not ready)
       if (duration.inMilliseconds == 0) {
@@ -212,6 +240,7 @@ class PlaybackProgressTracker {
                   'skipping next $_ticksToSkip tick(s)',
                   error: e,
                 );
+                unawaited(_queueOnlineFailureProgress(position, duration));
               }),
         );
       }
@@ -226,6 +255,10 @@ class PlaybackProgressTracker {
           'skipping next $_ticksToSkip tick(s)',
           error: e,
         );
+        await _queueOnlineFailureProgress(
+          attemptedPosition ?? player.state.position,
+          attemptedDuration ?? player.state.duration,
+        );
       } else {
         appLogger.d('Failed to send progress update (non-critical)', error: e);
       }
@@ -238,6 +271,23 @@ class PlaybackProgressTracker {
     appLogger.i('Server terminated playback session: ${reason.code} ${reason.reason}');
     stopTracking();
     onTerminated?.call(reason);
+  }
+
+  Duration _clampPosition(Duration position, Duration duration) {
+    if (duration.inMilliseconds <= 0) return position;
+    if (position.isNegative) return Duration.zero;
+    if (position > duration) return duration;
+    return position;
+  }
+
+  Future<void> _queueOnlineFailureProgress(Duration position, Duration duration) async {
+    if (!queueOnOnlineFailure || offlineWatchService == null) return;
+    if (duration.inMilliseconds == 0) return;
+    try {
+      await _sendOfflineProgress(_clampPosition(position, duration), duration);
+    } catch (e) {
+      appLogger.d('Failed to queue fallback progress after online report failure', error: e);
+    }
   }
 
   void _resetBackoff() {
@@ -306,9 +356,12 @@ class PlaybackProgressTracker {
       if (percent >= threshold) {
         _scrobbled = true;
         try {
-          // The neutral markWatched(MediaItem) call emits the watched event
-          // through WatchStateNotifier itself, so no extra notify here.
-          await c.markWatched(metadata);
+          // Backends that mark the item played from the playback-stopped report
+          // (Jellyfin) only emit the local watch event here — an explicit
+          // markWatched would double-scrobble via the Trakt plugin (#1287).
+          // Plex still issues the server call. Either path emits the watched
+          // event through WatchStateNotifier, so no extra notify is needed.
+          await c.markWatchedFromPlaybackStop(metadata);
           appLogger.d(
             'Scrobbled ${metadata.id} (${(percent * 100).toStringAsFixed(0)}% >= ${(threshold * 100).toStringAsFixed(0)}%)',
           );
@@ -416,7 +469,7 @@ class PlaybackProgressTracker {
     }
 
     await offlineWatchService!.queueProgressUpdate(
-      serverId: serverId,
+      serverId: ServerId(serverId),
       itemId: metadata.id,
       viewOffset: position.inMilliseconds,
       duration: duration.inMilliseconds,

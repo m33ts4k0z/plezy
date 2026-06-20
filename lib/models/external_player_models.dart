@@ -83,7 +83,7 @@ Future<bool> _launchWithUrl(String url) {
   return launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
 }
 
-Future<bool> _launchAndroidIntent(String url, {required String package}) async {
+Future<bool> _launchAndroidIntent(String url, {required String package, bool fallbackToUrl = true}) async {
   final intentUri = Uri.parse(
     'intent:$url#Intent;'
     'action=android.intent.action.VIEW;'
@@ -94,8 +94,15 @@ Future<bool> _launchAndroidIntent(String url, {required String package}) async {
   try {
     return await launchUrl(intentUri, mode: LaunchMode.externalApplication);
   } catch (_) {
-    return _launchWithUrl(url);
+    return fallbackToUrl ? _launchWithUrl(url) : false;
   }
+}
+
+Future<bool> _launchAndroidIntentCandidates(String url, Iterable<String> packages) async {
+  for (final package in packages) {
+    if (await _launchAndroidIntent(url, package: package, fallbackToUrl: false)) return true;
+  }
+  return _launchWithUrl(url);
 }
 
 Future<bool> _launchUrlScheme(String scheme, String url) async {
@@ -128,6 +135,51 @@ Future<bool> _launchCommand(String command, String url) async {
   }
 }
 
+Future<bool> _launchCommandCandidates(Iterable<String> commands, String url) async {
+  final commandList = commands.toList(growable: false);
+  Object? lastError;
+  for (final command in commandList) {
+    try {
+      final result = await Process.start(command, [url], mode: ProcessStartMode.detached);
+      appLogger.d('Launched $command with PID: ${result.pid}');
+      return true;
+    } catch (e) {
+      lastError = e;
+      appLogger.d('Failed to launch $command', error: e);
+    }
+  }
+
+  appLogger.w('Failed to launch any of: ${commandList.join(', ')}', error: lastError);
+  return false;
+}
+
+List<String> _windowsVlcCommandCandidates(Map<String, String> environment) {
+  final candidates = <String>['vlc'];
+
+  void addInstallPath(String? programFilesDir) {
+    final trimmed = programFilesDir?.trim();
+    if (trimmed == null || trimmed.isEmpty) return;
+    final root = trimmed.replaceFirst(RegExp(r'[\\/]+$'), '');
+    candidates.add('$root\\VideoLAN\\VLC\\vlc.exe');
+  }
+
+  addInstallPath(environment['ProgramW6432']);
+  addInstallPath(environment['ProgramFiles']);
+  addInstallPath(environment['ProgramFiles(x86)']);
+  addInstallPath(r'C:\Program Files');
+  addInstallPath(r'C:\Program Files (x86)');
+
+  final seen = <String>{};
+  return [
+    for (final candidate in candidates)
+      if (seen.add(candidate.toLowerCase())) candidate,
+  ];
+}
+
+Future<bool> _launchWindowsVlc(String url) {
+  return _launchCommandCandidates(_windowsVlcCommandCandidates(Platform.environment), url);
+}
+
 Future<bool> _launchCustom(String value, String url, CustomPlayerType type) async {
   if (type == CustomPlayerType.urlScheme) {
     return _launchUrlScheme(value, url);
@@ -147,6 +199,27 @@ Future<bool> _launchCustom(String value, String url, CustomPlayerType type) asyn
 class KnownPlayers {
   static final systemDefault = ExternalPlayer(id: 'system_default', name: 'System Default', launch: _launchWithUrl);
 
+  static const _androidPackageMap = <String, List<String>>{
+    'vlc': ['org.videolan.vlc'],
+    'mpv': ['is.xyz.mpv'],
+    'mx_player': ['com.mxtech.videoplayer.ad', 'com.mxtech.videoplayer.pro'],
+    'just_player': ['com.brouken.player'],
+  };
+
+  static List<String> _androidPackageCandidatesForId(String id) {
+    return _androidPackageMap[id] ?? const [];
+  }
+
+  static List<String> androidPackageCandidates(ExternalPlayer player) {
+    final knownPackages = _androidPackageCandidatesForId(player.id);
+    if (knownPackages.isNotEmpty) return knownPackages;
+    if (player.isCustom && player.customType == CustomPlayerType.command) {
+      final package = player.customValue?.trim();
+      return package == null || package.isEmpty ? const [] : [package];
+    }
+    return const [];
+  }
+
   static final _allPlayers = <ExternalPlayer>[
     systemDefault,
     ExternalPlayer(
@@ -155,9 +228,10 @@ class KnownPlayers {
       iconAsset: 'assets/player_icons/vlc.svg',
       isAvailable: Platform.isAndroid || Platform.isIOS || Platform.isMacOS || Platform.isLinux || Platform.isWindows,
       launch: (url) {
-        if (Platform.isAndroid) return _launchAndroidIntent(url, package: 'org.videolan.vlc');
+        if (Platform.isAndroid) return _launchAndroidIntentCandidates(url, _androidPackageCandidatesForId('vlc'));
         if (Platform.isIOS) return _launchUrlScheme('vlc://', url);
         if (Platform.isMacOS) return _launchMacApp('VLC', url);
+        if (Platform.isWindows) return _launchWindowsVlc(url);
         return _launchCommand('vlc', url);
       },
     ),
@@ -167,7 +241,7 @@ class KnownPlayers {
       iconAsset: 'assets/player_icons/mpv.svg',
       isAvailable: Platform.isAndroid || Platform.isMacOS || Platform.isLinux || Platform.isWindows,
       launch: (url) {
-        if (Platform.isAndroid) return _launchAndroidIntent(url, package: 'is.xyz.mpv');
+        if (Platform.isAndroid) return _launchAndroidIntentCandidates(url, _androidPackageCandidatesForId('mpv'));
         return _launchCommand('mpv', url);
       },
     ),
@@ -183,14 +257,14 @@ class KnownPlayers {
       name: 'MX Player',
       iconAsset: 'assets/player_icons/mx_player.svg',
       isAvailable: Platform.isAndroid,
-      launch: (url) => _launchAndroidIntent(url, package: 'com.mxtech.videoplayer.ad'),
+      launch: (url) => _launchAndroidIntentCandidates(url, _androidPackageCandidatesForId('mx_player')),
     ),
     ExternalPlayer(
       id: 'just_player',
       name: 'Just Player',
       iconAsset: 'assets/player_icons/just_player.png',
       isAvailable: Platform.isAndroid,
-      launch: (url) => _launchAndroidIntent(url, package: 'com.brouken.player'),
+      launch: (url) => _launchAndroidIntentCandidates(url, _androidPackageCandidatesForId('just_player')),
     ),
     ExternalPlayer(
       id: 'infuse',

@@ -4,6 +4,7 @@ import '../../i18n/strings.g.dart';
 import '../../models/hotkey_model.dart';
 import '../../services/keyboard_shortcuts_service.dart';
 import '../../services/shader_service.dart';
+import '../../utils/dialogs.dart';
 import '../../utils/snackbar_helper.dart';
 import '../../focus/focusable_button.dart';
 import '../../widgets/focused_scroll_scaffold.dart';
@@ -28,9 +29,9 @@ class KeyboardShortcutsScreen extends StatelessWidget {
           slivers: [
             SliverToBoxAdapter(
               child: Padding(
-                padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+                padding: const EdgeInsets.only(left: 16, top: 16, right: 16),
                 child: Align(
-                  alignment: Alignment.centerRight,
+                  alignment: .centerRight,
                   child: FocusableButton(
                     onPressed: () => _resetShortcuts(context),
                     child: TextButton(onPressed: () => _resetShortcuts(context), child: Text(t.common.reset)),
@@ -79,7 +80,7 @@ class KeyboardShortcutsScreen extends StatelessWidget {
   }
 
   void _editHotkey(BuildContext screenContext, String action, HotKey currentHotkey) {
-    showDialog(
+    showScopedDialog<void>(
       context: screenContext,
       builder: (BuildContext context) {
         return HotKeyRecorderWidget(

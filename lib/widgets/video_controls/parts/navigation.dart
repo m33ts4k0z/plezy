@@ -11,7 +11,7 @@ extension _PlexVideoControlsNavigationMethods on _PlexVideoControlsState {
 
     return Listener(
       behavior: HitTestBehavior.translucent,
-      onPointerDown: (_) => _restartHideTimerIfPlaying(),
+      onPointerDown: (_) => _restartHideTimerForCurrentPlaybackState(),
       child: DesktopVideoControls(
         key: _desktopControlsKey,
         player: widget.player,
@@ -28,9 +28,12 @@ extension _PlexVideoControlsNavigationMethods on _PlexVideoControlsState {
         onSeekForward: () => unawaited(_seekByTime(forward: true)),
         onSeek: _throttledSeek,
         onSeekEnd: _finalizeSeek,
+        onScrubStart: _holdTimelineScrub,
+        onScrubEnd: _releaseTimelineScrub,
+        onSeekRequested: widget.onSeekRequested,
         getReplayIcon: getReplayIcon,
         getForwardIcon: getForwardIcon,
-        onFocusActivity: _restartHideTimerIfPlaying,
+        onFocusActivity: _restartHideTimerForCurrentPlaybackState,
         onHideControls: _hideControlsFromKeyboard,
         trackControlsState: trackControlsState,
         onBack: widget.onBack,
@@ -42,21 +45,17 @@ extension _PlexVideoControlsNavigationMethods on _PlexVideoControlsState {
         streamStartEpoch: widget.streamStartEpoch,
         currentPositionEpoch: widget.currentPositionEpoch,
         onLiveSeek: widget.onLiveSeek,
+        onLiveSeekBy: widget.onLiveSeekBy,
         onJumpToLive: widget.onJumpToLive,
         useDpadNavigation: useDpad,
         serverId: widget.metadata.serverId,
         showQueueTab: playbackState.isQueueActive,
         onQueueItemSelected: playbackState.isQueueActive ? _onQueueItemSelected : null,
-        onCancelAutoHide: () => _hideTimer?.cancel(),
+        onCancelAutoHide: widget.chromeController.cancelAutoHide,
         onStartAutoHide: _startHideTimer,
         onSeekCompleted: widget.onSeekCompleted,
         onContentStripVisibilityChanged: (visible) {
-          _setControlsState(() => _isContentStripVisible = visible);
-          if (visible) {
-            _hideTimer?.cancel();
-          } else {
-            _restartHideTimerIfPlaying();
-          }
+          widget.chromeController.setContentStripVisible(visible);
         },
       ),
     );
@@ -79,7 +78,7 @@ extension _PlexVideoControlsNavigationMethods on _PlexVideoControlsState {
     if (serverId == null) return;
 
     try {
-      final client = context.getPlexClientForServer(serverId);
+      final client = context.getPlexClientForServer(ServerId(serverId));
       final token = client.config.token;
       if (token == null) return;
 
@@ -124,7 +123,7 @@ extension _PlexVideoControlsNavigationMethods on _PlexVideoControlsState {
 
       await widget.player.addSubtitleTrack(
         uri: newUrl,
-        title: newTrack.displayTitle ?? newTrack.language ?? 'Downloaded',
+        title: newTrack.displayTitle ?? newTrack.language ?? t.videoControls.downloadedSubtitle,
         language: newTrack.languageCode,
         select: true,
       );
@@ -138,41 +137,23 @@ extension _PlexVideoControlsNavigationMethods on _PlexVideoControlsState {
     }
   }
 
-  /// Switch version, quality preset, or audio stream ID. Any combination may
-  /// change in one invocation; unspecified values retain their current value.
-  /// Always routes through pushReplacement, preserving playback position and
-  /// the transcode session identifiers.
+  /// Request a version, quality preset, audio stream, or source subtitle reload.
+  /// The owning player screen decides how to apply it so controls do not own
+  /// player lifecycle/navigation policy.
   Future<void> _switchVersionAndQuality({
     int? newMediaIndex,
     TranscodeQualityPreset? newPreset,
     int? newAudioStreamId,
+    int? newSubtitleStreamId,
   }) async {
-    final effectiveMediaIndex = newMediaIndex ?? widget.selectedMediaIndex;
-    final effectivePreset = newPreset ?? widget.selectedQualityPreset;
-    final effectiveAudioStreamId = newAudioStreamId ?? widget.selectedAudioStreamId;
-    final effectiveMediaSourceId = effectiveMediaIndex >= 0 && effectiveMediaIndex < widget.availableVersions.length
-        ? widget.availableVersions[effectiveMediaIndex].id
-        : widget.selectedMediaSourceId;
-
-    final isVersionChange = effectiveMediaIndex != widget.selectedMediaIndex;
-    final isPresetChange = effectivePreset != widget.selectedQualityPreset;
-    final isAudioChange = effectiveAudioStreamId != widget.selectedAudioStreamId;
-    if (!isVersionChange && !isPresetChange && !isAudioChange) {
-      return;
-    }
-
+    final onPlaybackSourceChanged = widget.onPlaybackSourceChanged;
+    if (onPlaybackSourceChanged == null) return;
     try {
-      // Seamless swap: reload media on the same player instance, on the same
-      // screen, with the carried-over track selection. No pushReplacement,
-      // no dispose, no orientation flicker. The swap method handles the
-      // version-preference persistence, session id rotation, progress
-      // tracker re-init, and track re-selection internally.
-      final videoPlayerState = context.findAncestorStateOfType<VideoPlayerScreenState>();
-      if (videoPlayerState == null) return;
-      await videoPlayerState.swapMediaForQualityChange(
-        newMediaIndex: isVersionChange ? effectiveMediaIndex : null,
-        newPreset: isPresetChange ? effectivePreset : null,
-        newAudioStreamId: isAudioChange ? effectiveAudioStreamId : null,
+      await onPlaybackSourceChanged(
+        newMediaIndex: newMediaIndex,
+        newPreset: newPreset,
+        newAudioStreamId: newAudioStreamId,
+        newSubtitleStreamId: newSubtitleStreamId,
       );
     } catch (e) {
       if (mounted) {

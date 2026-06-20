@@ -1,4 +1,5 @@
 import 'dart:convert';
+import '../media/ids.dart';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/painting.dart';
@@ -10,9 +11,11 @@ import '../i18n/strings.g.dart';
 import '../models/mpv_config_models.dart';
 import '../models/external_player_models.dart';
 import 'base_shared_preferences_service.dart';
+import 'device_performance.dart';
 export 'base_shared_preferences_service.dart'
     show Pref, BoolPref, IntPref, DoublePref, StringPref, NullableStringPref, StringListPref, EnumPref, JsonPref;
 import '../models/transcode_quality_preset.dart';
+import '../navigation/navigation_tabs.dart';
 import '../utils/platform_detector.dart';
 import 'trackers/tracker_constants.dart';
 
@@ -35,7 +38,16 @@ enum ViewMode { grid, list }
 
 enum EpisodePosterMode { seriesPoster, seasonPoster, episodeThumbnail }
 
+enum ContinueWatchingAction { play, details }
+
+enum EpisodeAction { play, details }
+
 enum SubAssOverride { no, yes, scale, force, strip }
+
+/// Resolution ASS/image subtitles are rasterized at on the avfoundation VO
+/// (iOS/tvOS): the display's, or the video's (much cheaper on 4K displays;
+/// subs can't carry more detail than the video they're typeset against).
+enum SubtitleRenderResolution { screen, video }
 
 enum DvConversionModePreference { auto, disabled, dv81, hevcStrip }
 
@@ -148,6 +160,34 @@ class _AutoPipPref extends Pref<bool> {
   Future<void> writeTo(BaseSharedPreferencesService svc, bool value) => svc.writeBool(key, value);
 }
 
+class _UseExternalPlayerPref extends Pref<bool> {
+  const _UseExternalPlayerPref() : super('use_external_player');
+
+  @override
+  bool readFrom(BaseSharedPreferencesService svc) {
+    if (!PlatformDetector.supportsExternalPlayers()) return false;
+    return svc.prefs.getBool(key) ?? false;
+  }
+
+  @override
+  Future<void> writeTo(BaseSharedPreferencesService svc, bool value) => svc.writeBool(key, value);
+}
+
+/// Experimental Dolby passthrough. Keep opt-in everywhere, including Apple TV,
+/// until the AVFoundation EAC3 path is verified across real receiver setups.
+class _AudioPassthroughPref extends Pref<bool> {
+  const _AudioPassthroughPref() : super('audio_passthrough');
+
+  @override
+  bool readFrom(BaseSharedPreferencesService svc) {
+    // TODO: Default Apple TV to on once EAC3 passthrough is hardware-verified.
+    return svc.prefs.getBool(key) ?? false;
+  }
+
+  @override
+  Future<void> writeTo(BaseSharedPreferencesService svc, bool value) => svc.writeBool(key, value);
+}
+
 String? _trimEmptyAsNull(String? v) {
   final t = v?.trim();
   return (t == null || t.isEmpty) ? null : t;
@@ -220,6 +260,9 @@ Map<String, String> _defaultKeyboardShortcuts() => {
   'speed_increase': 'Plus',
   'speed_decrease': 'Minus',
   'speed_reset': 'R',
+  'zoom_in': 'Alt+Plus',
+  'zoom_out': 'Alt+Minus',
+  'zoom_reset': 'Alt+Backspace',
   'sub_seek_next': 'Ctrl+Right',
   'sub_seek_prev': 'Ctrl+Left',
   'screenshot': 'Ctrl+S',
@@ -245,6 +288,9 @@ Map<String, HotKey> _defaultKeyboardHotkeys() => {
   'speed_increase': const HotKey(key: PhysicalKeyboardKey.equal),
   'speed_decrease': const HotKey(key: PhysicalKeyboardKey.minus),
   'speed_reset': const HotKey(key: PhysicalKeyboardKey.keyR),
+  'zoom_in': const HotKey(key: PhysicalKeyboardKey.equal, modifiers: [HotKeyModifier.alt]),
+  'zoom_out': const HotKey(key: PhysicalKeyboardKey.minus, modifiers: [HotKeyModifier.alt]),
+  'zoom_reset': const HotKey(key: PhysicalKeyboardKey.backspace, modifiers: [HotKeyModifier.alt]),
   'sub_seek_next': const HotKey(key: PhysicalKeyboardKey.arrowRight, modifiers: [HotKeyModifier.control]),
   'sub_seek_prev': const HotKey(key: PhysicalKeyboardKey.arrowLeft, modifiers: [HotKeyModifier.control]),
   'shader_toggle': const HotKey(key: PhysicalKeyboardKey.keyG),
@@ -282,6 +328,8 @@ class SettingsService extends BaseSharedPreferencesService {
   static const seekTimeLarge = IntPref('seek_time_large', defaultValue: 30);
   static const rewindOnResume = IntPref('rewind_on_resume');
   static const showHeroSection = BoolPref('show_hero_section', defaultValue: true);
+  static const tvFullCardLayout = BoolPref('tv_full_card_layout', defaultValue: false);
+  static const focusGlow = BoolPref('focus_glow', defaultValue: true);
   static const useGlobalHubs = BoolPref('use_global_hubs', defaultValue: true);
   static const showServerNameOnHubs = BoolPref('show_server_name_on_hubs');
   static const groupLibrariesByServer = BoolPref('group_libraries_by_server', defaultValue: true);
@@ -301,6 +349,11 @@ class SettingsService extends BaseSharedPreferencesService {
     'sub_ass_override',
     values: SubAssOverride.values,
     defaultValue: SubAssOverride.no,
+  );
+  static const subtitleRenderResolution = EnumPref<SubtitleRenderResolution>(
+    'subtitle_render_resolution',
+    values: SubtitleRenderResolution.values,
+    defaultValue: SubtitleRenderResolution.screen,
   );
   static const subtitleBold = BoolPref('subtitle_bold');
   static const subtitleItalic = BoolPref('subtitle_italic');
@@ -359,6 +412,11 @@ class SettingsService extends BaseSharedPreferencesService {
   );
   static const autoPlayNextEpisode = BoolPref('auto_play_next_episode', defaultValue: true);
   static const useExoPlayer = BoolPref('use_exoplayer', defaultValue: true);
+  static const startupSection = EnumPref<NavigationTabId>(
+    'startup_section',
+    values: NavigationTabId.values,
+    defaultValue: NavigationTabId.discover,
+  );
   static const alwaysKeepSidebarOpen = BoolPref('always_keep_sidebar_open');
   static const showUnwatchedCount = BoolPref('show_unwatched_count', defaultValue: true);
   static const showEpisodeNumberOnCards = BoolPref('show_episode_number_on_cards', defaultValue: true);
@@ -367,10 +425,15 @@ class SettingsService extends BaseSharedPreferencesService {
   static const showNavBarLabels = BoolPref('show_nav_bar_labels', defaultValue: true);
   static const globalShaderPreset = StringPref('global_shader_preset', defaultValue: 'none');
   static const requireProfileSelectionOnOpen = BoolPref('require_profile_selection_on_open');
-  static const useExternalPlayer = BoolPref('use_external_player');
+  static const useExternalPlayer = _UseExternalPlayerPref();
   static const forceTvMode = BoolPref('force_tv_mode');
+  static const visualEffects = EnumPref<VisualEffectsSetting>(
+    'visual_effects',
+    values: VisualEffectsSetting.values,
+    defaultValue: VisualEffectsSetting.auto,
+  );
   static const ambientLighting = BoolPref('ambient_lighting');
-  static const audioPassthrough = BoolPref('audio_passthrough');
+  static const audioPassthrough = _AudioPassthroughPref();
   static const audioNormalization = BoolPref('audio_normalization');
   static const liveTvDefaultFavorites = BoolPref('live_tv_default_favorites');
   static const matchRefreshRate = BoolPref('match_refresh_rate');
@@ -395,10 +458,11 @@ class SettingsService extends BaseSharedPreferencesService {
   static final defaultBoxFitMode = IntPref('default_box_fit_mode', transform: (v) => v.clamp(0, 2));
   static final displaySwitchDelay = IntPref('display_switch_delay', transform: (v) => v.clamp(0, 10));
 
-  static final themeMode = EnumPref<ThemeMode>(
+  static ThemeMode _tvAwareThemeModeDefault() => TvDetectionService.isTVSync() ? ThemeMode.oled : ThemeMode.system;
+  static const themeMode = EnumPref<ThemeMode>(
     'theme_mode',
     values: ThemeMode.values,
-    defaultValue: TvDetectionService.isTVSync() ? ThemeMode.oled : ThemeMode.system,
+    defaultValueProvider: _tvAwareThemeModeDefault,
   );
   static final themeMusicLevel = EnumPref<ThemeMusicLevel>(
     'theme_music_level',
@@ -414,19 +478,30 @@ class SettingsService extends BaseSharedPreferencesService {
     ThemeMusicLevel.medium => 0.4,
     ThemeMusicLevel.high => 0.6,
   };
-  static final videoPlayerNavigationEnabled = BoolPref(
+  static const videoPlayerNavigationEnabled = BoolPref(
     'video_player_navigation_enabled',
-    defaultValue: TvDetectionService.isTVSync(),
+    defaultValueProvider: TvDetectionService.isTVSync,
   );
-  static final enableCompanionRemoteServer = BoolPref(
+  static const enableCompanionRemoteServer = BoolPref(
     'enable_companion_remote_server',
-    defaultValue: PlatformDetector.isDesktopOS(),
+    defaultValueProvider: PlatformDetector.isDesktopOS,
   );
   static const startInFullscreen = BoolPref('start_in_fullscreen');
+  static const exitFullscreenOnPlayerClose = BoolPref('exit_fullscreen_on_player_close');
 
   static const bufferSize = _BufferSizePref();
   static const libraryDensity = _LibraryDensityPref();
   static const episodePosterMode = _EpisodePosterModePref();
+  static const continueWatchingAction = EnumPref<ContinueWatchingAction>(
+    'continue_watching_action',
+    values: ContinueWatchingAction.values,
+    defaultValue: ContinueWatchingAction.play,
+  );
+  static const episodeAction = EnumPref<EpisodeAction>(
+    'episode_action',
+    values: EpisodeAction.values,
+    defaultValue: EpisodeAction.play,
+  );
   static const mpvConfigText = _MpvConfigTextPref();
 
   static final keyboardShortcuts = JsonPref<Map<String, String>>(
@@ -486,7 +561,7 @@ class SettingsService extends BaseSharedPreferencesService {
     decode: _decodeMpvPresets,
   );
 
-  static IntPref watchedThresholdPref(String serverId) => IntPref('watched_threshold_$serverId', defaultValue: 90);
+  static IntPref watchedThresholdPref(ServerId serverId) => IntPref('watched_threshold_$serverId', defaultValue: 90);
 
   static EnumPref<TrackerLibraryFilterMode> trackerFilterModePref(TrackerService s) => EnumPref(
     'tracker_library_filter_mode_${s.name}',
@@ -508,6 +583,15 @@ class SettingsService extends BaseSharedPreferencesService {
 
   /// Synchronous access to the singleton, or null if not yet initialized.
   static SettingsService? get instanceOrNull => _cachedInstance;
+
+  /// Synchronous access to the bootstrapped singleton.
+  static SettingsService get instance {
+    final instance = _cachedInstance;
+    if (instance == null) {
+      throw StateError('SettingsService has not been initialized. Call SettingsService.getInstance() first.');
+    }
+    return instance;
+  }
 
   /// Drop the cached singleton so the next [getInstance] call rebuilds against
   /// the current SharedPreferences state. Test-only — pair with
@@ -728,6 +812,8 @@ class SettingsService extends BaseSharedPreferencesService {
     preferredAudioCodec,
     viewMode,
     showHeroSection,
+    continueWatchingAction,
+    episodeAction,
     seekTimeSmall,
     seekTimeLarge,
     sleepTimerDuration,
@@ -762,6 +848,7 @@ class SettingsService extends BaseSharedPreferencesService {
     defaultBoxFitMode,
     autoPlayNextEpisode,
     useExoPlayer,
+    startupSection,
     alwaysKeepSidebarOpen,
     showUnwatchedCount,
     showEpisodeNumberOnCards,
@@ -772,6 +859,7 @@ class SettingsService extends BaseSharedPreferencesService {
     requireProfileSelectionOnOpen,
     useExternalPlayer,
     forceTvMode,
+    visualEffects,
     ambientLighting,
     audioPassthrough,
     audioNormalization,

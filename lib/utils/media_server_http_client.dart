@@ -208,8 +208,21 @@ class MediaServerHttpClient {
         abort: requestAbort,
       );
 
+      if (streamed.statusCode < 200 || streamed.statusCode >= 300) {
+        await streamed.stream.drain<void>();
+        throw MediaServerHttpException(
+          type: MediaServerHttpErrorType.unknown,
+          statusCode: streamed.statusCode,
+          requestUri: uri,
+          message: 'HTTP ${streamed.statusCode}',
+        );
+      }
+
       final file = File(filePath);
-      final sink = file.openWrite();
+      await file.parent.create(recursive: true);
+      final tempFile = File('$filePath.download');
+      if (await tempFile.exists()) await tempFile.delete();
+      final sink = tempFile.openWrite();
       try {
         await _withAbortOnTimeout(
           streamed.stream.pipe(sink),
@@ -220,8 +233,16 @@ class MediaServerHttpClient {
       } finally {
         await sink.close();
       }
+      if (await file.exists()) await file.delete();
+      await tempFile.rename(filePath);
     } catch (e) {
       requestAbort.abort();
+      final tempFile = File('$filePath.download');
+      if (await tempFile.exists()) {
+        try {
+          await tempFile.delete();
+        } catch (_) {}
+      }
       throw MediaServerHttpException.from(e, uri: uri);
     } finally {
       _activeAborts.remove(requestAbort);
@@ -355,9 +376,12 @@ class MediaServerHttpClient {
   Uri _buildUri(String path, Map<String, dynamic>? queryParameters) {
     final base = baseUrl.endsWith('/') ? baseUrl : '$baseUrl/';
     final cleanPath = path.startsWith('/') ? path.substring(1) : path;
-    final query = MediaServerHttpClient.encodeQueryParameters(queryParameters);
-    final full = query.isEmpty ? '$base$cleanPath' : '$base$cleanPath?$query';
-    return Uri.parse(full);
+    // [path] may already carry a query string (e.g. Plex home hub keys like
+    // `/hubs/home/recentlyAdded?type=2&sectionID=2`). Merge via [_appendQuery] —
+    // the same path used for absolute URLs in [_send] — so extra params join with
+    // `&` instead of producing a malformed double-`?` URL that corrupts the
+    // existing params (e.g. sectionID).
+    return _appendQuery(Uri.parse('$base$cleanPath'), queryParameters);
   }
 
   /// Append query parameters to an already-parsed URI.
@@ -378,7 +402,7 @@ class MediaServerHttpClient {
 
     void add(String key, Object? value) {
       if (value == null) return;
-      if (value is Iterable && value is! String) {
+      if (value is Iterable) {
         for (final item in value) {
           add(key, item);
         }

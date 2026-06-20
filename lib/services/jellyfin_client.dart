@@ -10,6 +10,7 @@ import '../media/library_filter_result.dart';
 import '../media/library_first_character.dart';
 import '../media/library_query.dart';
 import 'favorite_channels_repository.dart';
+import 'live_session_tracker.dart';
 import 'file_info_parser.dart';
 import 'library_query_translator.dart';
 import '../media/media_filter.dart';
@@ -21,10 +22,13 @@ import '../media/media_item.dart';
 import '../media/media_kind.dart';
 import '../media/media_library.dart';
 import '../media/media_playlist.dart';
+import '../media/ids.dart';
 import '../media/media_server_client.dart';
+import '../media/playback_report_metadata.dart';
 import '../media/server_capabilities.dart';
 import '../models/transcode_quality_preset.dart';
 import '../models/jellyfin/jellyfin_user_profile.dart';
+import '../models/livetv_capture_buffer.dart';
 import '../models/livetv_channel.dart';
 import '../models/livetv_dvr.dart';
 import '../models/livetv_lineup.dart';
@@ -38,12 +42,14 @@ import '../models/media_subscription.dart';
 import '../media/media_source_info.dart';
 import '../media/media_sort.dart';
 import '../utils/app_logger.dart';
+import '../utils/failover_http_client.dart';
+import '../utils/media_server_retry.dart';
+import '../utils/media_server_timeouts.dart';
 import '../utils/log_redaction_manager.dart';
 import '../utils/external_ids.dart';
 import '../utils/media_server_http_client.dart';
 import '../utils/resolution_label.dart';
 import '../utils/track_label_builder.dart';
-import '../utils/watch_state_notifier.dart';
 import '../exceptions/media_server_exceptions.dart';
 import '../i18n/strings.g.dart';
 import '../utils/jellyfin_time.dart';
@@ -69,6 +75,7 @@ part 'jellyfin_client/parts/collections.dart';
 part 'jellyfin_client/parts/file_info.dart';
 part 'jellyfin_client/parts/live_tv.dart';
 part 'jellyfin_client/parts/images_downloads.dart';
+part 'jellyfin_client/parts/metadata_edit.dart';
 
 /// [MediaServerClient] over a Jellyfin server.
 ///
@@ -86,19 +93,15 @@ class JellyfinClient
         _JellyfinCollectionMethods,
         _JellyfinFileInfoMethods,
         _JellyfinLiveTvMethods,
-        _JellyfinImageDownloadMethods
-    implements MediaServerClient, ScopedMediaServerClient, GracefullyCloseable {
-  JellyfinClient._({
-    required JellyfinConnection connection,
-    required MediaServerHttpClient http,
-    FavoriteChannelsRepository? favoritesRepository,
-  }) : _connection = connection,
-       _http = http,
-       _favoritesRepository = favoritesRepository ?? const SharedPreferencesFavoriteChannelsRepository();
+        _JellyfinImageDownloadMethods,
+        _JellyfinMetadataEditMethods
+    implements MediaServerClient, SeasonEpisodePagingClient, ScopedMediaServerClient, GracefullyCloseable {
+  JellyfinClient._({required this._connection, required this._http, FavoriteChannelsRepository? favoritesRepository})
+    : _favoritesRepository = favoritesRepository ?? const SharedPreferencesFavoriteChannelsRepository();
 
-  /// Build a fully-initialised [JellyfinClient]. The factory probes
-  /// `/System/Info/Public` to confirm the server is reachable; callers can
-  /// catch a [MediaServerHttpException] to surface a clean "unavailable" UI.
+  /// Build a fully-initialised [JellyfinClient]. Endpoint reachability is
+  /// raced before construction by onboarding/profile binding; this factory
+  /// keeps network I/O lazy so URL-builder tests don't need a live server.
   ///
   /// Sends the full `Authorization: MediaBrowser …, Token="…"` header on
   /// every request — that's what the official Jellyfin SDK (and Findroid by
@@ -109,6 +112,7 @@ class JellyfinClient
   static Future<JellyfinClient> create(
     JellyfinConnection connection, {
     FavoriteChannelsRepository? favoritesRepository,
+    void Function()? onAllEndpointsExhausted,
   }) async {
     // Register before any HTTP traffic so the very first probe URL doesn't
     // leak the token verbatim. `LogRedactionManager.redact()` also has
@@ -138,8 +142,16 @@ class JellyfinClient
       // pin to the SDK's exact wire format up-front.
       'Content-Type': 'application/json',
     };
-    final http = MediaServerHttpClient(baseUrl: connection.baseUrl, defaultHeaders: headers);
-    final client = JellyfinClient._(connection: connection, http: http, favoritesRepository: favoritesRepository);
+    late JellyfinClient client;
+    final http = FailoverHttpClient(
+      baseUrl: connection.baseUrl,
+      defaultHeaders: headers,
+      logLabel: 'Jellyfin',
+      prioritizedEndpoints: connection.baseUrls,
+      onEndpointSwitch: (newBaseUrl, {required persist}) => client._handleEndpointSwitch(newBaseUrl, persist: persist),
+      onAllEndpointsExhausted: onAllEndpointsExhausted,
+    );
+    client = JellyfinClient._(connection: connection, http: http, favoritesRepository: favoritesRepository);
     return client;
   }
 
@@ -150,13 +162,20 @@ class JellyfinClient
     required JellyfinConnection connection,
     required http.Client httpClient,
     FavoriteChannelsRepository? favoritesRepository,
+    void Function()? onAllEndpointsExhausted,
   }) {
-    final mediaHttp = MediaServerHttpClient(
+    late JellyfinClient client;
+    final mediaHttp = FailoverHttpClient(
       baseUrl: connection.baseUrl,
       defaultHeaders: {'X-Emby-Token': connection.accessToken, 'Accept': 'application/json'},
+      logLabel: 'Jellyfin',
+      prioritizedEndpoints: connection.baseUrls,
+      onEndpointSwitch: (newBaseUrl, {required persist}) => client._handleEndpointSwitch(newBaseUrl, persist: persist),
+      onAllEndpointsExhausted: onAllEndpointsExhausted,
       client: httpClient,
     );
-    return JellyfinClient._(connection: connection, http: mediaHttp, favoritesRepository: favoritesRepository);
+    client = JellyfinClient._(connection: connection, http: mediaHttp, favoritesRepository: favoritesRepository);
+    return client;
   }
 
   /// Mutable so [isHealthy] can refresh `Policy.IsAdministrator` from the
@@ -166,7 +185,7 @@ class JellyfinClient
   @override
   JellyfinConnection get connection => _connection;
   @override
-  final MediaServerHttpClient _http;
+  final FailoverHttpClient _http;
   final FavoriteChannelsRepository _favoritesRepository;
   bool _offlineMode = false;
 
@@ -174,6 +193,20 @@ class JellyfinClient
   /// (currently only on admin-status change). [MultiServerManager] uses this
   /// to re-broadcast status so admin-gated UI rebuilds.
   FutureOr<void> Function(JellyfinConnection connection)? onConnectionUpdated;
+
+  Future<void> _handleEndpointSwitch(String newBaseUrl, {required bool persist}) async {
+    final changed = connection.baseUrl != newBaseUrl;
+    if (changed) {
+      appLogger.i('Applying Jellyfin endpoint switch', error: newBaseUrl);
+      _http.baseUrl = newBaseUrl;
+      _connection = _connection.copyWith(baseUrl: newBaseUrl);
+      LogRedactionManager.registerServer(newBaseUrl, connection.accessToken);
+    }
+
+    if (persist) {
+      await onConnectionUpdated?.call(_connection);
+    }
+  }
 
   /// Read-only view of the headers attached to every outgoing request.
   /// Test-only entry point for asserting the SDK-style `MediaBrowser`
@@ -201,7 +234,7 @@ class JellyfinClient
       items.map(_mapItem).whereType<MediaItem>().toList();
 
   @override
-  String get serverId => connection.serverMachineId;
+  ServerId get serverId => ServerId(connection.serverMachineId);
 
   @override
   String get scopedServerId => connection.id;
@@ -219,6 +252,13 @@ class JellyfinClient
   /// Plex's default of 90%.
   @override
   double get watchedThreshold => 0.9;
+
+  /// Jellyfin marks an item played from `/Sessions/Playing/Stopped` itself
+  /// (server `MaxResumePct`, default 90%), so the in-player auto-scrobble must
+  /// not also `POST /UserPlayedItems` — that double-scrobbles via the Trakt
+  /// plugin (#1287). Manual mark-watched still hits `/UserPlayedItems`.
+  @override
+  bool get marksWatchedOnPlaybackStopped => true;
 
   @override
   void close() => _http.close();

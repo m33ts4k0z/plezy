@@ -44,6 +44,8 @@ class DesktopVideoControls extends StatefulWidget {
   final VoidCallback? onSeekForward;
   final ValueChanged<Duration> onSeek;
   final ValueChanged<Duration> onSeekEnd;
+  final VoidCallback? onScrubStart;
+  final VoidCallback? onScrubEnd;
   final IconData Function(int) getReplayIcon;
   final IconData Function(int) getForwardIcon;
 
@@ -74,6 +76,9 @@ class DesktopVideoControls extends StatefulWidget {
   final double streamStartEpoch;
   final int? currentPositionEpoch;
   final ValueChanged<int>? onLiveSeek;
+
+  /// Relative live-TV skip callback (delta seconds); parent accumulates+debounces.
+  final ValueChanged<int>? onLiveSeekBy;
   final VoidCallback? onJumpToLive;
 
   /// Whether to use dpad navigation for content strip (TV or keyboard nav mode)
@@ -97,6 +102,9 @@ class DesktopVideoControls extends StatefulWidget {
   /// Called when content strip visibility changes
   final ValueChanged<bool>? onContentStripVisibilityChanged;
 
+  /// Called when a seek should be executed by the owning screen.
+  final Future<void> Function(Duration position)? onSeekRequested;
+
   /// Called when a seek operation completes successfully.
   final Function(Duration position)? onSeekCompleted;
 
@@ -116,6 +124,8 @@ class DesktopVideoControls extends StatefulWidget {
     this.onSeekForward,
     required this.onSeek,
     required this.onSeekEnd,
+    this.onScrubStart,
+    this.onScrubEnd,
     required this.getReplayIcon,
     required this.getForwardIcon,
     this.onFocusActivity,
@@ -131,6 +141,7 @@ class DesktopVideoControls extends StatefulWidget {
     this.streamStartEpoch = 0,
     this.currentPositionEpoch,
     this.onLiveSeek,
+    this.onLiveSeekBy,
     this.onJumpToLive,
     this.useDpadNavigation = false,
     this.serverId,
@@ -139,6 +150,7 @@ class DesktopVideoControls extends StatefulWidget {
     this.onCancelAutoHide,
     this.onStartAutoHide,
     this.onContentStripVisibilityChanged,
+    this.onSeekRequested,
     this.onSeekCompleted,
   });
 
@@ -178,7 +190,13 @@ class DesktopVideoControlsState extends State<DesktopVideoControls> {
   // Preview thumbnail during sustained dpad/keyboard seeking
   bool _showKeyRepeatThumbnail = false;
   Timer? _keyRepeatThumbnailTimer;
+  Timer? _timelineSeekDebounceTimer;
+  Timer? _timelinePreviewClearTimer;
+  Duration? _timelinePreviewPosition;
+  Duration? _lastFlushedTimelinePreviewPosition;
   static const _keyRepeatThumbnailTimeout = Duration(milliseconds: 400);
+  static const _timelineSeekDebounce = Duration(milliseconds: 350);
+  static const _timelinePreviewClearDelay = Duration(seconds: 2);
 
   // Content strip state
   bool _contentStripVisible = false;
@@ -224,6 +242,8 @@ class DesktopVideoControlsState extends State<DesktopVideoControls> {
   @override
   void dispose() {
     _keyRepeatThumbnailTimer?.cancel();
+    _timelineSeekDebounceTimer?.cancel();
+    _timelinePreviewClearTimer?.cancel();
     _prevItemFocusNode.dispose();
     _prevChapterFocusNode.dispose();
     _skipBackFocusNode.dispose();
@@ -295,6 +315,7 @@ class DesktopVideoControlsState extends State<DesktopVideoControls> {
       widget.onFocusActivity?.call();
     } else {
       // Reset progressive seek state when timeline loses focus
+      _flushTimelinePreviewSeek();
       _resetSeekState();
     }
   }
@@ -448,6 +469,40 @@ class DesktopVideoControlsState extends State<DesktopVideoControls> {
     }
   }
 
+  void _clearTimelinePreviewIfStill(Duration target) {
+    if (!mounted || _timelinePreviewPosition != target) return;
+    setState(() => _timelinePreviewPosition = null);
+  }
+
+  void _scheduleTimelinePreviewClear(Duration target) {
+    _timelinePreviewClearTimer?.cancel();
+    _timelinePreviewClearTimer = Timer(_timelinePreviewClearDelay, () => _clearTimelinePreviewIfStill(target));
+  }
+
+  void _flushTimelinePreviewSeek() {
+    final target = _timelinePreviewPosition;
+    _timelineSeekDebounceTimer?.cancel();
+    _timelineSeekDebounceTimer = null;
+    if (target == null) return;
+    if (_lastFlushedTimelinePreviewPosition == target) return;
+    _lastFlushedTimelinePreviewPosition = target;
+    widget.onSeekEnd(target);
+    _scheduleTimelinePreviewClear(target);
+  }
+
+  void _scheduleTimelinePreviewSeekFlush() {
+    _timelineSeekDebounceTimer?.cancel();
+    _timelineSeekDebounceTimer = Timer(_timelineSeekDebounce, _flushTimelinePreviewSeek);
+  }
+
+  void _setTimelinePreviewPosition(Duration position) {
+    _timelinePreviewClearTimer?.cancel();
+    _timelinePreviewClearTimer = null;
+    if (_timelinePreviewPosition == position) return;
+    _lastFlushedTimelinePreviewPosition = null;
+    setState(() => _timelinePreviewPosition = position);
+  }
+
   /// Show the timeline preview thumbnail during sustained key-repeat seeking.
   /// Arms a short timer that hides the thumbnail once repeats stop.
   void _triggerKeyRepeatThumbnail() {
@@ -481,6 +536,11 @@ class DesktopVideoControlsState extends State<DesktopVideoControls> {
     // Handle key release to reset progressive seek state
     if (event is KeyUpEvent) {
       if (key == LogicalKeyboardKey.arrowLeft || key == LogicalKeyboardKey.arrowRight) {
+        if (_trackControlsState.isTranscoding) {
+          _flushTimelinePreviewSeek();
+          _resetSeekState();
+          return KeyEventResult.handled;
+        }
         _resetSeekState();
       }
       return KeyEventResult.ignored;
@@ -495,6 +555,7 @@ class DesktopVideoControlsState extends State<DesktopVideoControls> {
 
     // UP arrow - hide controls and reset seek state
     if (key == LogicalKeyboardKey.arrowUp) {
+      _flushTimelinePreviewSeek();
       _resetSeekState();
       widget.onHideControls?.call();
       return KeyEventResult.handled;
@@ -502,6 +563,7 @@ class DesktopVideoControlsState extends State<DesktopVideoControls> {
 
     // DOWN arrow - move focus to play/pause button and reset seek state
     if (key == LogicalKeyboardKey.arrowDown) {
+      _flushTimelinePreviewSeek();
       _resetSeekState();
       _playPauseFocusNode.requestFocus();
       widget.onFocusActivity?.call();
@@ -526,11 +588,13 @@ class DesktopVideoControlsState extends State<DesktopVideoControls> {
       final isForward = key == LogicalKeyboardKey.arrowRight;
       final effectiveMultiplier = event is KeyRepeatEvent ? _getSeekMultiplier() : 1.0;
 
-      // Live TV: epoch-based seeking via onLiveSeek
-      if (_isLive && widget.onLiveSeek != null && widget.currentPositionEpoch != null) {
+      // Live TV: relative epoch-based seeking via the parent accumulator, which
+      // coalesces a rapid/held burst into one transcode re-open (#1253). The
+      // acceleration multiplier still grows the per-press step; the accumulator
+      // sums them.
+      if (_isLive && widget.onLiveSeekBy != null) {
         final stepSeconds = (widget.seekTimeSmall * effectiveMultiplier).clamp(1, 300).round();
-        final targetEpoch = widget.currentPositionEpoch! + (isForward ? stepSeconds : -stepSeconds);
-        widget.onLiveSeek!(targetEpoch);
+        widget.onLiveSeekBy!(isForward ? stepSeconds : -stepSeconds);
         widget.onFocusActivity?.call();
         return KeyEventResult.handled;
       }
@@ -538,13 +602,23 @@ class DesktopVideoControlsState extends State<DesktopVideoControls> {
       if (duration.inMilliseconds <= 0) return KeyEventResult.handled;
 
       final baseStepMs = widget.seekTimeSmall * 1000;
-      final stepMs = (baseStepMs * effectiveMultiplier).clamp(500, 120000).toInt();
+      final stepMs = (baseStepMs * effectiveMultiplier).clamp(500, 120_000).toInt();
       final step = Duration(milliseconds: stepMs);
 
       final newPosition = isForward ? position + step : position - step;
 
       // Clamp to valid range
       final clampedPosition = Duration(milliseconds: newPosition.inMilliseconds.clamp(0, duration.inMilliseconds));
+
+      if (_trackControlsState.isTranscoding) {
+        final previewBase = _timelinePreviewPosition ?? position;
+        final previewPosition = isForward ? previewBase + step : previewBase - step;
+        final clampedPreview = Duration(milliseconds: previewPosition.inMilliseconds.clamp(0, duration.inMilliseconds));
+        _setTimelinePreviewPosition(clampedPreview);
+        _scheduleTimelinePreviewSeekFlush();
+        widget.onFocusActivity?.call();
+        return KeyEventResult.handled;
+      }
 
       widget.onSeek(clampedPosition);
       widget.onFocusActivity?.call();
@@ -600,7 +674,7 @@ class DesktopVideoControlsState extends State<DesktopVideoControls> {
                       ),
                     ),
                     child: Column(
-                      mainAxisSize: MainAxisSize.min,
+                      mainAxisSize: .min,
                       children: [
                         const Icon(Symbols.keyboard_arrow_up_rounded, color: Colors.white38, size: 20),
                         const SizedBox(height: 4),
@@ -612,6 +686,7 @@ class DesktopVideoControlsState extends State<DesktopVideoControls> {
                           serverId: widget.serverId,
                           showQueueTab: widget.showQueueTab,
                           onQueueItemSelected: widget.onQueueItemSelected,
+                          onSeekRequested: widget.onSeekRequested,
                           onSeekCompleted: widget.onSeekCompleted,
                           useFocusNavigation: true,
                           onNavigateUp: _onContentStripNavigateUp,
@@ -650,7 +725,7 @@ class DesktopVideoControlsState extends State<DesktopVideoControls> {
 
   Widget _buildTopBarContent(BuildContext _, double leftPadding) {
     final topBar = Padding(
-      padding: EdgeInsets.only(left: leftPadding, right: 16),
+      padding: .only(left: leftPadding, right: 16),
       child: Row(
         children: [
           Expanded(
@@ -667,7 +742,7 @@ class DesktopVideoControlsState extends State<DesktopVideoControls> {
               decoration: const BoxDecoration(color: Colors.red, borderRadius: BorderRadius.all(Radius.circular(4))),
               child: Text(
                 t.liveTv.live,
-                style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 12),
+                style: const TextStyle(color: Colors.white, fontWeight: .bold, fontSize: 12),
               ),
             ),
           ],
@@ -706,6 +781,8 @@ class DesktopVideoControlsState extends State<DesktopVideoControls> {
               showChapterMarkersOnTimeline: widget.showChapterMarkersOnTimeline,
               onSeek: widget.onSeek,
               onSeekEnd: widget.onSeekEnd,
+              onScrubStart: widget.onScrubStart,
+              onScrubEnd: widget.onScrubEnd,
               horizontalLayout: true,
               focusNode: _timelineFocusNode,
               onKeyEvent: _handleTimelineKeyEvent,
@@ -713,6 +790,7 @@ class DesktopVideoControlsState extends State<DesktopVideoControls> {
               enabled: canInteract,
               thumbnailDataBuilder: widget.thumbnailDataBuilder,
               showKeyRepeatThumbnail: _showKeyRepeatThumbnail,
+              previewPosition: _timelinePreviewPosition,
             ),
           ],
           // Row 2: Playback controls and options
@@ -885,13 +963,7 @@ class DesktopVideoControlsState extends State<DesktopVideoControls> {
 
                                 return Padding(
                                   padding: const EdgeInsets.only(left: 8),
-                                  child: Text(
-                                    text,
-                                    style: style,
-                                    maxLines: 1,
-                                    softWrap: false,
-                                    overflow: TextOverflow.fade,
-                                  ),
+                                  child: Text(text, style: style, maxLines: 1, softWrap: false, overflow: .fade),
                                 );
                               },
                             );
@@ -917,6 +989,7 @@ class DesktopVideoControlsState extends State<DesktopVideoControls> {
                   chapters: widget.chapters,
                   chaptersLoaded: widget.chaptersLoaded,
                   trackControlsState: _trackControlsState,
+                  onSeekRequested: widget.onSeekRequested,
                   onSeekCompleted: widget.onSeekCompleted,
                   focusNodes: _trackControlFocusNodes,
                   onFocusChange: _onFocusChange,

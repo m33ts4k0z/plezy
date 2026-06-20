@@ -1,4 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:plezy/media/ids.dart';
 import 'package:plezy/watch_together/models/watch_session.dart';
 import 'package:plezy/watch_together/providers/watch_together_provider.dart';
 
@@ -22,13 +23,14 @@ void main() {
       expect(p.isHost, isFalse);
       expect(p.isConnected, isFalse);
       expect(p.isSyncing, isFalse);
-      expect(p.isDeferredPlay, isFalse);
+      expect(p.isWaitingForPeers, isFalse);
+      expect(p.waitingOnNames, isEmpty);
       expect(p.isWaitingForHostReconnect, isFalse);
       expect(p.participants, isEmpty);
       expect(p.participantCount, 0);
       // Default control mode falls back to hostOnly when there's no session.
       expect(p.controlMode, ControlMode.hostOnly);
-      expect(p.syncManager, isNull);
+      expect(p.hasAttachedPlayer, isFalse);
       p.dispose();
     });
 
@@ -74,7 +76,7 @@ void main() {
       var notified = 0;
       p.addListener(() => notified++);
       // Without a session, setCurrentMedia logs a warning and bails — no notify.
-      p.setCurrentMedia(ratingKey: 'rk1', serverId: 's1', mediaTitle: 't1');
+      p.setCurrentMedia(ratingKey: 'rk1', serverId: ServerId('s1'), mediaTitle: 't1');
       expect(notified, 0);
       expect(p.currentMediaRatingKey, isNull);
       p.dispose();
@@ -93,7 +95,7 @@ void main() {
 
     test('markCurrentPlaybackHandled does not throw on a fresh provider', () {
       final p = WatchTogetherProvider();
-      expect(() => p.markCurrentPlaybackHandled(ratingKey: 'rk1', serverId: 's1'), returnsNormally);
+      expect(() => p.markCurrentPlaybackHandled(ratingKey: 'rk1', serverId: ServerId('s1')), returnsNormally);
       p.dispose();
     });
 
@@ -107,24 +109,24 @@ void main() {
       p.dispose();
     });
 
-    test('attachPlayer is a no-op without a sync manager (logs warning)', () {
+    test('attachPlayer is a no-op without a sync controller (logs warning)', () {
       final p = WatchTogetherProvider();
       // The mpv Player object is platform-tied; skipping it would reach the
-      // null-syncManager guard first and bail. Calling with a null check via
+      // null-controller guard first and bail. Calling with a null check via
       // the same path used by the production code: just verify the early
       // return path on detachPlayer (which is also null-safe).
       expect(p.detachPlayer, returnsNormally);
       p.dispose();
     });
 
-    test('setBackgrounded forwards to sync manager but is null-safe', () {
+    test('setBackgrounded forwards to the sync controller but is null-safe', () {
       final p = WatchTogetherProvider();
       expect(() => p.setBackgrounded(true), returnsNormally);
       expect(() => p.setBackgrounded(false), returnsNormally);
       p.dispose();
     });
 
-    test('onLocalSeek is null-safe without a sync manager', () {
+    test('onLocalSeek is null-safe without a sync controller', () {
       final p = WatchTogetherProvider();
       expect(() => p.onLocalSeek(const Duration(seconds: 5)), returnsNormally);
       p.dispose();

@@ -21,6 +21,7 @@ import '../../utils/formatters.dart';
 import '../../utils/platform_detector.dart';
 import '../../utils/snackbar_helper.dart';
 import '../../widgets/desktop_app_bar.dart';
+import '../../widgets/ios_status_bar_tap_scroll_to_top.dart';
 
 class LogsScreen extends StatefulWidget {
   const LogsScreen({super.key});
@@ -149,7 +150,7 @@ class _LogsScreenState extends State<LogsScreen> with MountedSetStateMixin {
       final id = (data as Map<String, dynamic>)['id'] as String;
 
       unawaited(
-        showDialog(
+        showScopedDialog<void>(
           context: context,
           builder: (ctx) => AlertDialog(
             title: Text(t.messages.logsUploaded),
@@ -158,7 +159,7 @@ class _LogsScreenState extends State<LogsScreen> with MountedSetStateMixin {
                 Text('${t.messages.logId}: '),
                 SelectableText(
                   id,
-                  style: const TextStyle(fontWeight: FontWeight.bold, fontFamily: 'monospace', fontSize: 18),
+                  style: const TextStyle(fontWeight: .bold, fontFamily: 'monospace', fontSize: 18),
                 ),
                 const SizedBox(width: 8),
                 IconButton(
@@ -242,7 +243,7 @@ class _LogsScreenState extends State<LogsScreen> with MountedSetStateMixin {
       spans.add(
         TextSpan(
           text: '[${log.level.name.toUpperCase()}] ',
-          style: TextStyle(color: color, fontWeight: FontWeight.bold),
+          style: TextStyle(color: color, fontWeight: .bold),
         ),
       );
       spans.add(TextSpan(text: log.message));
@@ -287,51 +288,61 @@ class _LogsScreenState extends State<LogsScreen> with MountedSetStateMixin {
         }
         return KeyEventResult.ignored;
       },
-      child: Scaffold(
-        body: CustomScrollView(
+      child: PrimaryScrollController(
+        controller: _scrollController,
+        child: IosStatusBarTapScrollToTop(
           controller: _scrollController,
-          slivers: [
-            CustomAppBar(
-              title: Text(t.screens.logs),
-              pinned: true,
-              actions: [
-                FocusableActionBar(
+          child: Scaffold(
+            body: CustomScrollView(
+              primary: true,
+              slivers: [
+                CustomAppBar(
+                  title: Text(t.screens.logs),
+                  pinned: true,
                   actions: [
-                    FocusableAction(icon: Symbols.refresh_rounded, tooltip: t.common.refresh, onPressed: _loadLogs),
-                    FocusableAction(
-                      icon: Symbols.upload_rounded,
-                      tooltip: t.logs.uploadLogs,
-                      onPressed: _logs.isNotEmpty ? _uploadLogs : null,
-                    ),
-                    FocusableAction(
-                      icon: Symbols.content_copy_rounded,
-                      tooltip: t.logs.copyLogs,
-                      onPressed: _logs.isNotEmpty ? _copyAllLogs : null,
-                    ),
-                    FocusableAction(
-                      icon: Symbols.delete_outline_rounded,
-                      tooltip: t.logs.clearLogs,
-                      onPressed: _logs.isNotEmpty ? _clearLogs : null,
+                    FocusableActionBar(
+                      actions: [
+                        FocusableAction(icon: Symbols.refresh_rounded, tooltip: t.common.refresh, onPressed: _loadLogs),
+                        FocusableAction(
+                          icon: Symbols.upload_rounded,
+                          tooltip: t.logs.uploadLogs,
+                          onPressed: _logs.isNotEmpty ? _uploadLogs : null,
+                        ),
+                        FocusableAction(
+                          icon: Symbols.content_copy_rounded,
+                          tooltip: t.logs.copyLogs,
+                          onPressed: _logs.isNotEmpty ? _copyAllLogs : null,
+                        ),
+                        FocusableAction(
+                          icon: Symbols.delete_outline_rounded,
+                          tooltip: t.logs.clearLogs,
+                          onPressed: _logs.isNotEmpty ? _clearLogs : null,
+                        ),
+                      ],
                     ),
                   ],
                 ),
-              ],
-            ),
-            if (_logs.isEmpty)
-              SliverFillRemaining(child: Center(child: Text(t.messages.noLogsAvailable)))
-            else
-              SliverPadding(
-                padding: const EdgeInsets.all(12),
-                sliver: SliverToBoxAdapter(
-                  child: SelectableText.rich(
-                    TextSpan(
-                      style: theme.textTheme.bodySmall?.copyWith(fontFamily: 'monospace', fontSize: 12, height: 1.5),
-                      children: _buildLogSpans(),
+                if (_logs.isEmpty)
+                  SliverFillRemaining(child: Center(child: Text(t.messages.noLogsAvailable)))
+                else
+                  SliverPadding(
+                    padding: const EdgeInsets.all(12),
+                    sliver: SliverToBoxAdapter(
+                      child: SelectableText.rich(
+                        TextSpan(
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            fontFamily: 'monospace',
+                            fontSize: 12,
+                            height: 1.5,
+                          ),
+                          children: _buildLogSpans(),
+                        ),
+                      ),
                     ),
                   ),
-                ),
-              ),
-          ],
+              ],
+            ),
+          ),
         ),
       ),
     );

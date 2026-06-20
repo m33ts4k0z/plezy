@@ -60,7 +60,7 @@ class PlaybackInitializationResult {
   final List<SubtitleTrack> externalSubtitles;
   final bool isOffline;
 
-  /// `true` when [videoUrl] is a Plex transcode start URL.
+  /// `true` when [videoUrl] points at a backend transcoding stream.
   final bool isTranscoding;
 
   /// Non-null when a non-original preset was requested but fallback kicked in.
@@ -77,6 +77,19 @@ class PlaybackInitializationResult {
   /// expects one of `DirectPlay`, `DirectStream`, or `Transcode`.
   final String? playMethod;
 
+  /// Effective media version after backend clamping/fallback.
+  final int selectedMediaIndex;
+
+  /// True when [videoUrl] points at a downloaded/local copy. This is a media
+  /// source detail, not a statement about whether server reporting is possible.
+  bool get usesLocalMedia => isOffline;
+
+  /// The [MediaVersion] selected by [selectedMediaIndex], or null when no
+  /// version metadata is available (e.g. cached offline flows).
+  MediaVersion? get selectedVersion => selectedMediaIndex >= 0 && selectedMediaIndex < availableVersions.length
+      ? availableVersions[selectedMediaIndex]
+      : null;
+
   PlaybackInitializationResult({
     required this.availableVersions,
     this.videoUrl,
@@ -88,6 +101,7 @@ class PlaybackInitializationResult {
     this.activeAudioStreamId,
     this.playSessionId,
     this.playMethod,
+    this.selectedMediaIndex = 0,
   });
 }
 

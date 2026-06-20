@@ -1,6 +1,7 @@
 // ignore_for_file: invalid_annotation_target
 
 import 'package:freezed_annotation/freezed_annotation.dart';
+import 'ids.dart';
 
 import '../services/settings_service.dart' show EpisodePosterMode;
 import '../utils/global_key_utils.dart';
@@ -77,6 +78,7 @@ sealed class MediaItem with _$MediaItem {
     int? subtitleMode,
     String? serverId,
     String? serverName,
+    String? backendFolderKey,
     Map<String, Object?>? raw,
   }) {
     return switch (backend) {
@@ -135,6 +137,7 @@ sealed class MediaItem with _$MediaItem {
         subtitleMode: subtitleMode,
         serverId: serverId,
         serverName: serverName,
+        backendFolderKey: backendFolderKey,
         raw: raw,
       ),
       MediaBackend.jellyfin => JellyfinMediaItem(
@@ -190,6 +193,7 @@ sealed class MediaItem with _$MediaItem {
         audioLanguage: audioLanguage,
         serverId: serverId,
         serverName: serverName,
+        backendFolderKey: backendFolderKey,
         raw: raw,
       ),
     };
@@ -264,6 +268,11 @@ sealed class MediaItem with _$MediaItem {
     @JsonKey(fromJson: flexibleInt) int? extraType,
     String? serverId,
     String? serverName,
+
+    /// Relative folder key (`/library/sections/{id}/folder?parent=…`) for
+    /// [MediaKind.folder] rows — what [MediaServerClient.fetchFolderChildren]
+    /// tunes into. Stamped by the folder fetchers, null elsewhere.
+    String? backendFolderKey,
     @JsonKey(fromJson: _mediaItemRawFromJson) Map<String, Object?>? raw,
   }) = PlexMediaItem;
 
@@ -326,6 +335,10 @@ sealed class MediaItem with _$MediaItem {
     String? playlistItemId,
     String? serverId,
     String? serverName,
+
+    /// Always null on Jellyfin — folder children are fetched by [id]. Exists
+    /// on both variants so the union exposes one neutral getter.
+    String? backendFolderKey,
     @JsonKey(fromJson: _mediaItemRawFromJson) Map<String, Object?>? raw,
   }) = JellyfinMediaItem;
 
@@ -353,14 +366,20 @@ sealed class MediaItem with _$MediaItem {
 
   /// Global unique identifier across all servers (`serverId:id`). Falls back
   /// to bare [id] if [serverId] is missing.
-  String get globalKey => serverId != null ? buildGlobalKey(serverId!, id) : id;
+  String get globalKey => serverId != null ? buildGlobalKey(ServerId(serverId!), id) : id;
 
   /// Global unique identifier of this item's library section.
-  String? get libraryGlobalKey => serverId != null && libraryId != null ? buildGlobalKey(serverId!, libraryId!) : null;
+  String? get libraryGlobalKey =>
+      serverId != null && libraryId != null ? buildGlobalKey(ServerId(serverId!), libraryId!) : null;
 
   /// Parent rating keys for hierarchical invalidation. For an episode:
   /// `[seasonId, showId]`. For a season: `[showId]`. For a movie: `[]`.
   List<String> get parentChain => [?parentId, ?grandparentId];
+
+  /// Recency used to order the Continue Watching / On Deck shelf: when the item
+  /// was last watched, falling back to when it was added for never-watched rows.
+  /// Shared by the per-client merge and the cross-server sort so they agree.
+  int get recencySortKey => lastViewedAt ?? addedAt ?? 0;
 
   /// Whether this item has started but not finished playback.
   bool get hasActiveProgress {
@@ -379,6 +398,25 @@ sealed class MediaItem with _$MediaItem {
       return viewedLeafCount! >= leafCount!;
     }
     return viewCount != null && viewCount! > 0;
+  }
+
+  /// Unwatched leaf count for container badges. Falls back to Jellyfin's
+  /// `UserData.UnplayedItemCount` when leaf totals weren't requested
+  /// (e.g. the folder tree's slim field set).
+  int? get unwatchedCount {
+    if (leafCount != null && viewedLeafCount != null) return leafCount! - viewedLeafCount!;
+    final userData = raw?['UserData'];
+    return userData is Map<String, dynamic> ? userData['UnplayedItemCount'] as int? : null;
+  }
+
+  /// Copy with the watched flag applied so [isWatched] reflects it for every
+  /// kind: containers need their leaf counts patched, not just [viewCount].
+  MediaItem withWatchedFlag(bool isWatched) {
+    var updated = copyWith(viewCount: isWatched ? 1 : 0);
+    if (leafCount != null || viewedLeafCount != null) {
+      updated = updated.copyWith(viewedLeafCount: isWatched ? (leafCount ?? viewedLeafCount ?? 1) : 0);
+    }
+    return updated;
   }
 
   /// Display-friendly title that prefers the show name for episodes/seasons.
@@ -431,6 +469,8 @@ sealed class MediaItem with _$MediaItem {
       return artPath ?? thumbPath;
     }
 
+    if (kind == MediaKind.clip) return thumbPath ?? artPath;
+
     return thumbPath;
   }
 
@@ -465,7 +505,12 @@ sealed class MediaItem with _$MediaItem {
 
   /// Returns hero art candidates in display-preference order.
   List<String> heroArtCandidates({required double containerAspectRatio}) {
-    final preferred = containerAspectRatio < 1.39 ? [backgroundSquarePath, artPath] : [artPath, backgroundSquarePath];
+    final preferred = switch (kind) {
+      MediaKind.episode when containerAspectRatio < 1.39 => [backgroundSquarePath, grandparentArtPath, artPath],
+      MediaKind.episode => [grandparentArtPath, artPath, backgroundSquarePath],
+      _ when containerAspectRatio < 1.39 => [backgroundSquarePath, artPath],
+      _ => [artPath, backgroundSquarePath],
+    };
 
     final candidates = <String>[];
     for (final path in preferred) {

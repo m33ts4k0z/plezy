@@ -1,10 +1,10 @@
+import 'dart:convert';
 import 'dart:io' show Platform;
 
 import 'package:flutter/services.dart';
 
 import '../../media/media_display_criteria.dart';
 import '../models.dart';
-import '../../utils/app_logger.dart';
 import 'player_base.dart';
 
 /// Shared native implementation of [Player] for iOS, macOS, Android (MPV fallback), and Linux.
@@ -12,31 +12,8 @@ import 'player_base.dart';
 /// or FlTextureGL (Linux).
 class PlayerNative extends PlayerBase {
   int? _textureIdValue;
-  Duration _serverManagedStartOffset = Duration.zero;
-
-  bool _isPlexServerManagedStartUri(String uri) {
-    try {
-      final parsed = Uri.parse(uri);
-      final path = parsed.path;
-      final protocol = parsed.queryParameters['protocol']?.toLowerCase();
-      return protocol == 'hls' &&
-          (path.contains('/video/:/transcode/universal/start') ||
-              path.contains('/video/:/transcode/universal/session/'));
-    } catch (_) {
-      return uri.contains('protocol=hls') &&
-          (uri.contains('/video/:/transcode/universal/start') ||
-              uri.contains('/video/:/transcode/universal/session/'));
-    }
-  }
-
-  Duration _toNativePosition(Duration requestedPosition) {
-    if (_serverManagedStartOffset <= Duration.zero) {
-      return requestedPosition;
-    }
-
-    final normalized = requestedPosition - _serverManagedStartOffset;
-    return normalized.isNegative ? Duration.zero : normalized;
-  }
+  String _dvConversionMode = 'auto';
+  String _dvConversionLog = 'no';
 
   @override
   int? get textureId => _textureIdValue;
@@ -56,33 +33,96 @@ class PlayerNative extends PlayerBase {
   @override
   String get playerType => 'mpv';
 
+  @override
+  bool get providesNativeStats => Platform.isAndroid;
+
+  @override
+  bool get attachesExternalSubtitlesAtOpen => true;
+
   /// Node properties are returned as structured maps on macOS/iOS/Linux,
   /// but as JSON strings on Android/Windows.
   static final String _nodeFormat = (Platform.isAndroid || Platform.isWindows) ? 'string' : 'node';
 
-  // ============================================
-  // Initialization
-  // ============================================
+  static String _normalizeDvConversionMode(String value) {
+    return switch (value.toLowerCase()) {
+      'disabled' || 'native' => 'disabled',
+      'dv81' || 'p8' || 'p7_to_p8' || 'p7-to-p8' => 'dv81',
+      'hevc' || 'hevc_strip' || 'p7_to_hevc' || 'p7-to-hevc' => 'hevc_strip',
+      _ => 'auto',
+    };
+  }
 
-  @override
-  void handlePropertyChange(String name, dynamic value) {
-    if (_serverManagedStartOffset > Duration.zero && value is num) {
-      final offsetSeconds = _serverManagedStartOffset.inMilliseconds / 1000.0;
-      switch (name) {
-        case 'time-pos':
-        case 'duration':
-        case 'demuxer-cache-time':
-          super.handlePropertyChange(name, value + offsetSeconds);
-          return;
-      }
+  static String _normalizeBoolProperty(String value) {
+    return switch (value.toLowerCase()) {
+      '1' || 'true' || 'yes' || 'on' => 'yes',
+      _ => 'no',
+    };
+  }
+
+  static String _fixedLengthQuote(String value) {
+    return '%${utf8.encode(value).length}%$value';
+  }
+
+  static String _escapePathListEntry(String value, String separator) {
+    return value.replaceAll(r'\', r'\\').replaceAll(separator, '\\$separator');
+  }
+
+  static String? _externalSubtitlesLoadfileOption(List<SubtitleTrack>? externalSubtitles) {
+    final separator = Platform.isWindows ? ';' : ':';
+    final escapedUris = externalSubtitles
+        ?.map((subtitle) => subtitle.uri)
+        .whereType<String>()
+        .where((uri) => uri.isNotEmpty)
+        .map((uri) => _escapePathListEntry(uri, separator))
+        .toList();
+    if (escapedUris == null || escapedUris.isEmpty) return null;
+
+    return 'sub-files=${_fixedLengthQuote(escapedUris.join(separator))}';
+  }
+
+  MediaDisplayCriteria? _effectiveDisplayCriteria(MediaDisplayCriteria? criteria) {
+    if (criteria == null || (criteria.doviProfile ?? 0) != 7) return criteria;
+
+    final convertToDv81 = _dvConversionMode == 'auto' || _dvConversionMode == 'dv81';
+    if (convertToDv81) {
+      return MediaDisplayCriteria(
+        fps: criteria.fps,
+        width: criteria.width,
+        height: criteria.height,
+        doviProfile: 8,
+        doviLevel: criteria.doviLevel,
+        doviCompatibilityId: 1,
+        transfer: criteria.transfer ?? 'smpte2084',
+        primaries: criteria.primaries ?? 'bt2020',
+        matrix: criteria.matrix ?? 'bt2020nc',
+      );
     }
 
-    super.handlePropertyChange(name, value);
+    return MediaDisplayCriteria(
+      fps: criteria.fps,
+      width: criteria.width,
+      height: criteria.height,
+      doviProfile: 0,
+      doviCompatibilityId: criteria.doviCompatibilityId ?? 1,
+      transfer: criteria.transfer ?? 'smpte2084',
+      primaries: criteria.primaries ?? 'bt2020',
+      matrix: criteria.matrix ?? 'bt2020nc',
+    );
   }
+
+  // Memoizes the in-flight init Future so concurrent callers (e.g. the
+  // parallel `requestAudioFocus()` and `setProperty()` paths kicked off in
+  // VideoPlayerScreen._initializePlayer) share one `invoke('initialize')`.
+  // Two concurrent invokes on Android caused MpvPlayerPlugin.handleInitialize
+  // to dispose-and-recreate the in-flight core, hanging playback (#930).
+  Future<void>? _initFuture;
 
   Future<void> _ensureInitialized() async {
     if (initialized) return;
+    return _initFuture ??= _doInitialize();
+  }
 
+  Future<void> _doInitialize() async {
     try {
       final result = await invoke<Object>('initialize');
       if (result is int) {
@@ -96,23 +136,16 @@ class PlayerNative extends PlayerBase {
         throw Exception('Failed to initialize player');
       }
 
-      // Subscribe to MPV properties
-      await observeProperty('time-pos', 'double');
-      await observeProperty('duration', 'double');
-      await observeProperty('seekable', 'flag');
-      await observeProperty('pause', 'flag');
-      await observeProperty('paused-for-cache', 'flag');
-      await observeProperty('track-list', _nodeFormat);
-      await observeProperty('eof-reached', 'flag');
-      await observeProperty('volume', 'double');
-      await observeProperty('speed', 'double');
-      await observeProperty('aid', 'string');
-      await observeProperty('sid', 'string');
+      // Subscribe to MPV properties before flipping `initialized` so partial
+      // failures don't leave us in a half-initialized state that the memoized
+      // future would falsely treat as ready.
+      await observeCoreProperties(trackListFormat: _nodeFormat);
       await observeProperty('secondary-sid', 'string');
       await observeProperty('demuxer-cache-state', _nodeFormat);
       await observeProperty('audio-device-list', _nodeFormat);
       await observeProperty('audio-device', 'string');
     } catch (e) {
+      _initFuture = null;
       errorController.add(PlayerError('Initialization failed: $e'));
       rethrow;
     }
@@ -133,11 +166,20 @@ class PlayerNative extends PlayerBase {
   }
 
   @override
-  Future<void> open(Media media, {bool play = true, bool isLive = false, List<SubtitleTrack>? externalSubtitles}) async {
+  Future<void> open(
+    Media media, {
+    bool play = true,
+    bool isLive = false,
+    List<SubtitleTrack>? externalSubtitles,
+    Duration timelineOffset = Duration.zero,
+    Duration? timelineDuration,
+  }) async {
     if (disposed) return;
     await _ensureInitialized();
     final startPosition = media.start ?? Duration.zero;
+    configureTimeline(offset: timelineOffset, duration: timelineDuration);
     clearTracks();
+    setExternalSubtitleMetadata(externalSubtitles);
     resetPlaybackProgress(startPosition);
     setSeekable(false);
 
@@ -157,7 +199,6 @@ class PlayerNative extends PlayerBase {
     // adds an offset to time-pos and shifts sub-delay) is no longer
     // needed: with mpv doing the seek locally, time-pos already reflects
     // source-time and sidecar SRT timestamps line up naturally.
-    _serverManagedStartOffset = Duration.zero;
     if (startPosition.inSeconds > 0) {
       await setProperty('start', (startPosition.inMilliseconds / 1000.0).toString());
     } else {
@@ -170,6 +211,11 @@ class PlayerNative extends PlayerBase {
     // avoiding a race condition that can freeze the video decoder on Android (issue #226).
     await setProperty('pause', play ? 'no' : 'yes');
 
+    // Prevent mpv's own default subtitle selection from racing the
+    // server-backed TrackManager decision applied after tracks are discovered.
+    await setProperty('sid', 'no');
+    await setProperty('secondary-sid', 'no');
+
     // Convert content:// URIs to fdclose:// for MPV on Android (SAF SD card downloads)
     var uri = media.uri;
     if (Platform.isAndroid && uri.startsWith('content://')) {
@@ -179,7 +225,20 @@ class PlayerNative extends PlayerBase {
       }
     }
 
-    await command(['loadfile', uri, 'replace']);
+    final loadfileArgs = ['loadfile', uri, 'replace'];
+    final loadfileOption = _externalSubtitlesLoadfileOption(externalSubtitles);
+    if (loadfileOption != null) {
+      loadfileArgs.addAll(['-1', loadfileOption]);
+    }
+    await command(loadfileArgs);
+
+    // mpv's pause property survives loadfile; in-place reloads pause the old
+    // file before resolving, so explicitly unpause for the replacement. Set
+    // after loadfile so the paused old file never audibly unpauses
+    // pre-replace.
+    if (play) {
+      await setProperty('pause', 'no');
+    }
   }
 
   @override
@@ -197,23 +256,12 @@ class PlayerNative extends PlayerBase {
     await command(['stop']);
     setSeekable(false);
     await invoke('setVisible', {'visible': false});
-    _serverManagedStartOffset = Duration.zero;
   }
 
   @override
   Future<void> seek(Duration position) async {
-    await runSeek(position, () async {
-      try {
-        final nativePosition = _toNativePosition(position);
-        await command(['seek', (nativePosition.inMilliseconds / 1000.0).toString(), 'absolute']);
-      } on PlatformException catch (e) {
-        if (e.code == 'COMMAND_FAILED' || e.code == 'NOT_INITIALIZED') {
-          appLogger.w('Seek failed (${e.code}), player not ready');
-          return;
-        }
-        rethrow;
-      }
-    });
+    final sourcePosition = sourceSeekPosition(position);
+    await runSeek(position, () => command(['seek', (sourcePosition.inMilliseconds / 1000.0).toString(), 'absolute']));
   }
 
   // ============================================
@@ -255,7 +303,16 @@ class PlayerNative extends PlayerBase {
 
   @override
   Future<void> setRate(double rate) async {
+    // mpv cannot scaletempo compressed (spdif) audio and silently keeps
+    // playing at 1x, so suspend passthrough while the rate is not 1.0.
+    _currentRate = rate;
+    if (_passthroughActive && rate != 1.0) {
+      await _applyPassthrough(false);
+    }
     await setProperty('speed', rate.toString());
+    if (_passthroughRequested && !_passthroughActive && rate == 1.0) {
+      await _applyPassthrough(true);
+    }
   }
 
   @override
@@ -270,6 +327,14 @@ class PlayerNative extends PlayerBase {
   @override
   Future<void> setProperty(String name, String value) async {
     if (disposed) return;
+    if ((Platform.isIOS || Platform.isMacOS) && name == 'dv-conversion-mode') {
+      value = _normalizeDvConversionMode(value);
+      _dvConversionMode = value;
+    }
+    if ((Platform.isIOS || Platform.isMacOS) && name == 'dv-conversion-log') {
+      value = _normalizeBoolProperty(value);
+      _dvConversionLog = value;
+    }
     await _ensureInitialized();
     await invoke('setProperty', {'name': name, 'value': value});
   }
@@ -277,8 +342,22 @@ class PlayerNative extends PlayerBase {
   @override
   Future<String?> getProperty(String name) async {
     if (disposed) return null;
+    if ((Platform.isIOS || Platform.isMacOS) && name == 'dv-conversion-mode') {
+      return _dvConversionMode;
+    }
+    if ((Platform.isIOS || Platform.isMacOS) && name == 'dv-conversion-log') {
+      return _dvConversionLog;
+    }
     await _ensureInitialized();
     return await invoke<String>('getProperty', {'name': name});
+  }
+
+  @override
+  Future<Map<String, dynamic>> getStats() async {
+    if (disposed || !Platform.isAndroid) return super.getStats();
+    await _ensureInitialized();
+    final result = await invoke<Map>('getStats');
+    return Map<String, dynamic>.from(result ?? const {});
   }
 
   @override
@@ -293,10 +372,16 @@ class PlayerNative extends PlayerBase {
   // ============================================
 
   @override
-  Future<void> setDisplayCriteria(MediaDisplayCriteria? criteria) async {
+  bool get needsDecoderRefreshAfterDisplaySwitch => Platform.isAndroid;
+
+  @override
+  Future<void> setDisplayCriteria(MediaDisplayCriteria? criteria, {int extraDelayMs = 0}) async {
     if (disposed || !Platform.isIOS) return;
     await _ensureInitialized();
-    await invoke('setDisplayCriteria', {'criteria': criteria?.toJson()});
+    await invoke('setDisplayCriteria', {
+      'criteria': _effectiveDisplayCriteria(criteria)?.toJson(),
+      'extraDelayMs': extraDelayMs,
+    });
   }
 
   @override
@@ -306,18 +391,34 @@ class PlayerNative extends PlayerBase {
     await invoke('setLogLevel', {'level': level});
   }
 
-  // ============================================
-  // Passthrough
-  // ============================================
+  bool _passthroughRequested = false;
+  bool _passthroughActive = false;
+  double _currentRate = 1.0;
+
+  @override
+  bool get audioPassthroughActive => _passthroughActive;
+
+  /// Codecs the platform can take as a bitstream. On iOS/tvOS compressed
+  /// audio goes through the system renderer, which only handles Dolby
+  /// Digital (Plus); desktop does real device passthrough for the full list.
+  static final String _passthroughCodecs = Platform.isIOS ? 'ac3,eac3' : 'ac3,eac3,dts,dts-hd,truehd';
 
   @override
   Future<void> setAudioPassthrough(bool enabled) async {
-    if (enabled) {
-      await setProperty('audio-spdif', 'ac3,eac3,dts,dts-hd,truehd');
-      await setProperty('audio-exclusive', 'yes');
-    } else {
-      await setProperty('audio-spdif', '');
-      await setProperty('audio-exclusive', 'no');
+    _passthroughRequested = enabled;
+    // Deferred until the rate returns to 1.0 (see setRate).
+    if (enabled && _currentRate != 1.0) return;
+    await _applyPassthrough(enabled);
+  }
+
+  Future<void> _applyPassthrough(bool enabled) async {
+    _passthroughActive = enabled;
+    await setProperty('audio-spdif', enabled ? _passthroughCodecs : '');
+    // audio-exclusive redirects coreaudio to coreaudio_exclusive on macOS
+    // (and exclusive WASAPI on Windows); on iOS/tvOS it is set once at
+    // playback start and must not be clobbered here.
+    if (!Platform.isIOS) {
+      await setProperty('audio-exclusive', enabled ? 'yes' : 'no');
     }
   }
 

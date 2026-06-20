@@ -4,8 +4,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
-import 'app_logger.dart';
-import 'platform_detector.dart';
+import 'text_input_diagnostics.dart';
 
 String _describeSimulatedKey(KeyEvent event) {
   return 'type=${event.runtimeType} logical=${event.logicalKey.keyLabel}/${event.logicalKey.keyId} '
@@ -13,9 +12,10 @@ String _describeSimulatedKey(KeyEvent event) {
 }
 
 void _logKeySimulator(String message) {
-  if (!PlatformDetector.isTV()) return;
-  appLogger.i('TextInputDiag KeySimulator: $message');
+  TextInputDiagnostics.log('KeySimulator', message);
 }
+
+final Map<LogicalKeyboardKey, FocusNode> _heldFocusNodes = {};
 
 /// Shared utility for simulating key press events through the focus tree.
 ///
@@ -65,6 +65,7 @@ void simulateKeyDown(LogicalKeyboardKey logicalKey) {
     final focusNode = FocusManager.instance.primaryFocus;
     if (focusNode == null) return;
 
+    _heldFocusNodes[logicalKey] = focusNode;
     _dispatchKeyEvent(
       focusNode,
       KeyDownEvent(
@@ -82,8 +83,13 @@ void simulateKeyUp(LogicalKeyboardKey logicalKey) {
   _logKeySimulator('simulateKeyUp scheduled logical=${logicalKey.keyLabel}/${logicalKey.keyId}');
   scheduleFrameIfIdle();
   SchedulerBinding.instance.addPostFrameCallback((_) {
-    final focusNode = FocusManager.instance.primaryFocus;
+    final heldFocusNode = _heldFocusNodes.remove(logicalKey);
+    final focusNode = heldFocusNode ?? FocusManager.instance.primaryFocus;
     if (focusNode == null) return;
+    if (heldFocusNode != null && heldFocusNode.context == null) {
+      _logKeySimulator('simulateKeyUp dropped detached held focus logical=${logicalKey.keyLabel}/${logicalKey.keyId}');
+      return;
+    }
 
     _dispatchKeyEvent(
       focusNode,

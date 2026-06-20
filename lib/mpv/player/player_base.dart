@@ -31,6 +31,12 @@ abstract class PlayerBase with PlayerStreamControllersMixin implements Player {
   @override
   PlayerState get state => _state;
 
+  @override
+  Duration get currentPosition => Duration(milliseconds: _positionMs);
+
+  @override
+  bool get audioPassthroughActive => false;
+
   late final PlayerStreams _streams;
 
   @override
@@ -46,8 +52,11 @@ abstract class PlayerBase with PlayerStreamControllersMixin implements Player {
   int _lastEmitMs = 0;
   int _lastCacheStateMs = 0;
   int _positionMs = 0;
+  Duration _timelineOffset = Duration.zero;
+  Duration? _timelineDuration;
   int _nextPropId = 0;
   final Map<int, String> _propIdToName = {};
+  Map<String, SubtitleTrack> _externalSubtitleMetadataByUri = const {};
 
   @protected
   bool initialized = false;
@@ -96,6 +105,35 @@ abstract class PlayerBase with PlayerStreamControllersMixin implements Player {
     );
   }
 
+  /// The (name, format) registrations every backend makes at init — the
+  /// properties [handlePropertyChange] needs for core [PlayerState].
+  /// `track-list` is registered separately because mpv uses node format on
+  /// Apple platforms; backend-specific extras (mpv: secondary-sid /
+  /// demuxer-cache-state / audio-device*; ExoPlayer: demuxer-cache-time)
+  /// are appended by the subclasses.
+  static const List<(String, String)> corePropertyObservations = [
+    ('time-pos', 'double'),
+    ('duration', 'double'),
+    ('seekable', 'flag'),
+    ('pause', 'flag'),
+    ('paused-for-cache', 'flag'),
+    ('eof-reached', 'flag'),
+    ('volume', 'double'),
+    ('speed', 'double'),
+    ('aid', 'string'),
+    ('sid', 'string'),
+  ];
+
+  /// Register [corePropertyObservations] plus `track-list` in the
+  /// backend's preferred format. Called from each subclass's initialize.
+  @protected
+  Future<void> observeCoreProperties({required String trackListFormat}) async {
+    for (final (name, format) in corePropertyObservations) {
+      await observeProperty(name, format);
+    }
+    await observeProperty('track-list', trackListFormat);
+  }
+
   @protected
   Future<void> observeProperty(String name, String format) async {
     final propId = _nextPropId++;
@@ -142,13 +180,13 @@ abstract class PlayerBase with PlayerStreamControllersMixin implements Player {
 
       case 'time-pos':
         if (value is num) {
-          _positionMs = (value * 1000).round();
+          final pos = _toTimelinePosition(Duration(milliseconds: (value * 1000).round()));
+          _positionMs = pos.inMilliseconds;
           // Only allocate Duration + copyWith + emit at ~4Hz (250ms).
           // Raw int is stored every tick so synchronous reads via _positionMs stay current.
           final nowMs = _throttleSw.elapsedMilliseconds;
           if (nowMs - _lastEmitMs >= 250) {
             _lastEmitMs = nowMs;
-            final pos = Duration(milliseconds: _positionMs);
             _state = _state.copyWith(position: pos);
             positionController.add(pos);
           }
@@ -157,7 +195,7 @@ abstract class PlayerBase with PlayerStreamControllersMixin implements Player {
 
       case 'duration':
         if (value is num) {
-          final duration = Duration(milliseconds: (value * 1000).toInt());
+          final duration = _timelineDuration ?? _toTimelinePosition(Duration(milliseconds: (value * 1000).toInt()));
           _state = _state.copyWith(duration: duration);
           durationController.add(duration);
         }
@@ -174,7 +212,7 @@ abstract class PlayerBase with PlayerStreamControllersMixin implements Player {
           final nowMs = _throttleSw.elapsedMilliseconds;
           if (nowMs - _lastCacheStateMs < 250) break;
           _lastCacheStateMs = nowMs;
-          final buffer = Duration(milliseconds: (value * 1000).toInt());
+          final buffer = _toTimelinePosition(Duration(milliseconds: (value * 1000).toInt()));
           _state = _state.copyWith(buffer: buffer);
           bufferController.add(buffer);
           // Synthesize a single range for players without demuxer-cache-state (ExoPlayer).
@@ -295,7 +333,7 @@ abstract class PlayerBase with PlayerStreamControllersMixin implements Player {
     // Extract cache-end for the single buffer duration (replaces demuxer-cache-time)
     final cacheEnd = cacheState['cache-end'] as num?;
     if (cacheEnd != null) {
-      final buffer = Duration(milliseconds: (cacheEnd * 1000).toInt());
+      final buffer = _toTimelinePosition(Duration(milliseconds: (cacheEnd * 1000).toInt()));
       _state = _state.copyWith(buffer: buffer);
       bufferController.add(buffer);
     }
@@ -311,8 +349,8 @@ abstract class PlayerBase with PlayerStreamControllersMixin implements Player {
           if (start != null && end != null) {
             ranges.add(
               BufferRange(
-                start: Duration(milliseconds: (start * 1000).toInt()),
-                end: Duration(milliseconds: (end * 1000).toInt()),
+                start: _toTimelinePosition(Duration(milliseconds: (start * 1000).toInt())),
+                end: _toTimelinePosition(Duration(milliseconds: (end * 1000).toInt())),
               ),
             );
           }
@@ -351,6 +389,7 @@ abstract class PlayerBase with PlayerStreamControllersMixin implements Player {
       case 'file-loaded':
         _state = _state.copyWith(completed: false);
         completedController.add(false);
+        fileLoadedController.add(null);
         break;
 
       case 'playback-restart':
@@ -409,16 +448,18 @@ abstract class PlayerBase with PlayerStreamControllersMixin implements Player {
       } else if (type == 'sub') {
         if (selected) selectedSubtitleId = id;
         final codec = track['codec'] as String?;
+        final externalFilename = track['external-filename'] as String?;
+        final externalMetadata = externalFilename == null ? null : _externalSubtitleMetadataByUri[externalFilename];
         subtitleTracks.add(
           SubtitleTrack(
             id: id,
-            title: cleanSubtitleTitle(track['title'] as String?, codec: codec),
-            language: cleanTrackMetadataValue(track['lang'] as String?),
-            codec: codec,
-            isDefault: track['default'] as bool? ?? false,
-            isForced: track['forced'] as bool? ?? false,
+            title: externalMetadata?.title ?? cleanSubtitleTitle(track['title'] as String?, codec: codec),
+            language: externalMetadata?.language ?? cleanTrackMetadataValue(track['lang'] as String?),
+            codec: externalMetadata?.codec ?? codec,
+            isDefault: externalMetadata?.isDefault ?? (track['default'] as bool? ?? false),
+            isForced: externalMetadata?.isForced ?? (track['forced'] as bool? ?? false),
             isExternal: track['external'] as bool? ?? false,
-            uri: track['external-filename'] as String?,
+            uri: externalFilename,
           ),
         );
       }
@@ -477,6 +518,18 @@ abstract class PlayerBase with PlayerStreamControllersMixin implements Player {
   }
 
   @protected
+  void setExternalSubtitleMetadata(List<SubtitleTrack>? externalSubtitles) {
+    final metadataByUri = <String, SubtitleTrack>{};
+    for (final subtitle in externalSubtitles ?? const <SubtitleTrack>[]) {
+      final uri = subtitle.uri;
+      if (uri != null && uri.isNotEmpty) {
+        metadataByUri[uri] = subtitle;
+      }
+    }
+    _externalSubtitleMetadataByUri = metadataByUri;
+  }
+
+  @protected
   void setVolumeState(double volume) {
     if (_state.volume == volume) return;
     _state = _state.copyWith(volume: volume);
@@ -491,18 +544,35 @@ abstract class PlayerBase with PlayerStreamControllersMixin implements Player {
   }
 
   @protected
-  void resetPlaybackProgress(Duration position) {
+  void configureTimeline({Duration offset = Duration.zero, Duration? duration}) {
+    _timelineOffset = offset;
+    _timelineDuration = duration;
+  }
+
+  @protected
+  Duration sourceSeekPosition(Duration timelinePosition) {
+    final sourcePosition = timelinePosition - _timelineOffset;
+    return sourcePosition.isNegative ? Duration.zero : sourcePosition;
+  }
+
+  Duration _toTimelinePosition(Duration sourcePosition) {
+    return sourcePosition + _timelineOffset;
+  }
+
+  @protected
+  void resetPlaybackProgress(Duration sourcePosition) {
+    final position = _toTimelinePosition(sourcePosition);
     _positionMs = position.inMilliseconds;
     _state = _state.copyWith(
       completed: false,
       position: position,
-      duration: Duration.zero,
+      duration: _timelineDuration ?? Duration.zero,
       buffer: Duration.zero,
       bufferRanges: const [],
     );
     completedController.add(false);
     positionController.add(position);
-    durationController.add(Duration.zero);
+    durationController.add(_timelineDuration ?? Duration.zero);
     bufferController.add(Duration.zero);
     bufferRangesController.add(const []);
   }
@@ -524,7 +594,7 @@ abstract class PlayerBase with PlayerStreamControllersMixin implements Player {
   }
 
   @override
-  Future<void> setDisplayCriteria(MediaDisplayCriteria? criteria) async {}
+  Future<void> setDisplayCriteria(MediaDisplayCriteria? criteria, {int extraDelayMs = 0}) async {}
 
   @override
   Future<bool> setVisible(bool visible, {bool restoreOnWindowVisible = false}) async {
@@ -550,6 +620,34 @@ abstract class PlayerBase with PlayerStreamControllersMixin implements Player {
   Future<void> clearVideoFrameRate() async {}
 
   @override
+  // ignore: no-empty-block - base no-op, ExoPlayer styles subtitles natively
+  Future<void> setSubtitleStyle({
+    required double fontSize,
+    required String textColor,
+    required double borderSize,
+    required String borderColor,
+    required String bgColor,
+    required int bgOpacity,
+    int subtitlePosition = 100,
+    bool bold = false,
+    bool italic = false,
+  }) async {}
+
+  @override
+  // ignore: no-empty-block - base no-op, mpv scales via panscan/aspect-override
+  Future<void> setBoxFitMode(int mode) async {}
+
+  @override
+  // ignore: no-empty-block - base no-op, mpv zooms via the video-zoom property
+  Future<void> setVideoZoom(double scale) async {}
+
+  @override
+  Future<Map<String, dynamic>> getStats() async => const {};
+
+  @override
+  Future<String> runtimePlayerType() async => playerType;
+
+  @override
   Future<bool> requestAudioFocus() async {
     // Default returns true, overridden by Android
     return true;
@@ -567,12 +665,33 @@ abstract class PlayerBase with PlayerStreamControllersMixin implements Player {
   bool get supportsSecondarySubtitles => true;
 
   @override
+  bool get attachesExternalSubtitlesAtOpen => false;
+
+  @override
+  bool get detectsFpsAfterRender => false;
+
+  @override
+  bool get needsDecoderRefreshAfterDisplaySwitch => false;
+
+  @override
+  bool get providesNativeStats => false;
+
+  @override
   // ignore: no-empty-block - base no-op, overridden by platform subclasses
   Future<void> selectSecondarySubtitleTrack(SubtitleTrack track) async {}
 
   @override
   // ignore: no-empty-block - base no-op, overridden by platform subclasses
   Future<void> setAudioPassthrough(bool enabled) async {}
+
+  /// mpv loudnorm targeting streaming-style loudness; mirrored by the
+  /// Android ExoPlayer effect parameters in AudioNormalizationEffect.kt.
+  static const _loudnormFilter = 'loudnorm=I=-14:TP=-3:LRA=4';
+
+  @override
+  Future<void> setAudioNormalization(bool enabled) async {
+    await setProperty('af', enabled ? _loudnormFilter : '');
+  }
 
   @override
   // ignore: no-empty-block - base no-op, overridden by platform subclasses
@@ -650,13 +769,27 @@ abstract class PlayerBase with PlayerStreamControllersMixin implements Player {
   }
 
   @override
-  Future<void> dispose() async {
+  Future<void> dispose({bool preserveDisplayMode = false}) async {
     if (_disposed) return;
     _disposed = true;
 
-    await _eventSubscription?.cancel();
+    try {
+      await _eventSubscription?.cancel();
+    } on PlatformException catch (e, st) {
+      appLogger.d('Player event stream already detached during dispose', error: e, stackTrace: st);
+    } on MissingPluginException catch (e, st) {
+      appLogger.d('Player event stream plugin missing during dispose', error: e, stackTrace: st);
+    }
     await _logSubscription?.cancel();
-    await methodChannel.invokeMethod('dispose'); // Direct call — already guarded by _disposed check above
+    try {
+      await methodChannel.invokeMethod('dispose', {
+        'preserveDisplayMode': preserveDisplayMode,
+      }); // Direct call — already guarded by _disposed check above
+    } on PlatformException catch (e, st) {
+      appLogger.w('Player native dispose failed during teardown', error: e, stackTrace: st);
+    } on MissingPluginException catch (e, st) {
+      appLogger.w('Player native dispose plugin missing during teardown', error: e, stackTrace: st);
+    }
     await closeStreamControllers();
   }
 }

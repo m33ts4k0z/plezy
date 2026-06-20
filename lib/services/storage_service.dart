@@ -1,4 +1,5 @@
 import 'dart:convert';
+import '../media/ids.dart';
 
 import 'package:uuid/uuid.dart';
 
@@ -58,6 +59,8 @@ class StorageService extends BaseSharedPreferencesService {
   /// full profile id is the scope.
   String? activeUserScope() => _activeUserScope();
 
+  String userScopeForProfileId(String profileId) => parsePlexHomeProfileId(profileId)?.homeUserUuid ?? profileId;
+
   String? _activeUserScope() {
     final id = getActiveProfileId();
     if (id == null) return null;
@@ -70,6 +73,8 @@ class StorageService extends BaseSharedPreferencesService {
     final scope = _activeUserScope();
     return scope != null ? 'user_${scope}_' : '';
   }
+
+  String _userPrefixForProfileId(String profileId) => 'user_${userScopeForProfileId(profileId)}_';
 
   /// Read a string with user-scoped key, migrating from legacy key if needed.
   String? _getScopedString(String baseKey) {
@@ -86,16 +91,16 @@ class StorageService extends BaseSharedPreferencesService {
   }
 
   // Per-Server Endpoint URL (for multi-server connection caching)
-  Future<void> saveServerEndpoint(String serverId, String url) async {
+  Future<void> saveServerEndpoint(ServerId serverId, String url) async {
     await prefs.setString('$_prefixServerEndpoint$serverId', url);
     LogRedactionManager.registerServerUrl(url);
   }
 
-  String? getServerEndpoint(String serverId) {
+  String? getServerEndpoint(ServerId serverId) {
     return prefs.getString('$_prefixServerEndpoint$serverId');
   }
 
-  Future<void> clearServerEndpoint(String serverId) async {
+  Future<void> clearServerEndpoint(ServerId serverId) async {
     await prefs.remove('$_prefixServerEndpoint$serverId');
   }
 
@@ -252,6 +257,48 @@ class StorageService extends BaseSharedPreferencesService {
     ]);
   }
 
+  /// Clear library preferences for [serverId] within [profileId]'s user scope.
+  ///
+  /// Library-specific preferences are keyed by `serverId:libraryId`, so when a
+  /// profile loses access to a server those entries must go too. Otherwise a
+  /// later re-add of the same physical server revives old hidden/order/filter
+  /// choices.
+  Future<void> clearLibraryPreferencesForServer(
+    ServerId serverId, {
+    required String profileId,
+    bool includeLegacy = false,
+  }) async {
+    final prefixes = <String>{_userPrefixForProfileId(profileId), if (includeLegacy) ''};
+    await Future.wait(prefixes.map((prefix) => _clearLibraryPreferencesForServerPrefix(prefix, serverId)));
+  }
+
+  /// Clear [serverId] library preferences from every user scope and legacy
+  /// unscoped storage. Used when no remaining profile has access to the server.
+  Future<void> clearLibraryPreferencesForServerEverywhere(ServerId serverId) async {
+    await Future.wait([
+      _clearLibraryPreferencesForServerPrefix('', serverId),
+      _filterServerEntriesFromAllStringListKeys(_keyLibraryOrder, serverId),
+      _filterServerEntriesFromAllStringListKeys(_keyHiddenLibraries, serverId),
+      _clearServerSelectedLibraryKeysEverywhere(serverId),
+      _clearServerPerLibraryKeysEverywhere(_prefixLibrarySort, serverId),
+      _clearServerPerLibraryKeysEverywhere(_prefixLibraryFilters, serverId),
+      _clearServerPerLibraryKeysEverywhere(_prefixLibraryGrouping, serverId),
+      _clearServerPerLibraryKeysEverywhere(_prefixLibraryTab, serverId),
+    ]);
+  }
+
+  Future<void> _clearLibraryPreferencesForServerPrefix(String prefix, ServerId serverId) async {
+    await Future.wait([
+      _filterServerEntriesFromStringList('$prefix$_keyLibraryOrder', serverId),
+      _filterServerEntriesFromStringList('$prefix$_keyHiddenLibraries', serverId),
+      _clearSelectedLibraryForServer('$prefix$_keySelectedLibraryKey', serverId),
+      _clearKeysWithPrefixForServer('$prefix$_prefixLibrarySort', serverId),
+      _clearKeysWithPrefixForServer('$prefix$_prefixLibraryFilters', serverId),
+      _clearKeysWithPrefixForServer('$prefix$_prefixLibraryGrouping', serverId),
+      _clearKeysWithPrefixForServer('$prefix$_prefixLibraryTab', serverId),
+    ]);
+  }
+
   // Library Order (stored as JSON list of library keys)
   Future<void> saveLibraryOrder(List<String> libraryKeys) async {
     await _setStringList('$_userPrefix$_keyLibraryOrder', libraryKeys);
@@ -373,41 +420,6 @@ class StorageService extends BaseSharedPreferencesService {
     await _clearKeysWithPrefix(_prefixProfileLastUsed);
   }
 
-  // Episode Count Persistence (for partial download detection)
-
-  static const String _prefixEpisodeCount = 'episode_count_';
-
-  /// Save the total episode count for a show/season
-  Future<void> saveTotalEpisodeCount(String globalKey, int count) async {
-    await prefs.setInt('$_prefixEpisodeCount$globalKey', count);
-  }
-
-  /// Get the total episode count for a show/season
-  int? getTotalEpisodeCount(String globalKey) {
-    return prefs.getInt('$_prefixEpisodeCount$globalKey');
-  }
-
-  /// Load all persisted episode counts
-  Map<String, int> loadAllEpisodeCounts() {
-    final counts = <String, int>{};
-    final keys = prefs.keys.where((k) => k.startsWith(_prefixEpisodeCount));
-
-    for (final key in keys) {
-      final globalKey = key.replaceFirst(_prefixEpisodeCount, '');
-      final count = prefs.getInt(key);
-      if (count != null) {
-        counts[globalKey] = count;
-      }
-    }
-
-    return counts;
-  }
-
-  /// Remove the episode count for a specific show/season
-  Future<void> removeEpisodeCount(String globalKey) async {
-    await prefs.remove('$_prefixEpisodeCount$globalKey');
-  }
-
   // Private helper methods
 
   /// Helper to read and decode JSON `List<String>` from preferences
@@ -437,8 +449,72 @@ class StorageService extends BaseSharedPreferencesService {
 
   /// Remove all keys matching a prefix
   Future<void> _clearKeysWithPrefix(String prefix) async {
-    final keys = prefs.keys.where((k) => k.startsWith(prefix));
+    final keys = prefs.keys.where((k) => k.startsWith(prefix)).toList(growable: false);
     await Future.wait(keys.map((k) => prefs.remove(k)));
+  }
+
+  bool _belongsToServer(String value, ServerId serverId) => value.startsWith('$serverId:');
+
+  Future<void> _filterServerEntriesFromStringList(String key, ServerId serverId) async {
+    final values = _getStringList(key);
+    if (values == null || values.isEmpty) return;
+    final filtered = values.where((value) => !_belongsToServer(value, serverId)).toList(growable: false);
+    if (filtered.length == values.length) return;
+    if (filtered.isEmpty) {
+      await prefs.remove(key);
+    } else {
+      await _setStringList(key, filtered);
+    }
+  }
+
+  Future<void> _filterServerEntriesFromAllStringListKeys(String baseKey, ServerId serverId) async {
+    final keys = prefs.keys
+        .where((key) => key == baseKey || (key.startsWith('user_') && key.endsWith('_$baseKey')))
+        .toList(growable: false);
+    await Future.wait(keys.map((key) => _filterServerEntriesFromStringList(key, serverId)));
+  }
+
+  Future<void> _clearSelectedLibraryForServer(String key, ServerId serverId) async {
+    final selected = prefs.getString(key);
+    if (selected != null && _belongsToServer(selected, serverId)) {
+      await prefs.remove(key);
+    }
+  }
+
+  Future<void> _clearServerSelectedLibraryKeysEverywhere(ServerId serverId) async {
+    final keys = prefs.keys
+        .where(
+          (key) =>
+              key == _keySelectedLibraryKey || (key.startsWith('user_') && key.endsWith('_$_keySelectedLibraryKey')),
+        )
+        .toList(growable: false);
+    await Future.wait(keys.map((key) => _clearSelectedLibraryForServer(key, serverId)));
+  }
+
+  Future<void> _clearKeysWithPrefixForServer(String keyPrefix, ServerId serverId) async {
+    final serverPrefix = '$serverId:';
+    final keys = prefs.keys
+        .where((key) => key.startsWith(keyPrefix) && key.substring(keyPrefix.length).startsWith(serverPrefix))
+        .toList(growable: false);
+    await Future.wait(keys.map((key) => prefs.remove(key)));
+  }
+
+  Future<void> _clearServerPerLibraryKeysEverywhere(String basePrefix, ServerId serverId) async {
+    final serverPrefix = '$serverId:';
+    final scopedMarker = '_$basePrefix';
+    final keys = prefs.keys
+        .where((key) {
+          if (key.startsWith(basePrefix)) {
+            return key.substring(basePrefix.length).startsWith(serverPrefix);
+          }
+          if (!key.startsWith('user_')) return false;
+          final markerIndex = key.lastIndexOf(scopedMarker);
+          if (markerIndex == -1) return false;
+          final suffix = key.substring(markerIndex + scopedMarker.length);
+          return suffix.startsWith(serverPrefix);
+        })
+        .toList(growable: false);
+    await Future.wait(keys.map((key) => prefs.remove(key)));
   }
 
   // Public JSON helpers for reducing boilerplate

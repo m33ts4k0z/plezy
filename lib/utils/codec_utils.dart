@@ -31,6 +31,14 @@ class CodecUtils {
     }
   }
 
+  static bool isTextSubtitleCodec(String? codec) {
+    if (codec == null) return false;
+    return switch (codec.toLowerCase()) {
+      'srt' || 'subrip' || 'ass' || 'ssa' || 'webvtt' || 'vtt' || 'mov_text' => true,
+      _ => false,
+    };
+  }
+
   /// Formats a subtitle codec name to a user-friendly display format.
   ///
   /// Converts internal codec names like 'SUBRIP' to friendly names like 'SRT'.
@@ -61,6 +69,23 @@ class CodecUtils {
       'mpeg4' => 'MPEG-4',
       'vc1' => 'VC-1',
       _ => codec.toUpperCase(),
+    };
+  }
+
+  /// Formats an audio channel count as a friendly layout name (2 → 'Stereo',
+  /// 6 → '5.1'). Returns null when [channels] is null or not positive.
+  static String? formatAudioChannels(int? channels) {
+    if (channels == null || channels <= 0) return null;
+    return switch (channels) {
+      1 => 'Mono',
+      2 => 'Stereo',
+      3 => '3.0',
+      4 => '4.0',
+      5 => '4.1',
+      6 => '5.1',
+      7 => '6.1',
+      8 => '7.1',
+      _ => '${channels}ch',
     };
   }
 

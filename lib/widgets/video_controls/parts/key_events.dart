@@ -61,9 +61,24 @@ extension _PlexVideoControlsKeyEventMethods on _PlexVideoControlsState {
     return event is KeyDownEvent && _isPlayPauseKey(event);
   }
 
+  void _activateHiddenControlsPrimaryAction() {
+    if (_isSkipMarkerButtonVisible) {
+      _activateSkipMarker();
+      return;
+    }
+    _playOrPause();
+    _showControlsWithFocus();
+  }
+
   /// Global key event handler for focus-independent shortcuts (desktop only)
   bool _handleGlobalKeyEvent(KeyEvent event) {
     if (!mounted) return false;
+    if (ModalRoute.of(context)?.isCurrent != true) return false;
+
+    // Any actionable key (keyboard / dpad / controller) cancels an in-progress
+    // auto-skip countdown. Non-consuming — we fall through so the key still
+    // performs its normal action. Single cancel point for keys.
+    if (event.isActionable) _cancelAutoSkipFromUserInteraction();
 
     // When an overlay sheet is open (e.g. subtitle search with text fields),
     // don't consume key events — let text input work normally.
@@ -85,13 +100,15 @@ extension _PlexVideoControlsKeyEventMethods on _PlexVideoControlsState {
         if (PlatformDetector.isTV() && event is KeyDownEvent) {
           BackKeyCoordinator.markHandled();
         }
+        final promptBackResult = handlePromptDismissBackKey(event, widget.onDismissPrompt);
+        if (promptBackResult != KeyEventResult.ignored) return true;
         final backResult = handleBackKeyAction(event, () {
           if (PlatformDetector.isTV()) {
             if (_showControls) {
-              if (_isContentStripVisible) {
+              if (widget.chromeController.contentStripVisible) {
                 _desktopControlsKey.currentState?.dismissContentStrip();
-                _setControlsState(() => _isContentStripVisible = false);
-                _restartHideTimerIfPlaying();
+                widget.chromeController.setContentStripVisible(false);
+                _restartHideTimerForCurrentPlaybackState();
                 return;
               }
               _hideControls();
@@ -156,8 +173,12 @@ extension _PlexVideoControlsKeyEventMethods on _PlexVideoControlsState {
         onNextEpisode: widget.onNext,
         onPreviousEpisode: widget.onPrevious,
         onScreenshot: _showScreenshotToast,
+        onZoomIn: widget.onZoomIn,
+        onZoomOut: widget.onZoomOut,
+        onZoomReset: widget.onResetVideoZoom,
         currentPositionEpoch: widget.currentPositionEpoch,
         onLiveSeek: widget.onLiveSeek,
+        onLiveSeekBy: widget.onLiveSeekBy,
       );
       if (result == KeyEventResult.handled) {
         _focusNode.requestFocus(); // self-heal focus
@@ -165,7 +186,7 @@ extension _PlexVideoControlsKeyEventMethods on _PlexVideoControlsState {
       }
     }
 
-    return true; // Consume all events while video player is active
+    return false;
   }
 
   KeyEventResult _handleControlsKeyEvent(KeyEvent event, bool isMobile) {
@@ -183,13 +204,17 @@ extension _PlexVideoControlsKeyEventMethods on _PlexVideoControlsState {
     if (PlatformDetector.isTV() && event.logicalKey.isBackKey && event is KeyDownEvent) {
       BackKeyCoordinator.markHandled();
     }
+    final promptBackResult = handlePromptDismissBackKey(event, widget.onDismissPrompt);
+    if (promptBackResult != KeyEventResult.ignored) {
+      return promptBackResult;
+    }
     final backResult = handleBackKeyAction(event, () {
       if (PlatformDetector.isTV()) {
         if (_showControls) {
-          if (_isContentStripVisible) {
+          if (widget.chromeController.contentStripVisible) {
             _desktopControlsKey.currentState?.dismissContentStrip();
-            _setControlsState(() => _isContentStripVisible = false);
-            _restartHideTimerIfPlaying();
+            widget.chromeController.setContentStripVisible(false);
+            _restartHideTimerForCurrentPlaybackState();
             return;
           }
           _hideControls();
@@ -218,7 +243,7 @@ extension _PlexVideoControlsKeyEventMethods on _PlexVideoControlsState {
 
     // Reset hide timer on any keyboard/controller input when controls are visible.
     if (_showControls) {
-      _restartHideTimerIfPlaying();
+      _restartHideTimerForCurrentPlaybackState();
     }
 
     final key = event.logicalKey;
@@ -257,12 +282,12 @@ extension _PlexVideoControlsKeyEventMethods on _PlexVideoControlsState {
       return KeyEventResult.handled;
     }
 
-    // Handle Select/Enter when controls are hidden: pause and show controls.
+    // Handle Select/Enter when controls are hidden.
     // Only intercept if this Focus node itself has primary focus (not a descendant).
+    // When the skip marker button is the only visible affordance, Select activates
+    // it; otherwise it falls back to play/pause + show controls.
     if (_isSelectKey(key) && !_showControls && _focusNode.hasPrimaryFocus) {
-      _playOrPause();
-      _showControlsWithFocus();
-      return KeyEventResult.handled;
+      return handleOneShotSelect(event, _activateHiddenControlsPrimaryAction);
     }
 
     // On desktop/TV, show controls on directional input.
@@ -287,7 +312,9 @@ extension _PlexVideoControlsKeyEventMethods on _PlexVideoControlsState {
     }
 
     // Pass other events to the keyboard shortcuts service.
-    if (_keyboardService == null) return KeyEventResult.handled;
+    if (_keyboardService == null) {
+      return event.logicalKey.isNavigationKey ? KeyEventResult.handled : KeyEventResult.ignored;
+    }
 
     final result = _keyboardService!.handleVideoPlayerKeyEvent(
       event,
@@ -304,11 +331,15 @@ extension _PlexVideoControlsKeyEventMethods on _PlexVideoControlsState {
       onNextEpisode: widget.onNext,
       onPreviousEpisode: widget.onPrevious,
       onScreenshot: _showScreenshotToast,
+      onZoomIn: widget.onZoomIn,
+      onZoomOut: widget.onZoomOut,
+      onZoomReset: widget.onResetVideoZoom,
       currentPositionEpoch: widget.currentPositionEpoch,
       onLiveSeek: widget.onLiveSeek,
+      onLiveSeekBy: widget.onLiveSeekBy,
+      onSeekRequested: widget.onSeekRequested,
     );
-    // Let non-navigation keys (volume, etc.) pass through to the OS.
-    if (!event.logicalKey.isNavigationKey) return KeyEventResult.ignored;
+    if (!event.logicalKey.isNavigationKey) return result;
     // Never return .ignored for navigation keys — prevent leaking to previous routes.
     return result == KeyEventResult.ignored ? KeyEventResult.handled : result;
   }

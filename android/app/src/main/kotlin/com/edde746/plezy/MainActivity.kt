@@ -1,18 +1,23 @@
 package com.edde746.plezy
 
+import android.app.Activity
 import android.app.ActivityManager
 import android.app.AppOpsManager
 import android.app.PictureInPictureParams
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.graphics.SurfaceTexture
+import android.media.AudioManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.Process
+import android.provider.Settings
 import android.util.Log
 import android.util.Rational
 import android.view.InputDevice
@@ -20,6 +25,7 @@ import android.view.KeyEvent
 import android.view.TextureView
 import android.view.ViewGroup
 import android.view.WindowInsets
+import android.view.WindowManager
 import android.view.inputmethod.InputMethodManager
 import android.widget.FrameLayout
 import androidx.core.content.FileProvider
@@ -37,11 +43,38 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.embedding.engine.FlutterShellArgs
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
+import kotlin.math.roundToInt
 
 class MainActivity : FlutterActivity() {
 
   companion object {
     private const val TAG = "MainActivity"
+    private const val TEXT_INPUT_DIAGNOSTICS_ENABLED = false
+    private const val EXTERNAL_PLAYER_REQUEST_CODE = 7461
+
+    // External player result APIs used by Jellyfin Android TV.
+    private const val API_MX_RETURN_RESULT = "return_result"
+    private const val API_MX_RESULT_ID = "com.mxtech.intent.result.VIEW"
+    private const val API_MX_RESULT_POSITION = "position"
+    private const val API_MX_RESULT_DURATION = "duration"
+    private const val API_MX_RESULT_END_BY = "end_by"
+    private const val API_MX_RESULT_END_BY_PLAYBACK_COMPLETION = "playback_completion"
+    private const val API_MX_TITLE = "title"
+    private const val API_MX_FILENAME = "filename"
+    private const val API_MX_SECURE_URI = "secure_uri"
+    private const val API_VLC_RESULT_POSITION = "extra_position"
+    private const val API_VLC_RESULT_DURATION = "extra_duration"
+
+    private const val API_VIMU_TITLE = "forcename"
+    private const val API_VIMU_SEEK_POSITION = "startfrom"
+    private const val API_VIMU_RESUME = "forceresume"
+    private const val API_VIMU_RESULT_ID = "net.gtvbox.videoplayer.result"
+    private const val API_VIMU_RESULT_ERROR = 4
+    private const val API_VIMU_RESULT_PLAYBACK_COMPLETED = 1
+
+    private val externalPlayerPositionExtras = arrayOf(API_MX_RESULT_POSITION, API_VLC_RESULT_POSITION)
+    private val externalPlayerDurationExtras = arrayOf(API_MX_RESULT_DURATION, API_VLC_RESULT_DURATION)
+
     var usingSkia = false
 
     /// Currently-attached activity instance. Used by background plugins
@@ -58,11 +91,20 @@ class MainActivity : FlutterActivity() {
   private val EXTERNAL_PLAYER_CHANNEL = "com.plezy/external_player"
   private val THEME_CHANNEL = "com.plezy/theme"
   private val DEVICE_CHANNEL = "com.plezy/device"
+  private val DEVICE_ADJUSTMENT_CHANNEL = "com.plezy/device_adjustment"
   private val TEXT_INPUT_CHANNEL = "com.plezy/text_input"
   private val APP_EXIT_CHANNEL = "com.plezy/app_exit"
   private val APP_FOREGROUND_CHANNEL = "com.plezy/app_foreground"
   private var watchNextPlugin: WatchNextPlugin? = null
   private var nativeTextInputFocused = false
+  private var pendingExternalPlayerResult: MethodChannel.Result? = null
+  private var originalWindowBrightness: Float? = null
+
+  private inline fun logTextInputDiag(message: () -> String) {
+    if (TEXT_INPUT_DIAGNOSTICS_ENABLED) {
+      Log.i(TAG, "TextInputDiag ${message()}")
+    }
+  }
 
   // Auto PiP state
   private var autoPipReady = false
@@ -128,7 +170,7 @@ class MainActivity : FlutterActivity() {
   private fun shouldForwardDpadBeforeIme(): Boolean {
     val imm = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
     val forward = !nativeTextInputFocused && !isImeVisible() && !imm.isAcceptingText
-    Log.i(TAG, "TextInputDiag shouldForwardDpadBeforeIme=$forward ${describeImeState()}")
+    logTextInputDiag { "shouldForwardDpadBeforeIme=$forward ${describeImeState()}" }
     return forward
   }
 
@@ -165,6 +207,30 @@ class MainActivity : FlutterActivity() {
     )
   }
 
+  /** Hardware capability signals used by Dart to pick the visual-effects tier. */
+  private fun getPerformanceSignals(): Map<String, Any> {
+    val activityManager = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+    val memoryInfo = ActivityManager.MemoryInfo()
+    activityManager.getMemoryInfo(memoryInfo)
+    return mapOf(
+      // Actual process bitness: low-end TV boxes often run 32-bit userspace.
+      "is64Bit" to Process.is64Bit(),
+      "isLowRamDevice" to activityManager.isLowRamDevice,
+      "totalMemBytes" to memoryInfo.totalMem
+    )
+  }
+
+  /** User-assigned device name (Settings > About > Device name), or null. */
+  private fun getDeviceName(): String? {
+    // The name the user gave the device; also used by Cast/Nearby.
+    val name = Settings.Global.getString(contentResolver, Settings.Global.DEVICE_NAME)
+    if (!name.isNullOrBlank()) return name
+    // Fallback: the Bluetooth name usually mirrors the device name. Reading the
+    // settings string needs no BLUETOOTH permission (unlike BluetoothAdapter).
+    val bt = Settings.Secure.getString(contentResolver, "bluetooth_name")
+    return if (!bt.isNullOrBlank()) bt else null
+  }
+
   override fun onCreate(savedInstanceState: Bundle?) {
     // Apply persisted theme color to the window background before anything
     // else renders.  This prevents a white flash between the native splash
@@ -196,7 +262,7 @@ class MainActivity : FlutterActivity() {
     val wrapper = object : FrameLayout(this) {
       override fun dispatchKeyEventPreIme(event: KeyEvent): Boolean {
         if (isDpadKeyCode(event.keyCode)) {
-          Log.i(TAG, "TextInputDiag preIme received ${describeKeyEvent(event)} ${describeImeState()}")
+          logTextInputDiag { "preIme received ${describeKeyEvent(event)} ${describeImeState()}" }
         }
         when (event.keyCode) {
           KeyEvent.KEYCODE_DPAD_UP,
@@ -205,16 +271,16 @@ class MainActivity : FlutterActivity() {
           KeyEvent.KEYCODE_DPAD_RIGHT,
           KeyEvent.KEYCODE_DPAD_CENTER -> {
             if (shouldForwardDpadBeforeIme()) {
-              Log.i(TAG, "TextInputDiag preIme forwarding-to-Flutter-and-consuming ${describeKeyEvent(event)}")
+              logTextInputDiag { "preIme forwarding-to-Flutter-and-consuming ${describeKeyEvent(event)}" }
               super.dispatchKeyEvent(event)
               return true
             }
-            Log.i(TAG, "TextInputDiag preIme letting-IME-handle ${describeKeyEvent(event)}")
+            logTextInputDiag { "preIme letting-IME-handle ${describeKeyEvent(event)}" }
           }
         }
         val handled = super.dispatchKeyEventPreIme(event)
         if (isDpadKeyCode(event.keyCode)) {
-          Log.i(TAG, "TextInputDiag preIme superResult=$handled ${describeKeyEvent(event)} ${describeImeState()}")
+          logTextInputDiag { "preIme superResult=$handled ${describeKeyEvent(event)} ${describeImeState()}" }
         }
         return handled
       }
@@ -253,13 +319,76 @@ class MainActivity : FlutterActivity() {
 
   override fun dispatchKeyEvent(event: KeyEvent): Boolean {
     if (isDpadKeyCode(event.keyCode)) {
-      Log.i(TAG, "TextInputDiag activity.dispatchKeyEvent before ${describeKeyEvent(event)} ${describeImeState()}")
+      logTextInputDiag { "activity.dispatchKeyEvent before ${describeKeyEvent(event)} ${describeImeState()}" }
     }
     val handled = super.dispatchKeyEvent(event)
     if (isDpadKeyCode(event.keyCode)) {
-      Log.i(TAG, "TextInputDiag activity.dispatchKeyEvent after handled=$handled ${describeKeyEvent(event)} ${describeImeState()}")
+      logTextInputDiag {
+        "activity.dispatchKeyEvent after handled=$handled ${describeKeyEvent(event)} ${describeImeState()}"
+      }
     }
     return handled
+  }
+
+  override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+    if (requestCode == EXTERNAL_PLAYER_REQUEST_CODE) {
+      val pendingResult = pendingExternalPlayerResult
+      pendingExternalPlayerResult = null
+      if (pendingResult == null) {
+        Log.w(TAG, "External player result received without a pending channel result")
+      } else {
+        pendingResult.success(buildExternalPlayerResult(resultCode, data))
+      }
+      return
+    }
+
+    super.onActivityResult(requestCode, resultCode, data)
+  }
+
+  private fun buildExternalPlayerResult(resultCode: Int, data: Intent?): Map<String, Any?> {
+    val extras = data?.extras
+    val endPosition = firstNumberExtra(extras, externalPlayerPositionExtras)
+    val duration = firstNumberExtra(extras, externalPlayerDurationExtras)
+    val action = data?.action
+    val playbackCompleted = when (action) {
+      API_MX_RESULT_ID -> extras?.getString(API_MX_RESULT_END_BY) == API_MX_RESULT_END_BY_PLAYBACK_COMPLETION
+      API_VIMU_RESULT_ID -> resultCode == API_VIMU_RESULT_PLAYBACK_COMPLETED
+      else -> false
+    }
+    val playbackError = when (action) {
+      API_VIMU_RESULT_ID -> resultCode == API_VIMU_RESULT_ERROR
+      else -> false
+    }
+
+    return mapOf(
+      "launched" to true,
+      "resultCode" to resultCode,
+      "resultOk" to (resultCode == Activity.RESULT_OK),
+      "action" to action,
+      "positionMs" to endPosition,
+      "durationMs" to duration,
+      "playbackCompleted" to playbackCompleted,
+      "playbackError" to playbackError
+    )
+  }
+
+  private fun firstNumberExtra(extras: Bundle?, keys: Array<String>): Long? {
+    if (extras == null) return null
+    for (key in keys) {
+      @Suppress("DEPRECATION")
+      val value = extras.get(key)
+      when (value) {
+        is Number -> return value.toLong()
+        is String -> value.toLongOrNull()?.let { return it }
+      }
+    }
+    return null
+  }
+
+  override fun onDestroy() {
+    pendingExternalPlayerResult?.error("ACTIVITY_DESTROYED", "Activity was destroyed while external player was active", null)
+    pendingExternalPlayerResult = null
+    super.onDestroy()
   }
 
   private fun handleWatchNextIntent(intent: Intent?) {
@@ -352,8 +481,14 @@ class MainActivity : FlutterActivity() {
     MethodChannel(flutterEngine.dartExecutor.binaryMessenger, DEVICE_CHANNEL).setMethodCallHandler { call, result ->
       when (call.method) {
         "getTvDetection" -> result.success(getAndroidTvDetection())
+        "getDeviceName" -> result.success(getDeviceName())
+        "getPerformanceSignals" -> result.success(getPerformanceSignals())
         else -> result.notImplemented()
       }
+    }
+
+    MethodChannel(flutterEngine.dartExecutor.binaryMessenger, DEVICE_ADJUSTMENT_CHANNEL).setMethodCallHandler { call, result ->
+      handleDeviceAdjustmentCall(call.method, call.arguments, result)
     }
 
     MethodChannel(flutterEngine.dartExecutor.binaryMessenger, TEXT_INPUT_CHANNEL).setMethodCallHandler { call, result ->
@@ -361,10 +496,9 @@ class MainActivity : FlutterActivity() {
         "setNativeTextInputFocused" -> {
           val oldValue = nativeTextInputFocused
           nativeTextInputFocused = call.arguments as? Boolean ?: false
-          Log.i(
-            TAG,
-            "TextInputDiag methodChannel setNativeTextInputFocused old=$oldValue new=$nativeTextInputFocused ${describeImeState()}"
-          )
+          logTextInputDiag {
+            "methodChannel setNativeTextInputFocused old=$oldValue new=$nativeTextInputFocused ${describeImeState()}"
+          }
           result.success(null)
         }
         else -> result.notImplemented()
@@ -395,44 +529,83 @@ class MainActivity : FlutterActivity() {
       when (call.method) {
         "openVideo" -> {
           val filePath = call.argument<String>("filePath")
-          val packageName = call.argument<String>("package")
+          val packageNames = call.argument<List<Any?>>("packages")
+            ?.mapNotNull { (it as? String)?.trim()?.takeIf { value -> value.isNotEmpty() } }
+            ?: emptyList()
+          val title = call.argument<String>("title")?.trim()?.takeIf { it.isNotEmpty() }
+          val startPositionMs = call.argument<Number>("startPositionMs")?.toLong() ?: 0L
 
           if (filePath == null) {
             result.error("INVALID_ARGUMENT", "filePath is required", null)
             return@setMethodCallHandler
           }
 
+          if (pendingExternalPlayerResult != null) {
+            result.error("ALREADY_ACTIVE", "An external player is already active", null)
+            return@setMethodCallHandler
+          }
+
           try {
             val uri: Uri
             val grantRead: Boolean
+            val fileName: String?
 
             if (filePath.startsWith("http://") || filePath.startsWith("https://")) {
               uri = Uri.parse(filePath)
               grantRead = false
+              fileName = uri.lastPathSegment
             } else if (filePath.startsWith("content://")) {
               uri = Uri.parse(filePath)
               grantRead = true
+              fileName = uri.lastPathSegment
             } else {
               val path = if (filePath.startsWith("file://")) filePath.removePrefix("file://") else filePath
+              fileName = File(path).name
               uri = FileProvider.getUriForFile(this, "com.edde746.plezy.fileprovider", File(path))
               grantRead = true
             }
 
-            val intent = Intent(Intent.ACTION_VIEW).apply {
+            fun buildIntent(packageName: String?): Intent = Intent(Intent.ACTION_VIEW).apply {
               setDataAndType(uri, "video/*")
-              addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
               if (grantRead) {
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
               }
-              if (packageName != null) {
-                setPackage(packageName)
+              packageName?.let { setPackage(it) }
+              val startPosition = startPositionMs.coerceAtLeast(0).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+              if (startPosition > 0) {
+                putExtra(API_MX_RESULT_POSITION, startPosition)
+                putExtra(API_VIMU_SEEK_POSITION, startPosition)
+              }
+              putExtra(API_MX_RETURN_RESULT, true)
+              putExtra(API_MX_SECURE_URI, true)
+              putExtra(API_VIMU_RESUME, false)
+              title?.let {
+                putExtra(API_MX_TITLE, it)
+                putExtra(API_VIMU_TITLE, it)
+              }
+              fileName?.let { putExtra(API_MX_FILENAME, it) }
+            }
+
+            val targetPackages = if (packageNames.isEmpty()) listOf<String?>(null) else packageNames
+            for (packageName in targetPackages) {
+              try {
+                pendingExternalPlayerResult = result
+                startActivityForResult(buildIntent(packageName), EXTERNAL_PLAYER_REQUEST_CODE)
+                return@setMethodCallHandler
+              } catch (e: ActivityNotFoundException) {
+                pendingExternalPlayerResult = null
               }
             }
-            startActivity(intent)
-            result.success(true)
-          } catch (e: android.content.ActivityNotFoundException) {
-            result.error("APP_NOT_FOUND", "No app found for package: $packageName", null)
+
+            pendingExternalPlayerResult = null
+            val message = if (packageNames.isEmpty()) {
+              "No app found for video"
+            } else {
+              "No app found for packages: ${packageNames.joinToString(", ")}"
+            }
+            result.error("APP_NOT_FOUND", message, null)
           } catch (e: Exception) {
+            pendingExternalPlayerResult = null
             result.error("LAUNCH_FAILED", e.message ?: e.javaClass.simpleName, null)
           }
         }
@@ -558,6 +731,92 @@ class MainActivity : FlutterActivity() {
       Log.w(TAG, "Failed to start foreground activity", launchError)
       false
     }
+  }
+
+  private fun handleDeviceAdjustmentCall(method: String, arguments: Any?, result: MethodChannel.Result) {
+    try {
+      when (method) {
+        "getBrightness" -> result.success(getScreenBrightnessFraction())
+        "setBrightness" -> {
+          setScreenBrightnessFraction(argumentAsDouble(arguments))
+          result.success(null)
+        }
+        "restoreBrightness" -> {
+          restoreScreenBrightness()
+          result.success(null)
+        }
+        "getMediaVolume" -> result.success(getMediaVolumeFraction())
+        "setMediaVolume" -> {
+          setMediaVolumeFraction(argumentAsDouble(arguments))
+          result.success(null)
+        }
+        else -> result.notImplemented()
+      }
+    } catch (e: IllegalArgumentException) {
+      result.error("INVALID_ARGUMENT", e.message ?: e.javaClass.simpleName, null)
+    } catch (e: Exception) {
+      result.error("DEVICE_ADJUSTMENT_FAILED", e.message ?: e.javaClass.simpleName, null)
+    }
+  }
+
+  private fun argumentAsDouble(arguments: Any?): Double {
+    val value = (arguments as? Number)?.toDouble()
+      ?: throw IllegalArgumentException("Expected a numeric value")
+    if (value.isNaN() || value.isInfinite()) {
+      throw IllegalArgumentException("Expected a finite numeric value")
+    }
+    return value.coerceIn(0.0, 1.0)
+  }
+
+  private fun getScreenBrightnessFraction(): Double {
+    val windowBrightness = window.attributes.screenBrightness
+    if (windowBrightness >= 0f) return windowBrightness.coerceIn(0f, 1f).toDouble()
+
+    return try {
+      Settings.System.getInt(contentResolver, Settings.System.SCREEN_BRIGHTNESS).coerceIn(0, 255) / 255.0
+    } catch (e: Settings.SettingNotFoundException) {
+      0.5
+    }
+  }
+
+  private fun setScreenBrightnessFraction(value: Double) {
+    if (originalWindowBrightness == null) originalWindowBrightness = window.attributes.screenBrightness
+    val attributes = window.attributes
+    attributes.screenBrightness = value.coerceIn(0.0, 1.0).toFloat()
+    window.attributes = attributes
+  }
+
+  private fun restoreScreenBrightness() {
+    val attributes = window.attributes
+    attributes.screenBrightness = originalWindowBrightness ?: WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+    window.attributes = attributes
+    originalWindowBrightness = null
+  }
+
+  private fun getMediaVolumeFraction(): Double {
+    val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+    val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+    val minVolume = streamMinVolume(audioManager)
+    if (maxVolume <= minVolume) return 0.0
+
+    val volume = audioManager.getStreamVolume(AudioManager.STREAM_MUSIC).coerceIn(minVolume, maxVolume)
+    return (volume - minVolume).toDouble() / (maxVolume - minVolume).toDouble()
+  }
+
+  private fun setMediaVolumeFraction(value: Double) {
+    val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+    val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
+    val minVolume = streamMinVolume(audioManager)
+    val target = (minVolume + value.coerceIn(0.0, 1.0) * (maxVolume - minVolume))
+      .roundToInt()
+      .coerceIn(minVolume, maxVolume)
+    audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, target, 0)
+  }
+
+  private fun streamMinVolume(audioManager: AudioManager): Int = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+    audioManager.getStreamMinVolume(AudioManager.STREAM_MUSIC)
+  } else {
+    0
   }
 
   override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {

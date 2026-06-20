@@ -16,23 +16,23 @@ extension _VideoPlayerCompanionRemoteMethods on VideoPlayerScreenState {
       if (player == null) return;
       final settings = await SettingsService.getInstance();
       final seekSeconds = settings.read(SettingsService.seekTimeSmall);
-      if (widget.isLive && _captureBuffer != null) {
-        await _seekLivePosition(_currentPositionEpoch + seekSeconds);
+      if (widget.isLive && _live.captureBuffer != null) {
+        _liveSeek.seekBy(seekSeconds);
         return;
       }
       final target = clampSeekPosition(player!, player!.state.position + Duration(seconds: seekSeconds));
-      await player!.seek(target);
+      await _seekPlayback(target);
     };
     receiver.onSeekBackward = () async {
       if (player == null) return;
       final settings = await SettingsService.getInstance();
       final seekSeconds = settings.read(SettingsService.seekTimeSmall);
-      if (widget.isLive && _captureBuffer != null) {
-        await _seekLivePosition(_currentPositionEpoch - seekSeconds);
+      if (widget.isLive && _live.captureBuffer != null) {
+        _liveSeek.seekBy(-seekSeconds);
         return;
       }
       final target = clampSeekPosition(player!, player!.state.position - Duration(seconds: seekSeconds));
-      await player!.seek(target);
+      await _seekPlayback(target);
     };
     receiver.onVolumeUp = () async {
       if (player == null) return;
@@ -102,7 +102,7 @@ extension _VideoPlayerCompanionRemoteMethods on VideoPlayerScreenState {
   void _cycleAudioTrack() => _trackManager?.cycleAudioTrack();
 
   Future<void> _toggleFullscreen() async {
-    if (PlatformDetector.isMobile(context)) return;
+    if (!PlatformDetector.isDesktopOS()) return;
     await FullscreenStateManager().toggleFullscreen();
   }
 }

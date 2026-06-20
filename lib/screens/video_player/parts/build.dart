@@ -2,6 +2,8 @@ part of '../../video_player_screen.dart';
 
 extension _VideoPlayerBuildMethods on VideoPlayerScreenState {
   static const double _videoLayoutSizeTolerance = 0.1;
+  static const double _pinchZoomActivationThreshold = 0.06;
+  static const int _pinchZoomActivationUpdateThreshold = 3;
 
   bool _isSameVideoLayoutSize(Size a, Size b) {
     return (a.width - b.width).abs() <= _videoLayoutSizeTolerance &&
@@ -46,6 +48,25 @@ extension _VideoPlayerBuildMethods on VideoPlayerScreenState {
     });
   }
 
+  int? _selectedSourceSubtitleStreamIdForControls(List<MediaSubtitleTrack> tracks) {
+    if (tracks.isEmpty) return null;
+    for (final track in tracks) {
+      if (track.selected) return track.id;
+    }
+    return 0;
+  }
+
+  List<MediaSubtitleTrack> _sourceSubtitleTracksForControls() {
+    final tracks = _currentMediaInfo?.subtitleTracks ?? const <MediaSubtitleTrack>[];
+    if (!_isTranscoding) return tracks;
+    return tracks
+        .where((track) {
+          final hasKey = track.key != null && track.key!.isNotEmpty;
+          return hasKey || CodecUtils.isTextSubtitleCodec(track.codec);
+        })
+        .toList(growable: false);
+  }
+
   Widget _buildLoadingSpinner() {
     return const Scaffold(
       backgroundColor: Colors.black,
@@ -62,7 +83,7 @@ extension _VideoPlayerBuildMethods on VideoPlayerScreenState {
           child: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 420),
             child: Column(
-              mainAxisSize: MainAxisSize.min,
+              mainAxisSize: .min,
               children: [
                 const AppIcon(Symbols.error_rounded, color: Colors.white70, size: 44, fill: 1),
                 const SizedBox(height: 16),
@@ -73,7 +94,7 @@ extension _VideoPlayerBuildMethods on VideoPlayerScreenState {
                 ),
                 const SizedBox(height: 24),
                 Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
+                  mainAxisAlignment: .center,
                   children: [
                     FocusableButton(
                       autofocus: true,
@@ -119,52 +140,81 @@ extension _VideoPlayerBuildMethods on VideoPlayerScreenState {
     );
   }
 
+  void _startMobileZoomGesture() {
+    final filterManager = _videoFilterManager;
+    if (filterManager == null || _isPinchZooming) return;
+
+    _isPinchZooming = true;
+    _pinchZoomActivationUpdateCount = 0;
+    _pinchZoomChanged = false;
+    _pinchStartZoomScale = filterManager.zoomScale;
+  }
+
+  void _clearMobileZoomGesture() {
+    _isPinchZooming = false;
+    _pinchZoomActivationUpdateCount = 0;
+    _pinchZoomChanged = false;
+    _pinchStartZoomScale = null;
+  }
+
   Widget _buildVideoPlayer(BuildContext context) {
     // Cache platform detection to avoid multiple calls
     final isMobile = PlatformDetector.isMobile(context);
+    final hideChromeOnMouseExit = !(isMobile && !PlatformDetector.isTV());
 
-    return PopScope(
-      canPop: false, // Disable swipe-back gesture to prevent interference with timeline scrubbing
-      onPopInvokedWithResult: (didPop, result) {
-        if (!didPop) {
-          // If an overlay sheet is open, delegate back to it instead of
-          // exiting the player. This prevents the double-pop on Android TV
-          // where the system back gesture would otherwise reach both the
-          // sheet and the player's PopScope.
-          final sheetController = OverlaySheetController.maybeOf(context);
-          if (sheetController != null && sheetController.isOpen) {
-            sheetController.pop();
+    // Back handling (sheet-close + player exit) is owned by the OverlaySheetHost
+    // that wraps this widget — see video_player_screen.dart (canPop/onSystemBack).
+    return Scaffold(
+      // Use transparent background on macOS when native video layer is active
+      backgroundColor: Colors.transparent,
+      body: GestureDetector(
+        behavior: HitTestBehavior.translucent, // Allow taps to pass through to controls
+        onScaleStart: (details) {
+          if (!isMobile) return;
+          if (details.pointerCount >= 2) _startMobileZoomGesture();
+        },
+        onScaleUpdate: (details) {
+          if (!isMobile) return;
+          if (details.pointerCount < 2) return;
+          if (!_isPinchZooming) _startMobileZoomGesture();
+
+          final startZoom = _pinchStartZoomScale;
+          final filterManager = _videoFilterManager;
+          if (!_isPinchZooming || startZoom == null || filterManager == null) return;
+          final nextZoomScale = VideoFilterManager.normalizeZoomScale(startZoom * details.scale);
+
+          if (!_pinchZoomChanged) {
+            if ((details.scale - 1.0).abs() <= _pinchZoomActivationThreshold) {
+              _pinchZoomActivationUpdateCount = 0;
+              return;
+            }
+
+            _pinchZoomActivationUpdateCount++;
+            if (_pinchZoomActivationUpdateCount < _pinchZoomActivationUpdateThreshold) return;
+            if (nextZoomScale == filterManager.zoomScale) return;
+
+            _pinchZoomChanged = true;
+            _ambientLightingService?.disable();
+          }
+
+          filterManager.setZoomScale(nextZoomScale);
+        },
+        onScaleEnd: (details) {
+          if (!isMobile) return;
+          if (!_isPinchZooming) return;
+          if (!_pinchZoomChanged) {
+            _clearMobileZoomGesture();
             return;
           }
-          if (BackKeyCoordinator.consumeIfHandled()) return;
-          BackKeyCoordinator.markHandled();
-          _handleBackButton();
-        }
-      },
-      child: Scaffold(
-        // Use transparent background on macOS when native video layer is active
-        backgroundColor: Colors.transparent,
-        body: GestureDetector(
-          behavior: HitTestBehavior.translucent, // Allow taps to pass through to controls
-          onScaleStart: (details) {
-            if (!isMobile) return;
-            if (_videoFilterManager != null) {
-              _videoFilterManager!.isPinching = false;
-            }
-          },
-          onScaleUpdate: (details) {
-            if (!isMobile) return;
-            if (details.pointerCount >= 2 && _videoFilterManager != null) {
-              _videoFilterManager!.isPinching = true;
-            }
-          },
-          onScaleEnd: (details) {
-            if (!isMobile) return;
-            if (_videoFilterManager != null && _videoFilterManager!.isPinching) {
-              _toggleContainCover();
-              _videoFilterManager!.isPinching = false;
-            }
-          },
+
+          final zoomScale = _videoFilterManager?.zoomScale ?? 1.0;
+          _showZoomToast(zoomScale);
+          _clearMobileZoomGesture();
+          _setPlayerState(() {});
+        },
+        child: PlayerChromeInteractionRegion(
+          controller: _chromeController,
+          hideOnExit: hideChromeOnMouseExit,
           child: Stack(
             children: [
               // macOS PiP placeholder — video is in PiP window, show background with icon
@@ -201,50 +251,68 @@ extension _VideoPlayerBuildMethods on VideoPlayerScreenState {
                       onPrevious = (canRestartOrPrevious && _canNavigateEpisodes()) ? _restartOrPlayPrevious : null;
                     }
 
+                    final sourceAudioTracks = _currentMediaInfo?.audioTracks ?? const <MediaAudioTrack>[];
+                    final sourceSubtitleTracks = _sourceSubtitleTracksForControls();
+
                     return Video(
                       player: player!,
-                      controls: (context) => plexVideoControlsBuilder(
-                        player!,
-                        _currentMetadata,
+                      hasFirstFrame: _hasFirstFrame,
+                      controls: (context) => PlexVideoControls(
+                        player: player!,
+                        metadata: _currentMetadata,
                         onNext: onNext,
                         onPrevious: onPrevious,
                         availableVersions: _availableVersions,
-                        selectedMediaIndex: widget.selectedMediaIndex,
-                        selectedMediaSourceId: widget.selectedMediaSourceId,
+                        selectedMediaIndex: _effectiveSelectedMediaIndex,
                         selectedQualityPreset: _selectedQualityPreset,
                         serverSupportsTranscoding: _serverSupportsTranscoding,
                         isTranscoding: _isTranscoding,
                         isOfflinePlayback: _isOfflinePlayback,
-                        sourceAudioTracks: _currentMediaInfo?.audioTracks ?? const [],
+                        sourceAudioTracks: sourceAudioTracks,
                         selectedAudioStreamId: _selectedAudioStreamId,
+                        sourceSubtitleTracks: sourceSubtitleTracks,
+                        selectedSubtitleStreamId: _selectedSourceSubtitleStreamIdForControls(sourceSubtitleTracks),
+                        sourcePartId: _currentMediaInfo?.partId,
+                        onPlaybackSourceChanged: _switchPlaybackSource,
                         onTogglePIPMode: _togglePIPMode,
                         boxFitMode: _videoFilterManager?.boxFitMode ?? 0,
+                        videoZoomScale: _videoFilterManager?.zoomScale ?? 1.0,
                         onCycleBoxFitMode: _cycleBoxFitMode,
+                        onVideoZoomChanged: _setVideoZoom,
+                        onZoomIn: _zoomVideoIn,
+                        onZoomOut: _zoomVideoOut,
+                        onResetVideoZoom: _resetVideoZoom,
                         onCycleAudioTrack: _cycleAudioTrack,
                         onCycleSubtitleTrack: _cycleSubtitleTrack,
                         onAudioTrackChanged: _onAudioTrackChanged,
                         onSubtitleTrackChanged: _onSubtitleTrackChanged,
                         onSecondarySubtitleTrackChanged: _onSecondarySubtitleTrackChanged,
+                        onSeekRequested: _seekPlayback,
+                        onPlayPauseRequested: () => _playOrPauseWithPlaybackIntent(player!),
                         onSeekCompleted: _notifyWatchTogetherSeek,
                         onBack: _handleBackButton,
+                        onDismissPrompt: (_showPlayNextDialog || _showStillWatchingPrompt)
+                            ? _dismissPlaybackPromptForBack
+                            : null,
                         onReachedEnd: ({skipAutoPlayCountdown = false}) =>
                             _onVideoCompleted(true, skipAutoPlayCountdown: skipAutoPlayCountdown),
                         canControl: canControl,
                         hasFirstFrame: _hasFirstFrame,
                         playNextFocusNode: _showPlayNextDialog ? _playNextConfirmFocusNode : null,
-                        controlsVisible: _controlsVisible,
+                        chromeController: _chromeController,
                         shaderService: _shaderService,
                         // ignore: no-empty-block - state update triggers rebuild to reflect shader change
                         onShaderChanged: () => _setPlayerState(() {}),
                         thumbnailDataBuilder: _scrubPreviewSource?.isAvailable == true ? _getThumbnailData : null,
                         isLive: widget.isLive,
-                        liveChannelName: _liveChannelName,
-                        captureBuffer: _captureBuffer,
-                        isAtLiveEdge: _isAtLiveEdge,
-                        streamStartEpoch: _streamStartEpoch,
+                        liveChannelName: _live.channelName,
+                        captureBuffer: _live.captureBuffer,
+                        isAtLiveEdge: _live.atLiveEdge,
+                        streamStartEpoch: _live.streamStartEpoch,
                         currentPositionEpoch: widget.isLive ? _currentPositionEpoch : null,
-                        onLiveSeek: _captureBuffer != null ? _seekLivePosition : null,
-                        onJumpToLive: _captureBuffer != null && !_isAtLiveEdge ? _jumpToLiveEdge : null,
+                        onLiveSeek: _live.captureBuffer != null ? _seekLiveToEpoch : null,
+                        onLiveSeekBy: _live.captureBuffer != null ? _liveSeek.seekBy : null,
+                        onJumpToLive: _live.captureBuffer != null && !_live.atLiveEdge ? _jumpToLiveEdge : null,
                         isAmbientLightingEnabled: _ambientLightingService?.isEnabled ?? false,
                         onToggleAmbientLighting: _ambientLightingService?.isSupported == true
                             ? _toggleAmbientLighting
@@ -262,7 +330,7 @@ extension _VideoPlayerBuildMethods on VideoPlayerScreenState {
                 autoPlayCountdown: _autoPlayCountdown,
                 cancelFocusNode: _playNextCancelFocusNode,
                 confirmFocusNode: _playNextConfirmFocusNode,
-                controlsVisible: _controlsVisible,
+                chromeController: _chromeController,
                 onCancel: _cancelAutoPlay,
                 onPlayNext: _playNext,
               ),
@@ -272,7 +340,7 @@ extension _VideoPlayerBuildMethods on VideoPlayerScreenState {
                 countdown: _stillWatchingCountdown,
                 pauseFocusNode: _stillWatchingPauseFocusNode,
                 continueFocusNode: _stillWatchingContinueFocusNode,
-                controlsVisible: _controlsVisible,
+                chromeController: _chromeController,
                 onPause: _onStillWatchingPause,
                 onContinue: _onStillWatchingContinue,
               ),

@@ -62,10 +62,12 @@ class TrackManager {
   // ── Internal state ─────────────────────────────────────────────────
 
   bool waitingForExternalSubsTrackSelection = false;
+  bool _externalSubtitleAddsInFlight = false;
   bool _isApplyingTrackSelection = false;
   List<SubtitleTrack> _lastExternalSubtitles = const [];
   StreamSubscription<Tracks>? _trackLoadingSubscription;
   Timer? _subtitleFallbackTimer;
+  Timer? _trackSelectionFallbackTimer;
 
   /// Cached external subtitles for re-use after backend fallback.
   List<SubtitleTrack> get lastExternalSubtitles => _lastExternalSubtitles;
@@ -91,32 +93,43 @@ class TrackManager {
     _lastExternalSubtitles = externalSubtitles;
   }
 
-  /// Add external subtitle tracks to the player in parallel.
+  /// Add external subtitle tracks to the player in metadata order.
   ///
-  /// Each sub-add does its own HTTP fetch of the sidecar file, so sequential
-  /// adds dominate startup (~170ms × N). Firing them in parallel lets
-  /// libavformat's network IO overlap and stops Dart → method channel → native
-  /// round-trips from stacking.
-  Future<void> addExternalSubtitles(List<SubtitleTrack> externalSubtitles) async {
+  /// MPV assigns subtitle track IDs in completion order, so parallel sub-adds
+  /// make the track list nondeterministic. Keep this ordered for the fallback
+  /// paths that cannot attach sidecars through loadfile.
+  Future<void> addExternalSubtitles(List<SubtitleTrack> externalSubtitles, {Future<void>? waitUntilReady}) async {
     if (externalSubtitles.isEmpty) return;
 
-    appLogger.d('Adding ${externalSubtitles.length} external subtitle(s) to player');
+    _externalSubtitleAddsInFlight = true;
+    try {
+      if (waitUntilReady != null) {
+        try {
+          await waitUntilReady;
+        } catch (e) {
+          appLogger.w('Continuing external subtitle load after readiness wait failed', error: e);
+        }
+        if (!isActive()) return;
+      }
 
-    await Future.wait(
-      externalSubtitles.where((s) => s.uri != null).map((subtitleTrack) async {
+      appLogger.d('Adding ${externalSubtitles.length} external subtitle(s) to player');
+
+      for (final subtitleTrack in externalSubtitles.where((s) => s.uri != null)) {
         try {
           await player.addSubtitleTrack(
             uri: subtitleTrack.uri!,
             title: subtitleTrack.title,
             language: subtitleTrack.language,
-            select: false,
+            select: subtitleTrack.isDefault,
           );
           appLogger.d('Added external subtitle: ${subtitleTrack.title ?? subtitleTrack.uri}');
         } catch (e) {
           appLogger.w('Failed to add external subtitle: ${subtitleTrack.title ?? subtitleTrack.uri}', error: e);
         }
-      }),
-    );
+      }
+    } finally {
+      _externalSubtitleAddsInFlight = false;
+    }
   }
 
   /// Resume playback after external subtitles have been loaded (or failed).
@@ -156,18 +169,43 @@ class TrackManager {
   /// If tracks are not yet loaded, subscribes to the stream.
   void applyTrackSelectionWhenReady() {
     final currentTracks = player.state.tracks;
-    if (currentTracks.audio.isNotEmpty || currentTracks.subtitle.isNotEmpty) {
+    if (_tracksReadyForSelection(currentTracks)) {
       applyTrackSelection();
     } else {
       _trackLoadingSubscription?.cancel();
       _trackLoadingSubscription = player.streams.tracks.listen((tracks) {
-        if (tracks.audio.isEmpty && tracks.subtitle.isEmpty) return;
+        if (!_tracksReadyForSelection(tracks)) return;
 
+        _trackLoadingSubscription?.cancel();
+        _trackLoadingSubscription = null;
+        _trackSelectionFallbackTimer?.cancel();
+        _trackSelectionFallbackTimer = null;
+        applyTrackSelection();
+      });
+
+      _trackSelectionFallbackTimer?.cancel();
+      _trackSelectionFallbackTimer = Timer(const Duration(seconds: 5), () {
+        if (!isActive()) return;
         _trackLoadingSubscription?.cancel();
         _trackLoadingSubscription = null;
         applyTrackSelection();
       });
     }
+  }
+
+  bool _tracksReadyForSelection(Tracks tracks) {
+    final hasAnyTracks = tracks.audio.isNotEmpty || tracks.subtitle.isNotEmpty;
+    if (!hasAnyTracks) return false;
+
+    final info = mediaInfo;
+    if (info == null || tracks.subtitle.isNotEmpty) return true;
+
+    // Plex can legitimately report subtitles without selecting one. During an
+    // in-place item reload Android clears the old track list before the new
+    // demuxed subtitles arrive; applying selection at the first audio-only
+    // update would treat that temporary empty subtitle list as an explicit
+    // server "off" decision and leave the next episode without selectable subs.
+    return info.subtitleTracks.isEmpty;
   }
 
   /// Core track selection: delegates to [TrackSelectionService].
@@ -208,6 +246,7 @@ class TrackManager {
   /// Called when playbackRestart fires — checks the flag and applies selection.
   void onPlaybackRestart() {
     if (waitingForExternalSubsTrackSelection) {
+      if (_externalSubtitleAddsInFlight) return;
       waitingForExternalSubsTrackSelection = false;
       applyTrackSelection();
     }
@@ -219,7 +258,7 @@ class TrackManager {
   Future<void> onBackendSwitched() async {
     appLogger.i('Player backend switched from ExoPlayer to MPV (native fallback)');
 
-    if (_lastExternalSubtitles.isNotEmpty) {
+    if (_lastExternalSubtitles.isNotEmpty && !player.attachesExternalSubtitlesAtOpen) {
       try {
         await addExternalSubtitles(_lastExternalSubtitles);
       } catch (e) {
@@ -249,7 +288,7 @@ class TrackManager {
     if (isActive()) {
       final label = next.id == 'no'
           ? 'Subtitles: Off'
-          : 'Subtitles: ${TrackLabelBuilder.buildSubtitleLabel(title: next.title, language: next.language, codec: next.codec, index: nextIndex)}';
+          : 'Subtitles: ${TrackLabelBuilder.subtitleLabel(title: next.title, language: next.language, codec: next.codec, forced: next.isForced, index: nextIndex).joined}';
       showMessage?.call(label, duration: const Duration(seconds: 1));
     }
   }
@@ -268,7 +307,7 @@ class TrackManager {
 
     if (isActive()) {
       final label =
-          'Audio: ${TrackLabelBuilder.buildAudioLabel(title: next.title, language: next.language, codec: next.codec, channelsCount: next.channelsCount, index: nextIndex)}';
+          'Audio: ${TrackLabelBuilder.audioLabel(title: next.title, language: next.language, codec: next.codec, channels: next.channelsCount, index: nextIndex).joined}';
       showMessage?.call(label, duration: const Duration(seconds: 1));
     }
   }
@@ -456,9 +495,12 @@ class TrackManager {
 
   /// Clean up subscriptions.
   void dispose() {
+    _externalSubtitleAddsInFlight = false;
     _trackLoadingSubscription?.cancel();
     _trackLoadingSubscription = null;
     _subtitleFallbackTimer?.cancel();
     _subtitleFallbackTimer = null;
+    _trackSelectionFallbackTimer?.cancel();
+    _trackSelectionFallbackTimer = null;
   }
 }

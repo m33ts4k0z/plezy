@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:plezy/media/ids.dart';
 
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -6,6 +7,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:plezy/connection/connection.dart';
 import 'package:plezy/database/app_database.dart';
+import 'package:plezy/media/media_server_client.dart';
 import 'package:plezy/models/plex/plex_config.dart';
 import 'package:plezy/services/data_aggregation_service.dart';
 import 'package:plezy/services/jellyfin_client.dart';
@@ -51,12 +53,16 @@ void main() {
 
   group('DataAggregationService cross-server aggregation', () {
     test('getMediaLibrariesFromAllServers returns empty when no clients connected', () async {
-      expect(await service.getMediaLibrariesFromAllServers(), isEmpty);
+      final result = await service.getMediaLibrariesFromAllServers();
+      expect(result.libraries, isEmpty);
+      expect(result.succeededServerIds, isEmpty);
     });
 
     test('searchAcrossServers and getOnDeckFromAllServers return empty when no clients', () async {
       expect(await service.searchAcrossServers('hello'), isEmpty);
-      expect(await service.getOnDeckFromAllServers(), isEmpty);
+      final onDeck = await service.getOnDeckFromAllServers();
+      expect(onDeck.items, isEmpty);
+      expect(onDeck.succeededServerIds, isEmpty);
     });
 
     test('searchAcrossServers overfetches and ranks before trimming across backends', () async {
@@ -71,7 +77,7 @@ void main() {
           product: 'Plezy',
           version: 'test',
         ),
-        serverId: 'plex-1',
+        serverId: ServerId('plex-1'),
         serverName: 'Plex',
         httpClient: MockClient((req) async {
           plexRequests.add(req.url);
@@ -129,7 +135,7 @@ void main() {
           product: 'Plezy',
           version: 'test',
         ),
-        serverId: 'plex-1',
+        serverId: ServerId('plex-1'),
         serverName: 'Plex',
         httpClient: MockClient((req) async {
           captured.add(req.url);
@@ -157,11 +163,158 @@ void main() {
       addTearDown(client.close);
       manager.debugRegisterClientForTesting(client);
 
-      final items = await service.getOnDeckFromAllServers(limit: 21);
+      final result = await service.getOnDeckFromAllServers(limit: 21);
 
-      expect(items.map((item) => item.id), ['movie-1']);
+      expect(result.items.map((item) => item.id), ['movie-1']);
+      expect(result.succeededServerIds, {'plex-1'});
       expect(captured.single.path, '/hubs');
       expect(captured.single.queryParameters['count'], '21');
+    });
+
+    test('getOnDeckFromAllServers hides duplicate show entries by stable show ids', () async {
+      final client = PlexClient.forTesting(
+        config: PlexConfig(
+          baseUrl: 'https://plex.example.com',
+          token: 'token',
+          clientIdentifier: 'client-id',
+          product: 'Plezy',
+          version: 'test',
+        ),
+        serverId: ServerId('plex-1'),
+        serverName: 'Plex',
+        httpClient: MockClient((req) async {
+          if (req.url.path == '/hubs') {
+            return _json({
+              'MediaContainer': {
+                'Hub': [
+                  {
+                    'key': '/hubs/home/continueWatching',
+                    'title': 'Continue Watching',
+                    'type': 'mixed',
+                    'hubIdentifier': 'home.continue',
+                    'size': 2,
+                    'Metadata': [
+                      {
+                        'ratingKey': 'old-episode',
+                        'type': 'episode',
+                        'title': 'Episode 1',
+                        'grandparentRatingKey': 'old-show',
+                        'grandparentTitle': 'Shared Show',
+                        'guid': 'plex://episode/shared-episode-1',
+                        'lastViewedAt': 100,
+                        'librarySectionID': 1,
+                      },
+                      {
+                        'ratingKey': 'new-episode',
+                        'type': 'episode',
+                        'title': 'Episode 2',
+                        'grandparentRatingKey': 'new-show',
+                        'grandparentTitle': 'Shared Show',
+                        'guid': 'plex://episode/shared-episode-2',
+                        'lastViewedAt': 200,
+                        'librarySectionID': 2,
+                      },
+                    ],
+                  },
+                ],
+              },
+            });
+          }
+          if (req.url.path == '/library/metadata/old-show' || req.url.path == '/library/metadata/new-show') {
+            return _json({
+              'MediaContainer': {
+                'Metadata': [
+                  {
+                    'ratingKey': req.url.pathSegments.last,
+                    'type': 'show',
+                    'title': 'Shared Show',
+                    'Guid': [
+                      {'id': 'tvdb://12345'},
+                    ],
+                  },
+                ],
+              },
+            });
+          }
+          return http.Response('unexpected request', 500);
+        }),
+      );
+      addTearDown(client.close);
+      manager.debugRegisterClientForTesting(client);
+
+      final result = await service.getOnDeckFromAllServers(limit: 10);
+
+      expect(result.items.map((item) => item.id), ['new-episode']);
+      expect(result.succeededServerIds, {'plex-1'});
+    });
+
+    test('getOnDeckFromAllServers keeps duplicate titles without stable ids', () async {
+      final client = PlexClient.forTesting(
+        config: PlexConfig(
+          baseUrl: 'https://plex.example.com',
+          token: 'token',
+          clientIdentifier: 'client-id',
+          product: 'Plezy',
+          version: 'test',
+        ),
+        serverId: ServerId('plex-1'),
+        serverName: 'Plex',
+        httpClient: MockClient((req) async {
+          if (req.url.path == '/hubs') {
+            return _json({
+              'MediaContainer': {
+                'Hub': [
+                  {
+                    'key': '/hubs/home/continueWatching',
+                    'title': 'Continue Watching',
+                    'type': 'mixed',
+                    'hubIdentifier': 'home.continue',
+                    'size': 2,
+                    'Metadata': [
+                      {
+                        'ratingKey': 'old-unmatched',
+                        'type': 'episode',
+                        'title': 'Episode 1',
+                        'grandparentRatingKey': 'old-unmatched-show',
+                        'grandparentTitle': 'Shared Show',
+                        'guid': 'com.plexapp.agents.none://old-unmatched',
+                        'lastViewedAt': 100,
+                      },
+                      {
+                        'ratingKey': 'new-unmatched',
+                        'type': 'episode',
+                        'title': 'Episode 2',
+                        'grandparentRatingKey': 'new-unmatched-show',
+                        'grandparentTitle': 'Shared Show',
+                        'guid': 'com.plexapp.agents.none://new-unmatched',
+                        'lastViewedAt': 200,
+                      },
+                    ],
+                  },
+                ],
+              },
+            });
+          }
+          if (req.url.path == '/library/metadata/old-unmatched-show' ||
+              req.url.path == '/library/metadata/new-unmatched-show') {
+            return _json({
+              'MediaContainer': {
+                'Metadata': [
+                  {'ratingKey': req.url.pathSegments.last, 'type': 'show', 'title': 'Shared Show'},
+                ],
+              },
+            });
+          }
+          return http.Response('unexpected request', 500);
+        }),
+      );
+      addTearDown(client.close);
+      manager.debugRegisterClientForTesting(client);
+
+      final result = await service.getOnDeckFromAllServers(limit: 10);
+
+      expect(result.items.map((item) => item.id), ['new-unmatched', 'old-unmatched']);
+      expect(result.succeededServerIds, {'plex-1'});
     });
 
     test('per-library hubs skip playback rows and fetch in bounded batches', () async {
@@ -204,8 +357,10 @@ void main() {
       addTearDown(client.close);
       manager.debugRegisterJellyfinClientForTesting(client);
 
-      final hubs = await service.getHubsFromAllServers(useGlobalHubs: false, includePlaybackHubs: false);
+      final result = await service.getHubsFromAllServers(useGlobalHubs: false, includePlaybackHubs: false);
+      final hubs = result.hubs;
 
+      expect(result.succeededServerIds, {'srv-1'});
       expect(hubs.map((h) => h.identifier), [
         'library.lib-1.recent',
         'library.lib-2.recent',
@@ -218,6 +373,10 @@ void main() {
       expect(
         captured.where((uri) => uri.path == '/Users/user-1/Items/Latest').map((uri) => uri.queryParameters['ParentId']),
         ['lib-1', 'lib-2', 'lib-3', 'lib-4'],
+      );
+      expect(
+        captured.where((uri) => uri.path == '/Users/user-1/Items/Latest').map((uri) => uri.queryParameters['Limit']),
+        everyElement(defaultHubPreviewLimit.toString()),
       );
     });
 
@@ -258,14 +417,20 @@ void main() {
       addTearDown(client.close);
       manager.debugRegisterJellyfinClientForTesting(client);
 
-      final hubs = await service.getHubsFromAllServers(useGlobalHubs: true, includePlaybackHubs: false);
+      final result = await service.getHubsFromAllServers(useGlobalHubs: true, includePlaybackHubs: false);
+      final hubs = result.hubs;
 
+      expect(result.succeededServerIds, {'srv-1'});
       expect(hubs.map((h) => h.identifier), ['library.movies.recent', 'library.shows.recent']);
       expect(hubs.map((h) => h.items.single.id), ['movie-1', 'show-1']);
       expect(captured.where((uri) => uri.path == '/Users/user-1/Views'), hasLength(1));
       expect(
         captured.where((uri) => uri.path == '/Users/user-1/Items/Latest').map((uri) => uri.queryParameters['ParentId']),
         ['movies', 'shows'],
+      );
+      expect(
+        captured.where((uri) => uri.path == '/Users/user-1/Items/Latest').map((uri) => uri.queryParameters['Limit']),
+        everyElement(defaultHubPreviewLimit.toString()),
       );
     });
 
@@ -280,7 +445,7 @@ void main() {
           product: 'Plezy',
           version: 'test',
         ),
-        serverId: 'plex-1',
+        serverId: ServerId('plex-1'),
         serverName: 'Plex',
         promotedHubKey: '/hubs/promoted',
         httpClient: MockClient((req) async {
@@ -317,14 +482,17 @@ void main() {
       addTearDown(client.close);
       manager.debugRegisterClientForTesting(client);
 
-      final hubs = await service.getHubsFromAllServers(useGlobalHubs: true, includePlaybackHubs: false);
+      final result = await service.getHubsFromAllServers(useGlobalHubs: true, includePlaybackHubs: false);
+      final hubs = result.hubs;
 
+      expect(result.succeededServerIds, {'plex-1'});
       expect(hubs, hasLength(1));
       expect(hubs.single.title, 'Recently Added TV');
       expect(hubs.single.identifier, 'home.television.recent');
       expect(hubs.single.libraryId, isNull);
       expect(hubs.single.items, hasLength(7));
       expect(captured.map((uri) => uri.path), ['/hubs/promoted']);
+      expect(captured.single.queryParameters['count'], defaultHubPreviewLimit.toString());
     });
   });
 }

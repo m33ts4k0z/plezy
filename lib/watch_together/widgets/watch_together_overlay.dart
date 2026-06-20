@@ -70,7 +70,7 @@ class _SessionIndicator extends StatelessWidget {
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
           child: Row(
-            mainAxisSize: MainAxisSize.min,
+            mainAxisSize: .min,
             children: [
               // Sync indicator or group icon
               if (isSyncing)
@@ -89,7 +89,7 @@ class _SessionIndicator extends StatelessWidget {
               // Participant count
               Text(
                 '$participantCount',
-                style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 14),
+                style: const TextStyle(color: Colors.white, fontWeight: .bold, fontSize: 14),
               ),
 
               // Host badge
@@ -103,7 +103,7 @@ class _SessionIndicator extends StatelessWidget {
                   ),
                   child: Text(
                     t.watchTogether.hostBadge,
-                    style: const TextStyle(color: Colors.black, fontSize: 10, fontWeight: FontWeight.bold),
+                    style: const TextStyle(color: Colors.black, fontSize: 10, fontWeight: .bold),
                   ),
                 ),
               ],
@@ -129,8 +129,8 @@ class _SessionMenuSheet extends StatelessWidget {
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
+          mainAxisSize: .min,
+          crossAxisAlignment: .stretch,
           children: [
             // Header
             Row(
@@ -139,7 +139,7 @@ class _SessionMenuSheet extends StatelessWidget {
                 const SizedBox(width: 12),
                 Expanded(
                   child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
+                    crossAxisAlignment: .start,
                     children: [
                       Text(t.watchTogether.title, style: theme.textTheme.titleMedium),
                       Text(
@@ -179,7 +179,7 @@ class _SessionMenuSheet extends StatelessWidget {
                     borderRadius: const BorderRadius.all(Radius.circular(8)),
                   ),
                   child: Row(
-                    mainAxisSize: MainAxisSize.min,
+                    mainAxisSize: .min,
                     children: [
                       Text(
                         '${t.watchTogether.sessionCode}: ',
@@ -187,10 +187,7 @@ class _SessionMenuSheet extends StatelessWidget {
                       ),
                       Text(
                         provider.sessionId!,
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          fontFamily: 'monospace',
-                          fontWeight: FontWeight.bold,
-                        ),
+                        style: theme.textTheme.bodySmall?.copyWith(fontFamily: 'monospace', fontWeight: .bold),
                       ),
                       const SizedBox(width: 8),
                       Icon(Symbols.content_copy_rounded, size: 16, color: theme.colorScheme.onSurfaceVariant),
@@ -229,7 +226,7 @@ class _SessionMenuSheet extends StatelessWidget {
                       )
                     : null,
                 dense: true,
-                contentPadding: EdgeInsets.zero,
+                contentPadding: .zero,
               ),
             ),
 
@@ -248,7 +245,7 @@ class _SessionMenuSheet extends StatelessWidget {
                 OverlaySheetController.of(context).close();
                 _confirmLeave(context);
               },
-              contentPadding: EdgeInsets.zero,
+              contentPadding: .zero,
             ),
           ],
         ),
@@ -332,7 +329,7 @@ class _ParticipantNotificationOverlayState extends State<ParticipantNotification
       right: 0,
       child: Center(
         child: Column(
-          mainAxisSize: MainAxisSize.min,
+          mainAxisSize: .min,
           children: _notifications.map((n) {
             final text = switch (n.event.type) {
               ParticipantEventType.joined => t.watchTogether.participantJoined(name: n.event.displayName),
@@ -341,6 +338,8 @@ class _ParticipantNotificationOverlayState extends State<ParticipantNotification
               ParticipantEventType.resumed => t.watchTogether.participantResumed(name: n.event.displayName),
               ParticipantEventType.seeked => t.watchTogether.participantSeeked(name: n.event.displayName),
               ParticipantEventType.buffering => t.watchTogether.participantBuffering(name: n.event.displayName),
+              ParticipantEventType.needsUpdate => t.watchTogether.participantNeedsUpdate(name: n.event.displayName),
+              ParticipantEventType.resumedWithout => t.watchTogether.resumingWithout(name: n.event.displayName),
             };
             return Container(
               key: ValueKey(n.id),
@@ -383,13 +382,20 @@ class SyncingIndicator extends StatelessWidget {
 class WaitingForParticipantsIndicator extends StatelessWidget {
   const WaitingForParticipantsIndicator({super.key});
 
+  static String _label(List<String> names) {
+    if (names.isEmpty) return t.watchTogether.waitingForParticipants;
+    final shown = names.length <= 2 ? names.join(', ') : '${names.take(2).join(', ')} +${names.length - 2}';
+    return t.watchTogether.waitingForName(name: shown);
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Selector<WatchTogetherProvider, bool>(
-      selector: (_, provider) => provider.isDeferredPlay,
-      builder: (context, isDeferredPlay, child) {
-        if (!isDeferredPlay) return const SizedBox.shrink();
-        return _StatusPill(tvIcon: Symbols.hourglass_empty_rounded, label: t.watchTogether.waitingForParticipants);
+    return Selector<WatchTogetherProvider, (bool, List<String>)>(
+      selector: (_, provider) => (provider.isWaitingForPeers, provider.waitingOnNames),
+      builder: (context, value, child) {
+        final (isWaiting, names) = value;
+        if (!isWaiting) return const SizedBox.shrink();
+        return _StatusPill(tvIcon: Symbols.hourglass_empty_rounded, label: _label(names));
       },
     );
   }
@@ -412,7 +418,7 @@ class _StatusPill extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
           decoration: const BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.all(Radius.circular(20))),
           child: Row(
-            mainAxisSize: MainAxisSize.min,
+            mainAxisSize: .min,
             children: [
               SizedBox(
                 width: 14,

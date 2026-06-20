@@ -10,10 +10,12 @@ import '../../../utils/grid_size_calculator.dart';
 import '../../../utils/layout_constants.dart';
 import '../../../utils/library_refresh_notifier.dart';
 import '../../../utils/media_server_http_client.dart';
+import '../../../utils/platform_detector.dart';
 import '../../../widgets/focusable_media_card.dart';
 import '../../../widgets/media_grid_delegate.dart';
 import '../../../widgets/settings_builder.dart';
 import '../../../widgets/skeleton_media_card.dart';
+import '../../../widgets/sliver_cross_axis_layout_builder.dart';
 import '../../../i18n/strings.g.dart';
 import '../../main_screen.dart';
 import 'base_library_tab.dart';
@@ -106,16 +108,20 @@ class _LibraryCollectionsTabState extends BaseLibraryTabState<MediaItem, Library
   @override
   Widget buildContent(List<MediaItem> items) {
     return SettingsBuilder(
-      prefs: const [SettingsService.viewMode, SettingsService.libraryDensity],
+      prefs: const [SettingsService.viewMode, SettingsService.libraryDensity, SettingsService.tvFullCardLayout],
       builder: (context) {
-        final settings = SettingsService.instanceOrNull!;
+        final settings = SettingsService.instance;
         final viewMode = settings.read(SettingsService.viewMode);
         final density = settings.read(SettingsService.libraryDensity);
+        final fullCardLayout = PlatformDetector.isTV() && settings.read(SettingsService.tvFullCardLayout);
         return CustomScrollView(
           clipBehavior: Clip.none,
           slivers: [
             SliverOverlapInjector(handle: NestedScrollView.sliverOverlapAbsorberHandleFor(context)),
-            if (viewMode == ViewMode.list) _buildListSliver(density) else _buildGridSliver(density),
+            if (viewMode == ViewMode.list)
+              _buildListSliver(density)
+            else
+              _buildGridSliver(density, fullCardLayout: fullCardLayout),
           ],
         );
       },
@@ -134,30 +140,49 @@ class _LibraryCollectionsTabState extends BaseLibraryTabState<MediaItem, Library
       padding: _effectivePadding,
       sliver: SliverList.builder(
         itemCount: totalSize,
-        itemBuilder: (context, index) => _buildMediaCardItem(index, isFirstColumn: true, disableScale: true),
+        itemBuilder: (context, index) => _buildMediaCardItem(
+          index,
+          isFirstRow: index == 0,
+          isFirstColumn: true,
+          disableScale: true,
+        ),
       ),
     );
   }
 
-  Widget _buildGridSliver(int density) {
+  Widget _buildGridSliver(int density, {required bool fullCardLayout}) {
     return SliverPadding(
       padding: _effectivePadding,
-      sliver: SliverLayoutBuilder(
-        builder: (context, constraints) {
-          final maxCrossAxisExtent = GridSizeCalculator.getMaxCrossAxisExtent(context, density);
-          final columnCount = GridSizeCalculator.getColumnCount(constraints.crossAxisExtent, maxCrossAxisExtent);
+      sliver: SliverCrossAxisLayoutBuilder(
+        builder: (context, crossAxisExtent) {
+          final geometry = MediaGridGeometry.resolve(
+            context: context,
+            crossAxisExtent: crossAxisExtent,
+            density: density,
+            fullBleedImage: fullCardLayout,
+          );
           return SliverGrid.builder(
-            gridDelegate: MediaGridDelegate.createDelegate(context: context, density: density),
+            gridDelegate: geometry.delegate,
             itemCount: totalSize,
-            itemBuilder: (context, index) =>
-                _buildMediaCardItem(index, isFirstColumn: GridSizeCalculator.isFirstColumn(index, columnCount)),
+            itemBuilder: (context, index) => _buildMediaCardItem(
+              index,
+              isFirstRow: GridSizeCalculator.isFirstRow(index, geometry.columnCount),
+              isFirstColumn: GridSizeCalculator.isFirstColumn(index, geometry.columnCount),
+              fullBleedImage: fullCardLayout,
+            ),
           );
         },
       ),
     );
   }
 
-  Widget _buildMediaCardItem(int index, {required bool isFirstColumn, bool disableScale = false}) {
+  Widget _buildMediaCardItem(
+    int index, {
+    required bool isFirstRow,
+    required bool isFirstColumn,
+    bool disableScale = false,
+    bool fullBleedImage = false,
+  }) {
     final item = loadedItems[index];
     if (item == null) {
       ensureIndexLoaded(index, pageSize: _pageSize);
@@ -169,14 +194,16 @@ class _LibraryCollectionsTabState extends BaseLibraryTabState<MediaItem, Library
       item: item,
       focusNode: index == 0 ? firstItemFocusNode : null,
       disableScale: disableScale,
+      fullBleedImage: fullBleedImage,
       onListRefresh: loadItems,
+      onNavigateUp: isFirstRow ? widget.onBack : null,
       onBack: widget.onBack,
       onNavigateLeft: isFirstColumn ? _navigateToSidebar : null,
     );
   }
 
   void _navigateToSidebar() {
-    MainScreenFocusScope.of(context)?.focusSidebar();
+    MainScreenFocusScope.of(context, listen: false)?.focusSidebar();
   }
 
   @override

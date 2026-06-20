@@ -40,6 +40,7 @@ class HubSection extends StatefulWidget {
   final void Function(String)? onRefresh;
   final VoidCallback? onRemoveFromContinueWatching;
   final bool isInContinueWatching;
+  final bool usesContinueWatchingAction;
   final bool showServerName;
   final Future<List<MediaItem>> Function()? loadMoreItems;
 
@@ -75,6 +76,7 @@ class HubSection extends StatefulWidget {
     this.onRefresh,
     this.onRemoveFromContinueWatching,
     this.isInContinueWatching = false,
+    bool? usesContinueWatchingAction,
     this.showServerName = false,
     this.loadMoreItems,
     this.onFocusedItemChanged,
@@ -84,7 +86,7 @@ class HubSection extends StatefulWidget {
     this.onNavigateToSidebar,
     this.inset = false,
     this.focusScrollAlignment = 0.3,
-  });
+  }) : usesContinueWatchingAction = usesContinueWatchingAction ?? isInContinueWatching;
 
   @override
   State<HubSection> createState() => HubSectionState();
@@ -125,12 +127,14 @@ class HubSectionState extends State<HubSection> with MountedSetStateMixin {
   void didUpdateWidget(HubSection oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (widget.hub.id != oldWidget.hub.id) {
+      _itemKeys.clear();
       _mediaCardKeys.clear();
-    } else if (widget.hub.items.length != oldWidget.hub.items.length) {
+    } else if (widget.hub.items.length != oldWidget.hub.items.length || widget.hub.more != oldWidget.hub.more) {
+      _itemKeys.removeWhere((index, _) => index >= _totalItemCount);
       _mediaCardKeys.removeWhere((index, _) => index >= widget.hub.items.length);
     }
 
-    if (widget.hub.items.length != oldWidget.hub.items.length) {
+    if (widget.hub.items.length != oldWidget.hub.items.length || widget.hub.more != oldWidget.hub.more) {
       final maxIndex = _totalItemCount == 0 ? 0 : _totalItemCount - 1;
       if (_focusedIndex > maxIndex) {
         _focusedIndex = maxIndex;
@@ -211,6 +215,14 @@ class HubSectionState extends State<HubSection> with MountedSetStateMixin {
       leadingPadding: _leadingPadding,
       animate: animate,
     );
+    if (index >= 0 && index < _totalItemCount) {
+      scrollKeyedChildToHorizontalCenter(
+        _scrollController,
+        _itemKeyFor(index),
+        animate: animate,
+        isCurrent: () => _focusedIndex == index && index < _totalItemCount,
+      );
+    }
   }
 
   /// Handle ALL key events at the hub level
@@ -316,7 +328,12 @@ class HubSectionState extends State<HubSection> with MountedSetStateMixin {
   }
 
   /// GlobalKeys for MediaCards to access their state (for context menu)
+  final Map<int, GlobalKey> _itemKeys = {};
   final Map<int, GlobalKey<MediaCardState>> _mediaCardKeys = {};
+
+  GlobalKey _itemKeyFor(int index) {
+    return _itemKeys.putIfAbsent(index, () => GlobalKey());
+  }
 
   GlobalKey<MediaCardState> _getMediaCardKey(int index) {
     return _mediaCardKeys.putIfAbsent(index, () => GlobalKey<MediaCardState>());
@@ -344,7 +361,12 @@ class HubSectionState extends State<HubSection> with MountedSetStateMixin {
   }
 
   Future<void> _navigateToItem(MediaItem item) async {
-    await navigateToMediaItem(context, item, onRefresh: widget.onRefresh, playDirectly: widget.isInContinueWatching);
+    await navigateToMediaItem(
+      context,
+      item,
+      onRefresh: widget.onRefresh,
+      playDirectly: widget.usesContinueWatchingAction,
+    );
   }
 
   void _navigateToHubDetail(BuildContext context) {
@@ -355,6 +377,7 @@ class HubSectionState extends State<HubSection> with MountedSetStateMixin {
           hub: widget.hub,
           loadItems: widget.loadMoreItems,
           isInContinueWatching: widget.isInContinueWatching,
+          usesContinueWatchingAction: widget.usesContinueWatchingAction,
           onRemoveFromContinueWatching: widget.onRemoveFromContinueWatching,
         ),
       ),
@@ -379,10 +402,10 @@ class HubSectionState extends State<HubSection> with MountedSetStateMixin {
     ).textTheme.titleLarge?.copyWith(fontSize: isTv ? 26 : null, fontWeight: isTv ? FontWeight.w700 : null);
 
     return Padding(
-      padding: EdgeInsets.only(bottom: isTv && !widget.inset ? TvLayoutConstants.shelfVerticalGap : 0),
+      padding: .only(bottom: isTv && !widget.inset ? TvLayoutConstants.shelfVerticalGap : 0),
       child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: .start,
+        mainAxisSize: .min,
         children: [
           // Hub header (NOT focusable - titles should not be focusable)
           Padding(
@@ -399,12 +422,12 @@ class HubSectionState extends State<HubSection> with MountedSetStateMixin {
                       ? const EdgeInsets.symmetric(vertical: 2)
                       : const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
                   child: Row(
-                    mainAxisSize: MainAxisSize.min,
+                    mainAxisSize: .min,
                     children: [
                       AppIcon(widget.icon, fill: 1, size: isTv ? 28 : null),
                       SizedBox(width: isTv ? 12 : 8),
                       Flexible(
-                        child: Text(widget.hub.title, style: titleStyle, overflow: TextOverflow.ellipsis, maxLines: 1),
+                        child: Text(widget.hub.title, style: titleStyle, overflow: .ellipsis, maxLines: 1),
                       ),
                       if (widget.showServerName && widget.hub.serverName != null) ...[
                         const SizedBox(width: 8),
@@ -492,6 +515,7 @@ class HubSectionState extends State<HubSection> with MountedSetStateMixin {
 
                             if (index == widget.hub.items.length) {
                               return Padding(
+                                key: _itemKeyFor(index),
                                 padding: widget.inset
                                     ? const EdgeInsets.only(right: 4)
                                     : const EdgeInsets.symmetric(horizontal: 2),
@@ -507,7 +531,7 @@ class HubSectionState extends State<HubSection> with MountedSetStateMixin {
                                     height: containerHeight - 10,
                                     child: Center(
                                       child: Column(
-                                        mainAxisSize: MainAxisSize.min,
+                                        mainAxisSize: .min,
                                         children: [
                                           Icon(
                                             Symbols.arrow_forward_rounded,
@@ -533,6 +557,7 @@ class HubSectionState extends State<HubSection> with MountedSetStateMixin {
                             final item = widget.hub.items[index];
 
                             return Padding(
+                              key: _itemKeyFor(index),
                               padding: widget.inset
                                   ? const EdgeInsets.only(right: 4)
                                   : const EdgeInsets.symmetric(horizontal: 2),
@@ -541,6 +566,7 @@ class HubSectionState extends State<HubSection> with MountedSetStateMixin {
                                 isFocused: isItemFocused,
                                 onTap: () => _onItemTapped(index),
                                 onLongPress: () => _mediaCardKeys[index]?.currentState?.showContextMenu(),
+                                delegateFocusBorder: true,
                                 child: MediaCard(
                                   key: _getMediaCardKey(index),
                                   item: item,
@@ -550,6 +576,7 @@ class HubSectionState extends State<HubSection> with MountedSetStateMixin {
                                   onRemoveFromContinueWatching: widget.onRemoveFromContinueWatching,
                                   forceGridMode: true,
                                   isInContinueWatching: widget.isInContinueWatching,
+                                  usesContinueWatchingAction: widget.usesContinueWatchingAction,
                                   mixedHubContext: isMixedHub,
                                 ),
                               ),
