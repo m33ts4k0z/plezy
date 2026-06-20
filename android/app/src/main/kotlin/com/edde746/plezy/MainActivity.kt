@@ -314,6 +314,8 @@ class MainActivity : FlutterActivity() {
 
   override fun onDestroy() {
     if (current === this) current = null
+    pendingExternalPlayerResult?.error("ACTIVITY_DESTROYED", "Activity was destroyed while external player was active", null)
+    pendingExternalPlayerResult = null
     super.onDestroy()
   }
 
@@ -383,12 +385,6 @@ class MainActivity : FlutterActivity() {
       }
     }
     return null
-  }
-
-  override fun onDestroy() {
-    pendingExternalPlayerResult?.error("ACTIVITY_DESTROYED", "Activity was destroyed while external player was active", null)
-    pendingExternalPlayerResult = null
-    super.onDestroy()
   }
 
   private fun handleWatchNextIntent(intent: Intent?) {
