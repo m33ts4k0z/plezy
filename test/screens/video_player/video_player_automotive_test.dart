@@ -17,6 +17,15 @@ void main() {
     expect(shouldPauseVideoForBackground(isHandheld: false, isTv: false, isAutomotive: false), isFalse);
   });
 
+  test('Android handheld backgrounding preserves resumable media controls', () {
+    expect(shouldClearMediaControlsOnAppPaused(isAndroid: true, suspendsForTv: false), isFalse);
+  });
+
+  test('non-Android backgrounding clears media controls outside the TV handoff', () {
+    expect(shouldClearMediaControlsOnAppPaused(isAndroid: false, suspendsForTv: false), isTrue);
+    expect(shouldClearMediaControlsOnAppPaused(isAndroid: false, suspendsForTv: true), isFalse);
+  });
+
   test('automotive playback is allowed only while resumed', () {
     expect(automotivePlaybackAllowed(isAutomotive: true, state: AppLifecycleState.resumed), isTrue);
     expect(automotivePlaybackAllowed(isAutomotive: true, state: AppLifecycleState.inactive), isFalse);

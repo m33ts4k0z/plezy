@@ -1076,10 +1076,15 @@ class VideoPlayerScreenState extends State<VideoPlayerScreen> with WidgetsBindin
           _recordLifecycleState('paused', action: 'skipped_for_pip');
           break;
         }
-        // We don't support background playback
+        // We don't support background playback. Keep Android's paused media
+        // session alive so launcher, lock-screen, and camera-island controls
+        // can resume it; TV uses the dedicated suspension handoff below.
         if (_shouldSuspendMediaControlsForTvBackground) {
           unawaited(_suspendMediaControlsForTvBackground('paused'));
-        } else {
+        } else if (shouldClearMediaControlsOnAppPaused(
+          isAndroid: Platform.isAndroid,
+          suspendsForTv: _shouldSuspendMediaControlsForTvBackground,
+        )) {
           unawaited(_mediaControlsManager?.clear());
         }
         unawaited(_wakelockController.setEnabled(false));

@@ -3,6 +3,14 @@ part of '../../video_player_screen.dart';
 bool shouldPauseVideoForBackground({required bool isHandheld, required bool isTv, required bool isAutomotive}) =>
     isHandheld || isTv || isAutomotive;
 
+/// Android keeps the paused media session alive so launcher, lock-screen, and
+/// camera-island media surfaces can resume playback. Android TV uses its own
+/// explicit suspension path; other platforms retain the existing clear-on-
+/// background behaviour.
+bool shouldClearMediaControlsOnAppPaused({required bool isAndroid, required bool suspendsForTv}) {
+  return !isAndroid && !suspendsForTv;
+}
+
 extension _VideoPlayerLifecycleMethods on VideoPlayerScreenState {
   void _enqueueLifecycleTransition(String label, Future<void> Function() transition) {
     _lifecycleTransition = _lifecycleTransition
