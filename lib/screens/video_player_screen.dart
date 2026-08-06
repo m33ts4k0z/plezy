@@ -430,6 +430,8 @@ class VideoPlayerScreenState extends State<VideoPlayerScreen> with WidgetsBindin
   _PlaybackTransition _playbackTransition = _PlaybackTransition.idle;
   _PlaybackTransitionLease? _playbackTransitionLease;
   Completer<void>? _playbackTransitionIdleCompleter;
+  Duration? _pendingPlexTranscodeSeekTarget;
+  Completer<void>? _plexTranscodeSeekCompleter;
   bool _playbackIntentShouldPlay = true;
   int _pendingSubtitleCycleCount = 0;
   bool _subtitleCycleDrainActive = false;

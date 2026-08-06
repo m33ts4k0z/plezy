@@ -1,6 +1,11 @@
 import '../mpv/mpv.dart';
 
 const restartBeforePreviousItemThreshold = Duration(seconds: 3);
+const plexTranscodeSeekRangeStartTolerance = Duration(milliseconds: 500);
+const plexTranscodeSeekRangeEndGuard = Duration(milliseconds: 500);
+const plexTranscodeSeekNoopTolerance = Duration(seconds: 1);
+
+enum PlexTranscodeSeekAction { nativeSeek, restartTranscode }
 
 bool shouldRestartBeforePreviousItem(Duration position) {
   return position > restartBeforePreviousItemThreshold;
@@ -11,4 +16,41 @@ Duration clampSeekPosition(Player player, Duration position) {
   if (position.isNegative) return Duration.zero;
   if (duration > Duration.zero && position > duration) return duration;
   return position;
+}
+
+/// Plex's progressive MKV-over-HTTP transcodes can only be native-seeked
+/// inside ranges the player already has buffered. Seeking elsewhere requires
+/// a new server transcode whose `offset` starts at the requested position.
+PlexTranscodeSeekAction resolvePlexTranscodeSeekAction({
+  required Duration currentPosition,
+  required Duration target,
+  required List<BufferRange> bufferRanges,
+  bool allowBufferedNativeSeek = true,
+  Duration rangeStartTolerance = plexTranscodeSeekRangeStartTolerance,
+  Duration rangeEndGuard = plexTranscodeSeekRangeEndGuard,
+  Duration noopTolerance = plexTranscodeSeekNoopTolerance,
+}) {
+  final validRanges = bufferRanges.where((range) => range.end >= range.start).toList();
+  if (allowBufferedNativeSeek &&
+      _isInAnyBufferedSeekRange(target, validRanges, startTolerance: rangeStartTolerance, endGuard: rangeEndGuard)) {
+    return PlexTranscodeSeekAction.nativeSeek;
+  }
+
+  if ((target - currentPosition).abs() <= noopTolerance) {
+    return PlexTranscodeSeekAction.nativeSeek;
+  }
+
+  return PlexTranscodeSeekAction.restartTranscode;
+}
+
+bool _isInAnyBufferedSeekRange(
+  Duration target,
+  List<BufferRange> ranges, {
+  required Duration startTolerance,
+  required Duration endGuard,
+}) {
+  for (final range in ranges) {
+    if (target >= range.start - startTolerance && target <= range.end - endGuard) return true;
+  }
+  return false;
 }

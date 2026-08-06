@@ -33,7 +33,7 @@ extension _VideoPlayerMediaControlsMethods on VideoPlayerScreenState {
 
     final playbackState = context.read<PlaybackStateProvider>();
     final hasNavigableItems = _currentMetadata.isEpisode || playbackState.isPlaylistActive;
-    final contentCanSeek = !widget.isLive && currentPlayer.state.seekable;
+    final contentCanSeek = !widget.isLive && (currentPlayer.state.seekable || _usesPlexVodTranscodeSeekPolicy);
     final canControlPlayback = _canControlPlayback();
     final canNavigateMediaItems = _canNavigateMediaItems();
 

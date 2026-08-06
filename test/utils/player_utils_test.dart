@@ -1,5 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:plezy/mpv/mpv.dart' show Player, PlayerState;
+import 'package:plezy/mpv/mpv.dart' show BufferRange, Player, PlayerState;
 import 'package:plezy/utils/player_utils.dart';
 
 void main() {
@@ -31,6 +31,64 @@ void main() {
       final player = _FakePlayer(duration: Duration.zero);
 
       expect(clampSeekPosition(player, const Duration(minutes: 6)), const Duration(minutes: 6));
+    });
+  });
+
+  group('resolvePlexTranscodeSeekAction', () {
+    test('uses a native seek inside a buffered range', () {
+      expect(
+        resolvePlexTranscodeSeekAction(
+          currentPosition: const Duration(seconds: 10),
+          target: const Duration(seconds: 20),
+          bufferRanges: const [BufferRange(start: Duration.zero, end: Duration(seconds: 30))],
+        ),
+        PlexTranscodeSeekAction.nativeSeek,
+      );
+    });
+
+    test('restarts the transcode outside buffered ranges', () {
+      expect(
+        resolvePlexTranscodeSeekAction(
+          currentPosition: const Duration(seconds: 10),
+          target: const Duration(minutes: 2),
+          bufferRanges: const [BufferRange(start: Duration.zero, end: Duration(seconds: 30))],
+        ),
+        PlexTranscodeSeekAction.restartTranscode,
+      );
+    });
+
+    test('restarts when buffered native seeking is disabled', () {
+      expect(
+        resolvePlexTranscodeSeekAction(
+          currentPosition: const Duration(seconds: 10),
+          target: const Duration(seconds: 20),
+          bufferRanges: const [BufferRange(start: Duration.zero, end: Duration(seconds: 30))],
+          allowBufferedNativeSeek: false,
+        ),
+        PlexTranscodeSeekAction.restartTranscode,
+      );
+    });
+
+    test('keeps near-noop seeks native even without a buffer range', () {
+      expect(
+        resolvePlexTranscodeSeekAction(
+          currentPosition: const Duration(seconds: 10),
+          target: const Duration(milliseconds: 10750),
+          bufferRanges: const [],
+        ),
+        PlexTranscodeSeekAction.nativeSeek,
+      );
+    });
+
+    test('ignores malformed buffered ranges', () {
+      expect(
+        resolvePlexTranscodeSeekAction(
+          currentPosition: const Duration(seconds: 10),
+          target: const Duration(seconds: 20),
+          bufferRanges: const [BufferRange(start: Duration(seconds: 30), end: Duration(seconds: 5))],
+        ),
+        PlexTranscodeSeekAction.restartTranscode,
+      );
     });
   });
 }
