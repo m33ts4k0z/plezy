@@ -1,6 +1,7 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:plezy/connection/connection.dart';
 import 'package:plezy/media/media_backend.dart';
+import 'package:plezy/media/media_browser_dialect.dart';
 
 /// Backend-agnostic [Connection] sealed-class tests. The
 /// `connection_registry_test` already covers DB persistence; these focus on
@@ -16,12 +17,22 @@ void main() {
     });
 
     test('fromId throws on unknown id (no silent fallback)', () {
-      expect(() => ConnectionKind.fromId('emby'), throwsA(isA<ArgumentError>()));
+      expect(() => ConnectionKind.fromId('kodi'), throwsA(isA<ArgumentError>()));
     });
 
     test('backend mapping is total', () {
       expect(ConnectionKind.plex.backend, MediaBackend.plex);
       expect(ConnectionKind.jellyfin.backend, MediaBackend.jellyfin);
+      expect(ConnectionKind.emby.backend, MediaBackend.emby);
+    });
+
+    test('dialect maps only the MediaBrowser kinds and round-trips', () {
+      expect(ConnectionKind.plex.dialect, isNull);
+      expect(ConnectionKind.jellyfin.dialect, MediaBrowserDialect.jellyfin);
+      expect(ConnectionKind.emby.dialect, MediaBrowserDialect.emby);
+      for (final dialect in MediaBrowserDialect.values) {
+        expect(ConnectionKind.fromDialect(dialect).dialect, dialect);
+      }
     });
   });
 
@@ -62,6 +73,58 @@ void main() {
       expect(restored.lastAuthenticatedAt, base.lastAuthenticatedAt);
     });
 
+    test('primary image tag round-trips through config JSON', () {
+      final tagged = base.copyWith(primaryImageTag: 'avatar-tag');
+      final restored = JellyfinConnection.fromConfigJson(
+        id: tagged.id,
+        json: tagged.toConfigJson(),
+        status: tagged.status,
+        createdAt: tagged.createdAt,
+        lastAuthenticatedAt: tagged.lastAuthenticatedAt,
+      );
+
+      expect(restored.primaryImageTag, 'avatar-tag');
+    });
+
+    test('config saved before image tags decodes with no primary image tag', () {
+      final legacyJson = <String, Object?>{
+        'baseUrl': base.baseUrl,
+        'baseUrls': base.baseUrls,
+        'serverName': base.serverName,
+        'serverMachineId': base.serverMachineId,
+        'userId': base.userId,
+        'userName': base.userName,
+        'accessToken': base.accessToken,
+        'deviceId': base.deviceId,
+        'isAdministrator': base.isAdministrator,
+      };
+      expect(legacyJson.containsKey('primaryImageTag'), isFalse);
+
+      final restored = JellyfinConnection.fromConfigJson(
+        id: base.id,
+        json: legacyJson,
+        status: base.status,
+        createdAt: base.createdAt,
+        lastAuthenticatedAt: base.lastAuthenticatedAt,
+      );
+
+      expect(restored.primaryImageTag, isNull);
+    });
+
+    test('blank persisted primary image tags decode as null', () {
+      for (final tag in ['', ' \t\n ']) {
+        final restored = JellyfinConnection.fromConfigJson(
+          id: base.id,
+          json: {...base.toConfigJson(), 'primaryImageTag': tag},
+          status: base.status,
+          createdAt: base.createdAt,
+          lastAuthenticatedAt: base.lastAuthenticatedAt,
+        );
+
+        expect(restored.primaryImageTag, isNull, reason: 'tag: "$tag"');
+      }
+    });
+
     test('fromConfigJson with empty payload uses safe defaults (no NPE)', () {
       final restored = JellyfinConnection.fromConfigJson(
         id: 'orphan',
@@ -99,9 +162,85 @@ void main() {
       expect(updated.baseUrls, ['https://jellyfin.lan:8096', 'https://jellyfin.example.com']);
     });
 
+    test('copyWith preserves an existing primary image tag by default', () {
+      final tagged = base.copyWith(primaryImageTag: 'old');
+
+      expect(tagged.copyWith().primaryImageTag, 'old');
+    });
+
+    test('copyWith replaces an existing primary image tag', () {
+      final tagged = base.copyWith(primaryImageTag: 'old');
+
+      expect(tagged.copyWith(primaryImageTag: 'new').primaryImageTag, 'new');
+    });
+
+    test('copyWith only clears a primary image tag through the clear sentinel', () {
+      final tagged = base.copyWith(primaryImageTag: 'old');
+
+      expect(tagged.copyWith(primaryImageTag: null).primaryImageTag, 'old');
+      expect(tagged.copyWith(clearPrimaryImageTag: true).primaryImageTag, isNull);
+    });
+
+    test('reads primary image tags defensively from Jellyfin user DTOs', () {
+      expect(JellyfinConnection.readPrimaryImageTag(const {'PrimaryImageTag': 'avatar-tag'}), 'avatar-tag');
+      expect(JellyfinConnection.readPrimaryImageTag(const {}), isNull);
+      expect(JellyfinConnection.readPrimaryImageTag(const {'PrimaryImageTag': ' \t\n '}), isNull);
+      expect(JellyfinConnection.readPrimaryImageTag(const {'PrimaryImageTag': 42}), '42');
+    });
+
     test('kind and backend match Jellyfin', () {
+      expect(base.dialect, MediaBrowserDialect.jellyfin);
       expect(base.kind, ConnectionKind.jellyfin);
       expect(base.backend, MediaBackend.jellyfin);
+    });
+
+    test('an Emby dialect drives kind, backend and the persisted discriminator', () {
+      final emby = base.copyWith(dialect: MediaBrowserDialect.emby);
+
+      expect(emby.kind, ConnectionKind.emby);
+      expect(emby.kind.id, 'emby');
+      expect(emby.backend, MediaBackend.emby);
+      // The dialect lives in the `connections.kind` column, never in the
+      // encrypted config payload, so exactly one discriminator is on disk.
+      expect(emby.toConfigJson().containsKey('dialect'), isFalse);
+    });
+
+    test('fromConfigJson restores the dialect handed in by the registry', () {
+      final restored = JellyfinConnection.fromConfigJson(
+        id: 'srv-1/user-1',
+        json: base.toConfigJson(),
+        status: ConnectionStatus.online,
+        createdAt: base.createdAt,
+        dialect: MediaBrowserDialect.emby,
+      );
+
+      expect(restored.dialect, MediaBrowserDialect.emby);
+      expect(restored.kind, ConnectionKind.emby);
+      expect(restored.accessToken, 'tok-abc');
+    });
+
+    test('fromConfigJson defaults to Jellyfin for rows written before Emby support', () {
+      final restored = JellyfinConnection.fromConfigJson(
+        id: 'legacy',
+        json: const {'baseUrl': 'https://jellyfin.example.com'},
+        status: ConnectionStatus.unknown,
+        createdAt: DateTime.utc(2026),
+      );
+
+      expect(restored.dialect, MediaBrowserDialect.jellyfin);
+      expect(restored.kind, ConnectionKind.jellyfin);
+    });
+
+    test('empty-payload serverName falls back to the dialect product name', () {
+      final emby = JellyfinConnection.fromConfigJson(
+        id: 'orphan',
+        json: const {},
+        status: ConnectionStatus.unknown,
+        createdAt: DateTime.utc(2026),
+        dialect: MediaBrowserDialect.emby,
+      );
+
+      expect(emby.serverName, 'Emby');
     });
   });
 

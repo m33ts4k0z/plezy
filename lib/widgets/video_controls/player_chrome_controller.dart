@@ -12,9 +12,12 @@ enum PlayerChromeFocusTarget { playPause, timeline }
 
 /// Owns video-player chrome visibility and auto-hide policy for one player route.
 class PlayerChromeController extends ChangeNotifier implements ValueListenable<bool> {
-  PlayerChromeController({bool controlsVisible = true}) : _controlsVisible = controlsVisible;
+  PlayerChromeController({bool initiallyVisible = true})
+    : _controlsVisible = initiallyVisible,
+      _controlsPresented = initiallyVisible;
 
   bool _controlsVisible;
+  bool _controlsPresented;
   bool _contentStripVisible = false;
   bool _playing = false;
   bool _hasFirstFrame = true;
@@ -29,8 +32,10 @@ class PlayerChromeController extends ChangeNotifier implements ValueListenable<b
   bool get value => _controlsVisible;
 
   bool get controlsVisible => _controlsVisible;
+
+  /// Whether controls may still be visibly rendered during their fade-out.
+  bool get controlsPresented => _controlsPresented;
   bool get contentStripVisible => _contentStripVisible;
-  bool get hasVisibleHold => _holds.isNotEmpty;
   bool isHeld(PlayerChromeHold hold) => _holds.contains(hold);
   PlayerChromeFocusTarget? get pendingFocusTarget => _pendingFocusTarget;
 
@@ -79,6 +84,7 @@ class PlayerChromeController extends ChangeNotifier implements ValueListenable<b
   }
 
   void show({bool restartAutoHide = true, PlayerChromeFocusTarget? focusTarget}) {
+    _controlsPresented = true;
     var shouldNotify = false;
     if (focusTarget != null) {
       _pendingFocusTarget = focusTarget;
@@ -109,6 +115,12 @@ class PlayerChromeController extends ChangeNotifier implements ValueListenable<b
     }
     notifyListeners();
     return true;
+  }
+
+  /// Called when the controls opacity animation reaches its hidden target.
+  void markControlsHidden() {
+    if (_controlsVisible) return;
+    _controlsPresented = false;
   }
 
   void toggle() {
@@ -174,6 +186,7 @@ class PlayerChromeController extends ChangeNotifier implements ValueListenable<b
     if (!_controlsVisible) {
       _controlsVisible = true;
     }
+    _controlsPresented = true;
     notifyListeners();
   }
 

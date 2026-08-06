@@ -1,28 +1,47 @@
 import '../media/media_backend.dart';
+import '../media/media_browser_dialect.dart';
 import '../models/plex/plex_home_user.dart';
 import '../services/plex_auth_service.dart';
+import '../utils/json_utils.dart';
+import '../utils/url_utils.dart';
 
 /// Identifier of a backend kind a [Connection] points at. Lighter-weight than
 /// [MediaBackend] for places that only care about persistence/auth shape
 /// (e.g. database column values).
 enum ConnectionKind {
   plex,
-  jellyfin;
+  jellyfin,
+  emby;
 
   String get id => switch (this) {
     ConnectionKind.plex => 'plex',
     ConnectionKind.jellyfin => 'jellyfin',
+    ConnectionKind.emby => 'emby',
   };
 
   static ConnectionKind fromId(String id) => switch (id) {
     'plex' => ConnectionKind.plex,
     'jellyfin' => ConnectionKind.jellyfin,
+    'emby' => ConnectionKind.emby,
     _ => throw ArgumentError('Unknown ConnectionKind id: $id'),
   };
 
   MediaBackend get backend => switch (this) {
     ConnectionKind.plex => MediaBackend.plex,
     ConnectionKind.jellyfin => MediaBackend.jellyfin,
+    ConnectionKind.emby => MediaBackend.emby,
+  };
+
+  /// The MediaBrowser dialect this kind speaks, or `null` for Plex.
+  MediaBrowserDialect? get dialect => switch (this) {
+    ConnectionKind.plex => null,
+    ConnectionKind.jellyfin => MediaBrowserDialect.jellyfin,
+    ConnectionKind.emby => MediaBrowserDialect.emby,
+  };
+
+  static ConnectionKind fromDialect(MediaBrowserDialect dialect) => switch (dialect) {
+    MediaBrowserDialect.jellyfin => ConnectionKind.jellyfin,
+    MediaBrowserDialect.emby => ConnectionKind.emby,
   };
 }
 
@@ -186,7 +205,9 @@ class PlexAccountConnection extends Connection {
   }
 }
 
-/// A single-server Jellyfin connection.
+/// A single-server connection to a MediaBrowser-family server — Jellyfin or its
+/// Emby ancestor. [dialect] selects which of the two wire dialects this
+/// connection speaks; every other field has the same meaning on both.
 class JellyfinConnection extends Connection {
   @override
   final String id;
@@ -200,10 +221,14 @@ class JellyfinConnection extends Connection {
   @override
   final DateTime? lastAuthenticatedAt;
 
+  /// Which MediaBrowser dialect this server speaks. Drives [kind], [backend]
+  /// and every route/capability delta in [JellyfinClient].
+  final MediaBrowserDialect dialect;
+
   /// Active server base URL, no trailing slash. e.g. `https://jellyfin.home.lan`.
   final String baseUrl;
 
-  /// Candidate server URLs for this Jellyfin server, with [baseUrl] first.
+  /// Candidate server URLs for this server, with [baseUrl] first.
   /// Existing installs only have [baseUrl]; deserialization backfills this.
   final List<String> baseUrls;
 
@@ -213,7 +238,7 @@ class JellyfinConnection extends Connection {
   /// Server's machine identifier (System/Info `Id`).
   final String serverMachineId;
 
-  /// Authenticated Jellyfin user id (UUID).
+  /// Authenticated user id. A UUID on Jellyfin, an opaque hex string on Emby.
   final String userId;
 
   /// Authenticated user's display name.
@@ -226,14 +251,21 @@ class JellyfinConnection extends Connection {
   /// `Authorization: MediaBrowser DeviceId="..."` header).
   final String deviceId;
 
-  /// Whether this user is a Jellyfin admin (`/Users/{id}.Policy.IsAdministrator`).
+  /// Whether this user is a server admin (`/Users/{id}.Policy.IsAdministrator`).
   /// Captured at auth time so the UI can gate admin-only entries (delete,
   /// match/unmatch, edit metadata) without an extra round-trip.
   final bool isAdministrator;
 
+  /// The authenticated user's `PrimaryImageTag`, or `null` when they have no
+  /// profile picture. The server omits the key entirely in that case, and the
+  /// tag is `MD5(imagePath + lastModified)` so it changes on every upload —
+  /// which makes the derived avatar URL self-invalidating. Captured at auth
+  /// time and refreshed by [JellyfinClient.checkHealth].
+  final String? primaryImageTag;
+
   JellyfinConnection({
     required this.id,
-    required this.baseUrl,
+    required String baseUrl,
     List<String>? baseUrls,
     required this.serverName,
     required this.serverMachineId,
@@ -241,14 +273,17 @@ class JellyfinConnection extends Connection {
     required this.userName,
     required this.accessToken,
     required this.deviceId,
+    this.dialect = MediaBrowserDialect.jellyfin,
     this.isAdministrator = false,
+    this.primaryImageTag,
     this.status = ConnectionStatus.unknown,
     required this.createdAt,
     this.lastAuthenticatedAt,
-  }) : baseUrls = _normalizeBaseUrls(baseUrl, baseUrls);
+  }) : baseUrl = canonicalizeBaseUrl(baseUrl),
+       baseUrls = _normalizeBaseUrls(baseUrl, baseUrls);
 
   @override
-  ConnectionKind get kind => ConnectionKind.jellyfin;
+  ConnectionKind get kind => ConnectionKind.fromDialect(dialect);
 
   @override
   String get displayName => '$userName · $serverName';
@@ -273,9 +308,9 @@ class JellyfinConnection extends Connection {
     final seen = <String>{};
 
     void add(String url) {
-      final trimmed = url.trim();
-      if (trimmed.isEmpty || !seen.add(trimmed)) return;
-      result.add(trimmed);
+      final normalized = canonicalizeBaseUrl(url);
+      if (normalized.isEmpty || !seen.add(normalized)) return;
+      result.add(normalized);
     }
 
     add(activeBaseUrl);
@@ -295,7 +330,14 @@ class JellyfinConnection extends Connection {
     String? userName,
     String? accessToken,
     String? deviceId,
+    MediaBrowserDialect? dialect,
     bool? isAdministrator,
+    String? primaryImageTag,
+
+    /// Deleting a profile picture drops `PrimaryImageTag` from the user DTO, so
+    /// a refresh must be able to null the cached value — a bare
+    /// `primaryImageTag: null` is indistinguishable from "unchanged".
+    bool clearPrimaryImageTag = false,
     ConnectionStatus? status,
     DateTime? createdAt,
     DateTime? lastAuthenticatedAt,
@@ -311,13 +353,18 @@ class JellyfinConnection extends Connection {
       userName: userName ?? this.userName,
       accessToken: accessToken ?? this.accessToken,
       deviceId: deviceId ?? this.deviceId,
+      dialect: dialect ?? this.dialect,
       isAdministrator: isAdministrator ?? this.isAdministrator,
+      primaryImageTag: clearPrimaryImageTag ? null : (primaryImageTag ?? this.primaryImageTag),
       status: status ?? this.status,
       createdAt: createdAt ?? this.createdAt,
       lastAuthenticatedAt: lastAuthenticatedAt ?? this.lastAuthenticatedAt,
     );
   }
 
+  /// The persisted payload deliberately omits [dialect]: the `connections.kind`
+  /// column is the authoritative, indexed discriminator and
+  /// [JellyfinConnection.fromConfigJson] receives it from there.
   @override
   Map<String, Object?> toConfigJson() {
     return {
@@ -330,6 +377,7 @@ class JellyfinConnection extends Connection {
       'accessToken': accessToken,
       'deviceId': deviceId,
       'isAdministrator': isAdministrator,
+      'primaryImageTag': primaryImageTag,
     };
   }
 
@@ -339,6 +387,7 @@ class JellyfinConnection extends Connection {
     required ConnectionStatus status,
     required DateTime createdAt,
     DateTime? lastAuthenticatedAt,
+    MediaBrowserDialect dialect = MediaBrowserDialect.jellyfin,
   }) {
     final rawBaseUrls = json['baseUrls'];
     final baseUrls = rawBaseUrls is List ? rawBaseUrls.whereType<String>().toList(growable: false) : const <String>[];
@@ -350,16 +399,31 @@ class JellyfinConnection extends Connection {
       id: id,
       baseUrl: baseUrl,
       baseUrls: baseUrls,
-      serverName: json['serverName'] as String? ?? 'Jellyfin',
+      dialect: dialect,
+      serverName: json['serverName'] as String? ?? dialect.productName,
       serverMachineId: json['serverMachineId'] as String? ?? '',
       userId: json['userId'] as String? ?? '',
       userName: json['userName'] as String? ?? '',
       accessToken: json['accessToken'] as String? ?? '',
       deviceId: json['deviceId'] as String? ?? '',
       isAdministrator: json['isAdministrator'] as bool? ?? false,
+      primaryImageTag: normalizePrimaryImageTag(json['primaryImageTag']),
       status: status,
       createdAt: createdAt,
       lastAuthenticatedAt: lastAuthenticatedAt,
     );
+  }
+
+  /// Tolerant read of a Jellyfin user DTO's `PrimaryImageTag`.
+  ///
+  /// The tag is decorative — a fork or a drifted scalar type must never brick
+  /// sign-in — so this coerces through [readStringField] rather than casting,
+  /// and collapses absent/blank to `null` ("no picture").
+  static String? readPrimaryImageTag(Map<String, Object?> userDto) =>
+      normalizePrimaryImageTag(readStringField(userDto, 'PrimaryImageTag'));
+
+  static String? normalizePrimaryImageTag(Object? raw) {
+    final tag = raw?.toString().trim();
+    return tag == null || tag.isEmpty ? null : tag;
   }
 }

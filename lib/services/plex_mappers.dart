@@ -23,6 +23,7 @@ import '../media/media_kind.dart';
 import '../media/media_library.dart';
 import '../media/media_part.dart';
 import '../media/media_playlist.dart';
+import '../media/media_rating.dart';
 import '../media/media_role.dart';
 import '../media/media_source_info.dart';
 import '../media/media_stream.dart';
@@ -47,8 +48,6 @@ Map<String, dynamic> _obfuscatePlaylistJson(Map<String, dynamic> json) {
   }
   return copy;
 }
-
-int _flexibleIntOrZero(Object? v) => flexibleInt(v) ?? 0;
 
 Map? _firstPartMap(Object? raw) {
   final parts = _partMaps(raw);
@@ -79,6 +78,7 @@ MediaPart _mediaPartFromMap(
   return MediaPart(
     id: (json['id'] ?? fallbackId).toString(),
     streamPath: json['key']?.toString(),
+    file: json['file']?.toString(),
     sizeBytes: flexibleInt(json['size']),
     container: json['container']?.toString() ?? fallbackContainer,
     durationMs: flexibleInt(json['duration']),
@@ -284,9 +284,6 @@ String? _stringOrNull(Object? value) {
   return string == null || string.isEmpty ? null : string;
 }
 
-String _normalizedDisplayColorTags(String? transfer, String? primaries, String? matrix) =>
-    [transfer, primaries, matrix].whereType<String>().join(' ').toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
-
 @JsonSerializable(createToJson: false)
 class PlexRoleDto {
   @JsonKey(fromJson: flexibleInt)
@@ -304,9 +301,27 @@ class PlexRoleDto {
   factory PlexRoleDto.fromJson(Map<String, dynamic> json) => _$PlexRoleDtoFromJson(json);
 }
 
+/// One entry of Plex's `Rating[]` child array, present on
+/// `/library/metadata/{id}` responses but never on section listings.
+///
+/// [image] is a source URI (`imdb://image.rating`,
+/// `rottentomatoes://image.rating.ripe`, `themoviedb://image.rating`) and
+/// [type] is `critic` or `audience`; together they attribute [value].
+@JsonSerializable(createToJson: false)
+class PlexRatingDto {
+  final String? image;
+  final String? type;
+  @JsonKey(fromJson: flexibleDouble)
+  final double? value;
+
+  const PlexRatingDto({this.image, this.type, this.value});
+
+  factory PlexRatingDto.fromJson(Map<String, dynamic> json) => _$PlexRatingDtoFromJson(json);
+}
+
 @JsonSerializable(createToJson: false)
 class PlexMediaVersionDto {
-  @JsonKey(fromJson: _flexibleIntOrZero)
+  @JsonKey(fromJson: flexibleIntOrZero)
   final int id;
   @JsonKey(readValue: readStringField)
   final String? videoResolution;
@@ -505,7 +520,7 @@ class PlexHubDto {
   @JsonKey(defaultValue: 'hub')
   final String type;
   final String? hubIdentifier;
-  @JsonKey(fromJson: _flexibleIntOrZero)
+  @JsonKey(fromJson: flexibleIntOrZero)
   final int size;
   @JsonKey(fromJson: flexibleBool)
   final bool more;
@@ -560,11 +575,16 @@ class PlexMetadataDto {
   final String? titleSort;
   final String? contentRating;
   final String? summary;
+  @JsonKey(fromJson: flexibleDouble)
   final double? rating;
+  @JsonKey(fromJson: flexibleDouble)
   final double? audienceRating;
+  @JsonKey(fromJson: flexibleDouble)
   final double? userRating;
   @JsonKey(fromJson: flexibleInt)
   final int? year;
+  @JsonKey(fromJson: flexibleInt)
+  final int? parentYear;
   final String? originallyAvailableAt;
   final String? thumb;
   final String? art;
@@ -605,6 +625,10 @@ class PlexMetadataDto {
   final List<PlexRoleDto>? role;
   @JsonKey(name: 'Media', includeToJson: false)
   final List<PlexMediaVersionDto>? mediaVersions;
+  @JsonKey(name: 'Rating', includeToJson: false)
+  final List<PlexRatingDto>? ratingSources;
+  @JsonKey(fromJson: flexibleInt)
+  final int? imdbRatingCount;
   @JsonKey(name: 'Genre', fromJson: _tagListFromJson, includeToJson: false)
   final List<String>? genre;
   @JsonKey(name: 'Director', fromJson: _tagListFromJson, includeToJson: false)
@@ -668,6 +692,7 @@ class PlexMetadataDto {
     this.audienceRating,
     this.userRating,
     this.year,
+    this.parentYear,
     this.originallyAvailableAt,
     this.thumb,
     this.art,
@@ -693,6 +718,8 @@ class PlexMetadataDto {
     this.childCount,
     this.role,
     this.mediaVersions,
+    this.ratingSources,
+    this.imdbRatingCount,
     this.genre,
     this.director,
     this.writer,
@@ -734,7 +761,11 @@ class PlexMetadataDto {
         e,
         stackTrace: st,
         withScope: (scope) {
-          scope.setContexts('json', json);
+          scope.setContexts('plex_mapper', {
+            'backend': 'plex',
+            'dto': 'PlexMetadataDto',
+            'topLevelFieldCount': json.length,
+          });
         },
       );
       rethrow;
@@ -775,8 +806,6 @@ class PlexMetadataDto {
 
   String get globalKey => serverId != null ? buildGlobalKey(ServerId(serverId!), ratingKey) : ratingKey;
 
-  bool get isLibrarySection => key != null && key!.startsWith('/library/sections/');
-
   bool get isUnmatched => guid == null || guid!.isEmpty || guid!.contains(_unmatchedAgentMarker);
 
   /// Top-level scalar fields surface as a plain Plex JSON map. Used by the
@@ -798,6 +827,7 @@ class PlexMetadataDto {
     double? audienceRating,
     double? userRating,
     int? year,
+    int? parentYear,
     String? originallyAvailableAt,
     String? thumb,
     String? art,
@@ -823,6 +853,8 @@ class PlexMetadataDto {
     int? childCount,
     List<PlexRoleDto>? role,
     List<PlexMediaVersionDto>? mediaVersions,
+    List<PlexRatingDto>? ratingSources,
+    int? imdbRatingCount,
     List<String>? genre,
     List<String>? director,
     List<String>? writer,
@@ -868,6 +900,7 @@ class PlexMetadataDto {
       audienceRating: audienceRating ?? this.audienceRating,
       userRating: userRating ?? this.userRating,
       year: year ?? this.year,
+      parentYear: parentYear ?? this.parentYear,
       originallyAvailableAt: originallyAvailableAt ?? this.originallyAvailableAt,
       thumb: thumb ?? this.thumb,
       art: art ?? this.art,
@@ -893,6 +926,8 @@ class PlexMetadataDto {
       childCount: childCount ?? this.childCount,
       role: role ?? this.role,
       mediaVersions: mediaVersions ?? this.mediaVersions,
+      ratingSources: ratingSources ?? this.ratingSources,
+      imdbRatingCount: imdbRatingCount ?? this.imdbRatingCount,
       genre: genre ?? this.genre,
       director: director ?? this.director,
       writer: writer ?? this.writer,
@@ -939,6 +974,75 @@ Map<String, Object?>? _rawMetadata(PlexMetadataDto dto) {
   return raw.isEmpty ? null : raw;
 }
 
+/// Every attributed score a Plex payload carries, headline first.
+///
+/// Section listings only ever send the scalar pair ([rating]/[ratingImage] and
+/// [audienceRating]/[audienceRatingImage]), so they yield one or two entries.
+/// `/library/metadata/{id}` additionally sends the `Rating[]` child array —
+/// IMDb, both Rotten Tomatoes panels, TMDB — with no extra query parameter, so
+/// detail responses yield up to four. Plex offers no listing parameter that
+/// includes the array, which is why cards stay shorter than detail screens.
+///
+/// Entries are deduped on `(source, value)` because the array repeats whichever
+/// source the scalar pair was drawn from. Insertion order keeps the server's
+/// own headline first, so `ratings.first` matches the scalar `rating` the
+/// cards and sorts already use.
+List<MediaRatingSource>? plexRatingSources({
+  Object? rating,
+  Object? ratingImage,
+  Object? audienceRating,
+  Object? audienceRatingImage,
+  Iterable<({Object? image, Object? type, Object? value})> ratingSources = const [],
+  int? imdbVotes,
+}) {
+  final ratings = <MediaRatingSource>[];
+
+  void add(Object? rawValue, {required String fallbackSource, Object? image, Object? type}) {
+    final value = normalizedPlexRating(rawValue);
+    if (value == null) return;
+    final source = _plexRatingSource(image: image, type: type, fallback: fallbackSource);
+    if (ratings.any((rating) => rating.source == source && rating.value == value)) return;
+    ratings.add(MediaRatingSource(source: source, value: value, votes: source == 'imdb' ? imdbVotes : null));
+  }
+
+  add(rating, fallbackSource: 'critic', image: ratingImage);
+  add(audienceRating, fallbackSource: 'audience', image: audienceRatingImage);
+  for (final entry in ratingSources) {
+    add(entry.value, fallbackSource: 'audience', image: entry.image, type: entry.type);
+  }
+  return ratings.isEmpty ? null : ratings;
+}
+
+String _plexRatingSource({Object? image, Object? type, required String fallback}) {
+  final scheme = Uri.tryParse(_nonEmptyRatingString(image) ?? '')?.scheme.toLowerCase();
+  if (scheme == 'imdb') return 'imdb';
+  if (scheme == 'themoviedb' || scheme == 'tmdb') return 'tmdb';
+  final ratingType = _nonEmptyRatingString(type)?.toLowerCase() ?? fallback;
+  if (scheme == 'rottentomatoes') {
+    return ratingType == 'critic' ? 'rottenTomatoesCritic' : 'rottenTomatoesAudience';
+  }
+  return switch (ratingType) {
+    'critic' => 'critic',
+    'audience' => 'audience',
+    _ => fallback,
+  };
+}
+
+/// Coerce a Plex score onto the neutral 0-10 scale, rejecting out-of-range
+/// noise. Plex sends percentages as 0-10 already; a stray 0-100 value is
+/// folded rather than dropped.
+double? normalizedPlexRating(Object? value) {
+  final rating = flexibleDouble(value);
+  if (rating == null || !rating.isFinite || rating < 0 || rating > 100) return null;
+  return rating > 10 ? rating / 10 : rating;
+}
+
+String? _nonEmptyRatingString(Object? value) {
+  if (value is! String) return null;
+  final trimmed = value.trim();
+  return trimmed.isEmpty ? null : trimmed;
+}
+
 /// Pure JSON/DTO→neutral-type mappers for Plex. Mirrors [JellyfinMappers].
 ///
 /// Methods come in two flavours:
@@ -972,9 +1076,10 @@ class PlexMappers {
 
   /// Map a parsed [PlexMetadataDto] into a [PlexMediaItem].
   static PlexMediaItem mediaItem(PlexMetadataDto dto) {
+    final kind = MediaKind.fromString(dto.type);
     return PlexMediaItem(
       id: dto.ratingKey,
-      kind: MediaKind.fromString(dto.type),
+      kind: kind,
       guid: dto.guid,
       title: dto.title,
       titleSort: dto.titleSort,
@@ -983,7 +1088,10 @@ class PlexMappers {
       originalTitle: dto.originalTitle,
       editionTitle: dto.editionTitle,
       studio: dto.studio,
-      year: dto.year,
+      // Plex stores an ordinary track's release year on the parent album.
+      // Normalize it into the neutral item's year, matching Jellyfin Audio
+      // rows, while leaving episode/season hierarchy semantics unchanged.
+      year: kind == MediaKind.track ? dto.year ?? dto.parentYear : dto.year,
       originallyAvailableAt: dto.originallyAvailableAt,
       contentRating: dto.contentRating,
       parentId: dto.parentRatingKey,
@@ -1004,15 +1112,23 @@ class PlexMappers {
       viewCount: dto.viewCount,
       lastViewedAt: dto.lastViewedAt,
       leafCount: dto.leafCount,
-      viewedLeafCount: dto.viewedLeafCount,
+      viewedLeafCount: kind.usesLeafWatchCounts ? dto.viewedLeafCount : null,
       childCount: dto.childCount,
       addedAt: dto.addedAt,
       updatedAt: dto.updatedAt,
       rating: dto.rating,
-      audienceRating: dto.audienceRating,
       userRating: dto.userRating,
-      ratingImage: dto.ratingImage,
-      audienceRatingImage: dto.audienceRatingImage,
+      ratings: plexRatingSources(
+        rating: dto.rating,
+        ratingImage: dto.ratingImage,
+        audienceRating: dto.audienceRating,
+        audienceRatingImage: dto.audienceRatingImage,
+        ratingSources: [
+          for (final entry in dto.ratingSources ?? const <PlexRatingDto>[])
+            (image: entry.image, type: entry.type, value: entry.value),
+        ],
+        imdbVotes: dto.imdbRatingCount,
+      ),
       genres: dto.genre,
       directors: dto.director,
       writers: dto.writer,
@@ -1098,13 +1214,14 @@ class PlexMappers {
     final transfer = _stringOrNull(videoStream['colorTrc']);
     final primaries = _stringOrNull(videoStream['colorPrimaries']);
     final matrix = _stringOrNull(videoStream['colorSpace']);
-    final defaults = _defaultDisplayColorTags(
+    final defaults = classifyMediaDisplayColor(
       isDolbyVision: hasDolbyVision,
       doviCompatibilityId: doviCompatibilityId,
       transfer: transfer,
       primaries: primaries,
       matrix: matrix,
-    );
+      assumeSdr: !hasDolbyVision,
+    ).defaultTags;
     final criteria = MediaDisplayCriteria.fromRaw(
       fps: videoStream['frameRate'],
       width: videoStream['width'] ?? media?['width'],
@@ -1117,31 +1234,6 @@ class PlexMappers {
       matrix: matrix ?? defaults.matrix,
     );
     return criteria.isUsable ? criteria : null;
-  }
-
-  static ({String? transfer, String? primaries, String? matrix}) _defaultDisplayColorTags({
-    required bool isDolbyVision,
-    int? doviCompatibilityId,
-    String? transfer,
-    String? primaries,
-    String? matrix,
-  }) {
-    final colorTags = _normalizedDisplayColorTags(transfer, primaries, matrix);
-    if (doviCompatibilityId == 4 || colorTags.contains('hlg') || colorTags.contains('arib')) {
-      return (transfer: 'arib-std-b67', primaries: 'bt2020', matrix: 'bt2020nc');
-    }
-    if (doviCompatibilityId == 1 ||
-        doviCompatibilityId == 6 ||
-        colorTags.contains('smpte2084') ||
-        colorTags.contains('st2084') ||
-        colorTags.contains('pq') ||
-        colorTags.contains('bt2020')) {
-      return (transfer: 'smpte2084', primaries: 'bt2020', matrix: 'bt2020nc');
-    }
-    if (doviCompatibilityId == 2 || !isDolbyVision) {
-      return (transfer: 'bt709', primaries: 'bt709', matrix: 'bt709');
-    }
-    return (transfer: null, primaries: null, matrix: null);
   }
 
   /// Map a parsed [PlexLibraryDto] into a [MediaLibrary].

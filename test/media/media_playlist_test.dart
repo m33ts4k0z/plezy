@@ -118,23 +118,6 @@ void main() {
     });
   });
 
-  group('MediaPlaylist.displayTitle', () {
-    test('is an alias of title', () {
-      final pl = _playlist(title: 'Anything');
-      expect(pl.displayTitle, 'Anything');
-      expect(pl.displayTitle, pl.title);
-    });
-  });
-
-  group('MediaPlaylist.isEditable', () {
-    test('smart playlists are read-only (Plex semantics)', () {
-      expect(_playlist(smart: true).isEditable, isFalse);
-    });
-
-    test('manual playlists are editable', () {
-      expect(_playlist(smart: false).isEditable, isTrue);
-    });
-  });
 
   group('MediaPlaylist.globalKey', () {
     test('uses "<serverId>:<id>" when serverId is set', () {
@@ -166,7 +149,6 @@ void main() {
       expect(minimal.serverName, isNull);
       expect(minimal.displayImagePath, isNull);
       expect(minimal.displayTitle, 'Min');
-      expect(minimal.isEditable, isTrue);
       // Without a serverId, globalKey reduces to the bare id.
       expect(minimal.globalKey, 'pl');
     });

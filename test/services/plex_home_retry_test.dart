@@ -9,6 +9,7 @@ import 'package:plezy/database/app_database.dart';
 import 'package:plezy/models/plex/plex_config.dart';
 import 'package:plezy/services/plex_api_cache.dart';
 import 'package:plezy/services/plex_client.dart';
+import 'package:plezy/utils/active_client_scope.dart';
 
 typedef _RequestHandler = Future<http.StreamedResponse> Function(http.BaseRequest request);
 
@@ -61,13 +62,13 @@ void main() {
   });
 
   group('PlexClient home hub retries', () {
-    test('fetchGlobalHubs retries a transient first failure', () async {
+    test('fetchGlobalHubs retries a first-attempt connection error', () async {
       final db = AppDatabase.forTesting(NativeDatabase.memory());
       PlexApiCache.initialize(db);
       addTearDown(db.close);
 
       final httpClient = _SequenceClient([
-        (_) async => throw TimeoutException('cold Plex start'),
+        (_) async => throw http.ClientException('connection reset on cold Plex start'),
         (_) async => _jsonResponse(_globalHubsPayload()),
       ]);
       final client = PlexClient.forTesting(
@@ -79,6 +80,7 @@ void main() {
           version: 'test',
         ),
         serverId: ServerId('server-id'),
+        profileScopeId: buildPlexProfileScopeId(serverId: ServerId('server-id'), profileId: 'test-profile'),
         serverName: 'Server',
         httpClient: httpClient,
       );
@@ -92,6 +94,38 @@ void main() {
       expect(httpClient.requests, hasLength(2));
       expect(httpClient.requests.map((r) => r.url.path), everyElement('/hubs'));
       expect(httpClient.requests.map((r) => r.url.queryParameters['count']), everyElement('12'));
+    });
+
+    test('fetchGlobalHubs does not replay a hub row that timed out', () async {
+      // `Client.send` resolves on response headers, so a hub timeout usually
+      // means the server is still working on the query. Replaying it made the
+      // server start over on a shorter budget — the #1784 cold-start stall.
+      final db = AppDatabase.forTesting(NativeDatabase.memory());
+      PlexApiCache.initialize(db);
+      addTearDown(db.close);
+
+      final httpClient = _SequenceClient([
+        (_) async => throw TimeoutException('server still building the hub'),
+        (_) async => _jsonResponse(_globalHubsPayload()),
+      ]);
+      final client = PlexClient.forTesting(
+        config: PlexConfig(
+          baseUrl: 'http://server:32400',
+          token: 'token',
+          clientIdentifier: 'client-id',
+          product: 'Plezy',
+          version: 'test',
+        ),
+        serverId: ServerId('server-id'),
+        profileScopeId: buildPlexProfileScopeId(serverId: ServerId('server-id'), profileId: 'test-profile'),
+        serverName: 'Server',
+        httpClient: httpClient,
+      );
+      addTearDown(client.close);
+
+      // `_fetchHubs` degrades a failed row to empty rather than sinking home.
+      expect(await client.fetchGlobalHubs(limit: 12), isEmpty);
+      expect(httpClient.requests, hasLength(1));
     });
 
     test('fetchGlobalHubs sends configured Plex language headers', () async {
@@ -110,6 +144,7 @@ void main() {
           languageCode: 'fr',
         ),
         serverId: ServerId('server-id'),
+        profileScopeId: buildPlexProfileScopeId(serverId: ServerId('server-id'), profileId: 'test-profile'),
         serverName: 'Server',
         httpClient: httpClient,
       );
@@ -140,6 +175,7 @@ void main() {
           languageCode: 'en',
         ),
         serverId: ServerId('server-id'),
+        profileScopeId: buildPlexProfileScopeId(serverId: ServerId('server-id'), profileId: 'test-profile'),
         serverName: 'Server',
         httpClient: httpClient,
       );
@@ -155,7 +191,7 @@ void main() {
       expect(httpClient.requests[1].headers['X-Plex-Language'], 'fr');
     });
 
-    test('fetchGlobalHubs retries transient failures without switching Plex endpoints', () async {
+    test('fetchGlobalHubs retries a connection error without switching Plex endpoints', () async {
       final db = AppDatabase.forTesting(NativeDatabase.memory());
       PlexApiCache.initialize(db);
       addTearDown(db.close);
@@ -163,7 +199,7 @@ void main() {
       const primary = 'http://primary:32400';
       const fallback = 'http://fallback:32400';
       final httpClient = _SequenceClient([
-        (_) async => throw TimeoutException('queued behind cold handshakes'),
+        (_) async => throw http.ClientException('connection reset'),
         (_) async => _jsonResponse(_globalHubsPayload()),
       ]);
       final client = PlexClient.forTesting(
@@ -175,6 +211,7 @@ void main() {
           version: 'test',
         ),
         serverId: ServerId('server-id'),
+        profileScopeId: buildPlexProfileScopeId(serverId: ServerId('server-id'), profileId: 'test-profile'),
         serverName: 'Server',
         httpClient: httpClient,
         prioritizedEndpoints: const [primary, fallback],
@@ -207,6 +244,7 @@ void main() {
           version: 'test',
         ),
         serverId: ServerId('server-id'),
+        profileScopeId: buildPlexProfileScopeId(serverId: ServerId('server-id'), profileId: 'test-profile'),
         serverName: 'Server',
         httpClient: httpClient,
         prioritizedEndpoints: const [primary, fallback],
@@ -240,6 +278,7 @@ void main() {
           version: 'test',
         ),
         serverId: ServerId('server-id'),
+        profileScopeId: buildPlexProfileScopeId(serverId: ServerId('server-id'), profileId: 'test-profile'),
         serverName: 'Server',
         httpClient: httpClient,
         seedTranscoderVideoSupport: true,
@@ -272,6 +311,7 @@ void main() {
           version: 'test',
         ),
         serverId: ServerId('server-id'),
+        profileScopeId: buildPlexProfileScopeId(serverId: ServerId('server-id'), profileId: 'test-profile'),
         serverName: 'Server',
         httpClient: httpClient,
         seedTranscoderVideoSupport: true,
@@ -303,6 +343,7 @@ void main() {
           version: 'test',
         ),
         serverId: ServerId('server-id'),
+        profileScopeId: buildPlexProfileScopeId(serverId: ServerId('server-id'), profileId: 'test-profile'),
         serverName: 'Server',
         httpClient: httpClient,
       );
@@ -318,7 +359,7 @@ void main() {
       expect(httpClient.requests.single.url.queryParameters['includeGuids'], '1');
     });
 
-    test('fetchLibraryHubs retries transient failures without switching Plex endpoints', () async {
+    test('fetchLibraryHubs retries a connection error without switching Plex endpoints', () async {
       final db = AppDatabase.forTesting(NativeDatabase.memory());
       PlexApiCache.initialize(db);
       addTearDown(db.close);
@@ -326,7 +367,7 @@ void main() {
       const primary = 'http://primary:32400';
       const fallback = 'http://fallback:32400';
       final httpClient = _SequenceClient([
-        (_) async => throw TimeoutException('queued behind image downloads'),
+        (_) async => throw http.ClientException('connection reset'),
         (_) async => _jsonResponse(_globalHubsPayload()),
       ]);
       final client = PlexClient.forTesting(
@@ -338,6 +379,7 @@ void main() {
           version: 'test',
         ),
         serverId: ServerId('server-id'),
+        profileScopeId: buildPlexProfileScopeId(serverId: ServerId('server-id'), profileId: 'test-profile'),
         serverName: 'Server',
         httpClient: httpClient,
         prioritizedEndpoints: const [primary, fallback],

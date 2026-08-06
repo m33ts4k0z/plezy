@@ -5,6 +5,7 @@ import '../../utils/app_logger.dart';
 import '../models/playback_state.dart';
 import '../models/sync_message.dart';
 import '../models/watch_session.dart';
+import '../primitives.dart';
 import 'attached_player.dart';
 import 'clock_sync.dart';
 import 'guest_playback_reconciler.dart';
@@ -18,7 +19,7 @@ import 'watch_together_peer_service.dart';
 /// switches or other attach gaps — the player attachment is just an output
 /// binding the role engine reconciles against.
 ///
-/// Routes the v2 protocol between the relay and the role engine:
+/// Routes the v3 protocol between the relay and the role engine:
 /// host → [HostPlaybackCoordinator] (single writer of [PlaybackState]),
 /// guest → [GuestPlaybackReconciler] (+ [ClockSync] against the host).
 class WatchTogetherController {
@@ -28,7 +29,7 @@ class WatchTogetherController {
     int Function()? nowMs,
   }) : _peerService = peerService,
        _session = session,
-       _nowMs = nowMs ?? _systemNowMs {
+       _nowMs = nowMs ?? watchTogetherSystemNowMs {
     if (session.isHost) {
       _coordinator = HostPlaybackCoordinator(
         myPeerId: peerService.myPeerId ?? '',
@@ -65,8 +66,6 @@ class WatchTogetherController {
     _subscriptions.add(peerService.onPeerDisconnected.listen(_handlePeerDisconnected));
   }
 
-  static int _systemNowMs() => DateTime.now().millisecondsSinceEpoch;
-
   final WatchTogetherPeerService _peerService;
   final int Function() _nowMs;
   WatchSession _session;
@@ -90,6 +89,7 @@ class WatchTogetherController {
   void Function(bool correcting)? onCorrectingChanged;
   void Function(ControlMode mode)? onControlModeReceived;
   void Function(String ratingKey, String serverId, String? mediaTitle)? onMediaStateReceived;
+  void Function()? onHostExitedPlayer;
   void Function(String peerId, PlaybackActionHint hint)? onRemoteAction;
   void Function(String peerId)? onPeerNeedsUpdate;
   void Function(List<String> peerIds)? onResumedWithout;
@@ -165,8 +165,34 @@ class WatchTogetherController {
     _attachedPlayer = null;
     _coordinator?.detachPlayer(exiting: exiting);
     _reconciler?.detachPlayer();
-    unawaited(attached.dispose());
+    unawaited(
+      attached.dispose().catchError((Object error, StackTrace stackTrace) {
+        appLogger.e('WatchTogether: Failed to detach player subscriptions', error: error, stackTrace: stackTrace);
+      }),
+    );
     appLogger.d('WatchTogether: Player detached (exiting: $exiting)');
+  }
+
+  /// Pause a guest's player without telling the room.
+  ///
+  /// For a pause the environment forces on this peer alone — a vehicle that starts requiring
+  /// distraction optimization. Routing it through the attachment records the expectation, so the
+  /// resulting event is consumed as an acknowledgement instead of being published as a user intent
+  /// that would pause everybody.
+  ///
+  /// A host is refused, and must pause the room the ordinary way. It is the room's clock: swallowing
+  /// its intent would leave the coordinator in a playing phase while its own player was frozen, and
+  /// every heartbeat would then publish that frozen position as the room's anchor — stalling or
+  /// rewinding the guests it was meant to protect. Returns false when there is nothing local to do.
+  Future<bool> pauseLocallyForSystem() async {
+    final attached = _attachedPlayer;
+    if (attached == null || _session.isHost) return false;
+    // Only a player that is actually playing will report the transition this acknowledgement is
+    // for. Recording one for a paused player — or one sitting at end of file, where mpv leaves the
+    // raw pause flag false but no further event is coming — would leave it in the ledger, where the
+    // user's next real pause would consume it and never reach the room.
+    if (!attached.playing || attached.completed) return attached.pauseWithoutAck();
+    return attached.pause();
   }
 
   // ---------------------------------------------------------------------
@@ -231,7 +257,11 @@ class WatchTogetherController {
     _disposed = true;
     detachPlayer(exiting: true);
     for (final subscription in _subscriptions) {
-      unawaited(subscription.cancel());
+      unawaited(
+        subscription.cancel().catchError((Object error, StackTrace stackTrace) {
+          appLogger.e('WatchTogether: Failed to cancel controller subscription', error: error, stackTrace: stackTrace);
+        }),
+      );
     }
     _subscriptions.clear();
     _clockSync?.stop();
@@ -339,7 +369,12 @@ class WatchTogetherController {
         break;
 
       case SyncMessageType.hostExitedPlayer:
-        // Handled at the provider level.
+        // Rides the ordered queue so it can't locally overtake state
+        // messages that preceded it on the wire. Only the host may end the
+        // media epoch.
+        if (!_session.isHost && senderId == _session.hostPeerId) {
+          onHostExitedPlayer?.call();
+        }
         break;
     }
   }

@@ -1,6 +1,7 @@
 import 'dart:async';
-import 'dart:io' show Platform;
 import 'dart:typed_data';
+
+import 'package:flutter/foundation.dart' show TargetPlatform, defaultTargetPlatform;
 
 import 'package:os_media_controls/os_media_controls.dart';
 import 'package:rate_limiter/rate_limiter.dart';
@@ -8,6 +9,7 @@ import 'package:rate_limiter/rate_limiter.dart';
 import '../media/media_server_client.dart';
 import '../media/media_item.dart';
 import '../media/media_item_types.dart';
+import '../media/media_kind.dart';
 import '../utils/app_logger.dart';
 import 'plezy_media_notification.dart';
 
@@ -19,34 +21,35 @@ import 'plezy_media_notification.dart';
 /// - Control event streaming (play, pause, next, previous, seek)
 /// - Position update throttling to prevent excessive API calls
 class MediaControlsManager {
-  /// Stream of control events from OS media controls. On Android, merges
-  /// events from the in-tree `PlezyMediaNotification` plugin (lock-screen /
-  /// launcher button taps) with those from `os_media_controls` so callers
-  /// pattern-match on a single stream.
-  Stream<dynamic> get controlEvents => _mergedControlEvents.stream;
+  /// Unified stream for the OS session and the persistent Android
+  /// notification, translated to the standard media-control event types.
+  Stream<MediaControlEvent> get controlEvents => _mergedControlEvents.stream;
 
   /// Throttled playback state update (1 second interval, leading + trailing)
   late final Throttle _throttledUpdate;
 
   /// Cached control enabled state to avoid redundant platform calls
+  bool? _lastCanPlayPause;
   bool? _lastCanGoNext;
   bool? _lastCanGoPrevious;
   bool? _lastCanSeek;
+  bool? _lastCanStop;
+  bool? _lastCanSkip;
+  bool? _lastCanSetSpeed;
   bool _updatesSuspended = false;
 
-  /// Cached metadata snapshot — needed to push the home-screen notification
-  /// (which requires title/artist/artwork together) on every state change.
   String? _cachedTitle;
   String? _cachedArtist;
+  String? _cachedAlbum;
   Uint8List? _cachedArtwork;
   Duration? _cachedDuration;
   bool _cachedIsPlaying = false;
   Duration _cachedPosition = Duration.zero;
   double _cachedSpeed = 1.0;
 
-  final StreamController<dynamic> _mergedControlEvents = StreamController<dynamic>.broadcast();
-  StreamSubscription<dynamic>? _osControlsSub;
-  StreamSubscription<PlezyMediaNotificationEvent>? _plezyNotifSub;
+  final StreamController<MediaControlEvent> _mergedControlEvents = StreamController<MediaControlEvent>.broadcast();
+  StreamSubscription<MediaControlEvent>? _osControlsSub;
+  StreamSubscription<PlezyMediaNotificationEvent>? _plezyNotificationSub;
 
   MediaControlsManager() {
     _throttledUpdate = throttle(
@@ -55,39 +58,27 @@ class MediaControlsManager {
       leading: true,
       trailing: true, // Send final position at end of throttle window
     );
-
     _osControlsSub = OsMediaControls.controlEvents.listen(_mergedControlEvents.add);
-    if (Platform.isAndroid) {
+    if (defaultTargetPlatform == TargetPlatform.android) {
       PlezyMediaNotification.instance.start();
-      _plezyNotifSub = PlezyMediaNotification.instance.events.listen((event) {
+      _plezyNotificationSub = PlezyMediaNotification.instance.events.listen((event) {
         _mergedControlEvents.add(_translatePlezyEvent(event));
-        // Native PiP-X path emits "stop" alongside cancelling the OS
-        // notification + releasing the session. Wipe our Dart-side cache
-        // too so a stale `_pushPlezyNotification` from a queued throttle
-        // tick can't recreate the tile a moment later.
-        if (event is PlezyMediaStop) {
-          unawaited(clear());
-        }
+        if (event is PlezyMediaStop) unawaited(clear());
       });
     }
   }
 
-  /// Translate a `PlezyMediaNotification` event into the matching
-  /// `os_media_controls` event class so existing per-player listeners that
-  /// pattern-match on `PlayEvent`/`PauseEvent`/etc. handle it transparently.
-  dynamic _translatePlezyEvent(PlezyMediaNotificationEvent event) {
-    return switch (event) {
-      PlezyMediaPlay() => const PlayEvent(),
-      PlezyMediaPause() => const PauseEvent(),
-      PlezyMediaTogglePlayPause() => const TogglePlayPauseEvent(),
-      PlezyMediaNext() => const NextTrackEvent(),
-      PlezyMediaPrevious() => const PreviousTrackEvent(),
-      PlezyMediaStop() => const StopEvent(),
-      PlezyMediaSeek(:final position) => SeekEvent(position),
-      PlezyMediaFastForward() => const SkipForwardEvent(null),
-      PlezyMediaRewind() => const SkipBackwardEvent(null),
-    };
-  }
+  MediaControlEvent _translatePlezyEvent(PlezyMediaNotificationEvent event) => switch (event) {
+    PlezyMediaPlay() => const PlayEvent(),
+    PlezyMediaPause() => const PauseEvent(),
+    PlezyMediaTogglePlayPause() => const TogglePlayPauseEvent(),
+    PlezyMediaNext() => const NextTrackEvent(),
+    PlezyMediaPrevious() => const PreviousTrackEvent(),
+    PlezyMediaStop() => const StopEvent(),
+    PlezyMediaSeek(:final position) => SeekEvent(position),
+    PlezyMediaFastForward() => const SkipForwardEvent(null),
+    PlezyMediaRewind() => const SkipBackwardEvent(null),
+  };
 
   /// Update media metadata displayed in OS media controls
   ///
@@ -108,17 +99,9 @@ class MediaControlsManager {
         } catch (e) {
           appLogger.w('Failed to build artwork URL', error: e);
         }
-
-        // Android's MediaSession only renders a Bitmap on the lock screen —
-        // it ignores artwork URLs. Pre-fetch the bytes via the authenticated
-        // server client so the lock-screen widget shows the show poster
-        // instead of a generic music icon. Other platforms read the URL.
-        if (Platform.isAndroid) {
+        if (defaultTargetPlatform == TargetPlatform.android) {
           try {
             artworkBytes = await client.fetchThumbnailBytes(metadata.thumbPath!, width: 1024, height: 1024);
-            if (artworkBytes == null) {
-              appLogger.d('Artwork bytes unavailable for media controls (null)');
-            }
           } catch (e) {
             appLogger.w('Failed to fetch artwork bytes for media controls', error: e);
           }
@@ -127,11 +110,14 @@ class MediaControlsManager {
 
       final title = metadata.title ?? '';
       final artist = _buildArtist(metadata);
+      final album = metadata.kind == MediaKind.track ? metadata.albumTitle : null;
 
       await OsMediaControls.setMetadata(
         MediaMetadata(
           title: title,
           artist: artist,
+          // Music-only: null for video content, so video behavior is untouched.
+          album: album,
           artwork: artworkBytes,
           artworkUrl: artworkUrl,
           duration: duration,
@@ -140,6 +126,7 @@ class MediaControlsManager {
 
       _cachedTitle = title;
       _cachedArtist = artist;
+      _cachedAlbum = album;
       _cachedArtwork = artworkBytes;
       _cachedDuration = duration;
       await _pushPlezyNotification();
@@ -150,15 +137,13 @@ class MediaControlsManager {
     }
   }
 
-  /// Push the current cached snapshot to the in-tree home-screen notification
-  /// plugin. Skipped on non-Android and when no metadata has been seen yet.
   Future<void> _pushPlezyNotification() async {
-    if (!Platform.isAndroid) return;
+    if (defaultTargetPlatform != TargetPlatform.android) return;
     final title = _cachedTitle;
     if (title == null) return;
     await PlezyMediaNotification.instance.update(
       title: title,
-      artist: _cachedArtist,
+      artist: _cachedArtist ?? _cachedAlbum,
       artwork: _cachedArtwork,
       isPlaying: _cachedIsPlaying,
       position: _cachedPosition,
@@ -210,20 +195,42 @@ class MediaControlsManager {
     await _pushPlezyNotification();
   }
 
-  /// Enable or disable next/previous track controls
+  /// Enable or disable transport controls in the OS media session.
   ///
-  /// This should be called based on content type and playback mode.
-  /// For example:
-  /// - Episodes: Enable both if there are adjacent episodes
-  /// - Playlist items: Enable based on playlist position
-  /// - Movies: Usually disabled
-  Future<void> setControlsEnabled({bool canGoNext = false, bool canGoPrevious = false, bool canSeek = false}) async {
+  /// next/previous/seek reflect the content (adjacent episodes, playlist
+  /// position, seekability). stop/skip/speed reflect what the active surface
+  /// actually handles — the platform sides enable several commands by
+  /// default, so anything the caller leaves disabled here is explicitly
+  /// un-advertised rather than shown as a dead button.
+  ///
+  /// [canSkip] is never honored on iOS/macOS: enabling the
+  /// MPRemoteCommandCenter skip commands displaces the next/previous track
+  /// buttons on the lock screen / Control Center, and next/previous are the
+  /// primary transport there. Android's fast-forward/rewind actions are
+  /// independent of next/previous, so skip is safe to advertise.
+  Future<void> setControlsEnabled({
+    bool canPlayPause = false,
+    bool canGoNext = false,
+    bool canGoPrevious = false,
+    bool canSeek = false,
+    bool canStop = false,
+    bool canSkip = false,
+    bool canSetSpeed = false,
+  }) async {
     if (_updatesSuspended) return;
+
+    final effectiveCanSkip =
+        canSkip && defaultTargetPlatform != TargetPlatform.iOS && defaultTargetPlatform != TargetPlatform.macOS;
 
     try {
       final controlsToEnable = <MediaControl>[];
       final controlsToDisable = <MediaControl>[];
 
+      if (canPlayPause != _lastCanPlayPause) {
+        (canPlayPause ? controlsToEnable : controlsToDisable)
+          ..add(MediaControl.play)
+          ..add(MediaControl.pause);
+      }
       if (canGoPrevious != _lastCanGoPrevious) {
         (canGoPrevious ? controlsToEnable : controlsToDisable).add(MediaControl.previous);
       }
@@ -232,6 +239,17 @@ class MediaControlsManager {
       }
       if (canSeek != _lastCanSeek) {
         (canSeek ? controlsToEnable : controlsToDisable).add(MediaControl.seek);
+      }
+      if (canStop != _lastCanStop) {
+        (canStop ? controlsToEnable : controlsToDisable).add(MediaControl.stop);
+      }
+      if (effectiveCanSkip != _lastCanSkip) {
+        (effectiveCanSkip ? controlsToEnable : controlsToDisable)
+          ..add(MediaControl.skipForward)
+          ..add(MediaControl.skipBackward);
+      }
+      if (canSetSpeed != _lastCanSetSpeed) {
+        (canSetSpeed ? controlsToEnable : controlsToDisable).add(MediaControl.changeSpeed);
       }
 
       if (controlsToEnable.isEmpty && controlsToDisable.isEmpty) return;
@@ -243,14 +261,34 @@ class MediaControlsManager {
         await OsMediaControls.disableControls(controlsToDisable);
       }
 
+      _lastCanPlayPause = canPlayPause;
       _lastCanGoNext = canGoNext;
       _lastCanGoPrevious = canGoPrevious;
       _lastCanSeek = canSeek;
-      appLogger.d('Media controls updated - Previous: $canGoPrevious, Next: $canGoNext, Seek: $canSeek');
+      _lastCanStop = canStop;
+      _lastCanSkip = effectiveCanSkip;
+      _lastCanSetSpeed = canSetSpeed;
+      appLogger.d(
+        'Media controls updated - Play/Pause: $canPlayPause, Previous: $canGoPrevious, '
+        'Next: $canGoNext, Seek: $canSeek, Stop: $canStop, Skip: $effectiveCanSkip, '
+        'Speed: $canSetSpeed',
+      );
+      await _pushPlezyNotification();
     } catch (e) {
       appLogger.w('Failed to set media controls enabled state', error: e);
     }
-    await _pushPlezyNotification();
+  }
+
+  /// Enable/disable Android background playback: while enabled, the plugin
+  /// keeps audio alive with a `mediaPlayback` foreground service and shows a
+  /// MediaStyle notification for the session. No-op on other platforms.
+  Future<void> setBackgroundMode(bool enabled) async {
+    try {
+      await OsMediaControls.setBackgroundMode(enabled);
+      appLogger.d('Media controls background mode: $enabled');
+    } catch (e) {
+      appLogger.w('Failed to set media controls background mode', error: e);
+    }
   }
 
   /// Clear all media controls
@@ -260,11 +298,16 @@ class MediaControlsManager {
     try {
       await OsMediaControls.clear();
       _throttledUpdate.cancel();
+      _lastCanPlayPause = null;
       _lastCanGoNext = null;
       _lastCanGoPrevious = null;
       _lastCanSeek = null;
+      _lastCanStop = null;
+      _lastCanSkip = null;
+      _lastCanSetSpeed = null;
       _cachedTitle = null;
       _cachedArtist = null;
+      _cachedAlbum = null;
       _cachedArtwork = null;
       _cachedDuration = null;
       _cachedIsPlaying = false;
@@ -294,18 +337,24 @@ class MediaControlsManager {
   void dispose() {
     _throttledUpdate.cancel();
     unawaited(_osControlsSub?.cancel());
-    unawaited(_plezyNotifSub?.cancel());
+    unawaited(_plezyNotificationSub?.cancel());
     _osControlsSub = null;
-    _plezyNotifSub = null;
+    _plezyNotificationSub = null;
     unawaited(_mergedControlEvents.close());
   }
 
   /// Build artist string from metadata
   ///
+  /// For music tracks: the performing artist
   /// For episodes: "Show Name - Season X Episode Y"
   /// For movies: Director or studio
   /// For other content: Fallback to year or empty
   String _buildArtist(MediaItem metadata) {
+    if (metadata.kind == MediaKind.track) {
+      // Performing artist with album-artist fallback (compilations store the
+      // track's own artist separately).
+      return metadata.trackArtistTitle ?? '';
+    }
     if (metadata.isEpisode) {
       final parts = <String>[];
 

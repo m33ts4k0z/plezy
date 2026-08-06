@@ -9,8 +9,8 @@ void main() {
     });
 
     test('integer-mbps preset renders without decimal', () {
-      // 2000 kbps -> 2 Mbps (whole number)
-      expect(qualityPresetLabel(TranscodeQualityPreset.p720_4mbps), '720p 2 Mbps');
+      // 4000 kbps -> 4 Mbps (whole number)
+      expect(qualityPresetLabel(TranscodeQualityPreset.p720_4mbps), '720p 4 Mbps');
     });
 
     test('fractional-mbps preset renders with one decimal', () {
@@ -27,7 +27,6 @@ void main() {
 
     test('low-resolution presets have correct height', () {
       expect(qualityPresetLabel(TranscodeQualityPreset.p240_320), startsWith('240p '));
-      expect(qualityPresetLabel(TranscodeQualityPreset.p240_320), startsWith('320p '));
     });
 
     test('all 1080p presets render with 1080p prefix', () {
@@ -42,11 +41,7 @@ void main() {
     });
 
     test('all 720p presets render with 720p prefix', () {
-      for (final preset in [
-        TranscodeQualityPreset.p720_4mbps,
-        TranscodeQualityPreset.p720_4mbps,
-        TranscodeQualityPreset.p720_4mbps,
-      ]) {
+      for (final preset in [TranscodeQualityPreset.p720_4mbps]) {
         expect(qualityPresetLabel(preset), startsWith('720p '));
       }
     });
@@ -153,15 +148,15 @@ void main() {
     });
 
     test('percentage uses video+audio bitrate ratio relative to source', () {
-      // p720_2mbps -> 2000 video kbps + 192 audio = 2192 kbps total.
-      // source = 8000 kbps -> 2192 * 100 / 8000 = 27.4 -> rounds to 27%.
+      // p720_4mbps -> 4000 video kbps + 192 audio = 4192 kbps total.
+      // source = 8000 kbps -> 4192 * 100 / 8000 = 52.4 -> rounds to 52%.
       final result = qualityPresetSizeEstimate(
         preset: TranscodeQualityPreset.p720_4mbps,
         sourceBitrateKbps: 8000,
         sourceDurationMs: 60 * 1000,
       );
       expect(result, isNotNull);
-      expect(result!.contains('27%'), isTrue);
+      expect(result!.contains('52%'), isTrue);
     });
 
     test('larger source bitrate produces smaller percentage', () {
@@ -175,7 +170,7 @@ void main() {
         sourceBitrateKbps: 8000,
         sourceDurationMs: 1000,
       );
-      // 4k source -> ~5%; 8k source -> ~27%.
+      // 4k source -> ~10%; 8k source -> ~52%.
       expect(at4k, isNotNull);
       expect(at8k, isNotNull);
       // Pull just the percentage out for a sanity comparison.

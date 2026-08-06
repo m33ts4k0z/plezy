@@ -11,7 +11,7 @@ const int _audioBitrateEstimateKbps = 192;
 ///
 /// Examples:
 /// - [TranscodeQualityPreset.original] → "Original"
-/// - [TranscodeQualityPreset.p720_2mbps] → "720p 2 Mbps"
+/// - [TranscodeQualityPreset.p720_4mbps] → "720p 4 Mbps"
 /// - [TranscodeQualityPreset.p480_1_5mbps] → "480p 1.5 Mbps"
 String qualityPresetLabel(TranscodeQualityPreset preset) {
   if (preset.isOriginal) return t.videoControls.qualityOriginal;

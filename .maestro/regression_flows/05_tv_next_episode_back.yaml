@@ -1,0 +1,78 @@
+appId: com.edde746.plezy
+name: TV Back dismisses Next Episode without leaving playback
+tags:
+  - e2e
+  - regression
+  - tv
+  - playback
+---
+- runFlow: ../subflows/onboard_jellyfin_tv.yaml
+# Reach Search with the D-pad, the way 10_tv_settings_navigation.yaml does. A
+# tap here flips InputModeTracker into pointer mode, which collapses the rail
+# to icons and leaves no "Search" label to hit — and a percentage coordinate
+# does not survive the jump from a phone in forced TV mode to a 4K television.
+- pressKey: "Remote Dpad Left"
+- extendedWaitUntil:
+    visible: "Search"
+    timeout: 15000
+- repeat:
+    times: 12
+    while:
+      notVisible:
+        text: "Search"
+        focused: true
+    commands:
+      - pressKey: "Remote Dpad Down"
+- pressKey: "Remote Dpad Center"
+- extendedWaitUntil:
+    visible: "Search movies, shows, music..."
+    timeout: 10000
+- tapOn: "Search movies, shows, music..."
+- inputText: "Maestro Show"
+- tapOn:
+    point: "87%,90%"
+- extendedWaitUntil:
+    visible: "(?s)^Maestro Show, TV show, (?:watched|unwatched)$"
+    timeout: 15000
+- tapOn: "(?s)^Maestro Show, TV show, (?:watched|unwatched)$"
+- waitForAnimationToEnd:
+    timeout: 5000
+- tapOn: "(?s)^Play S1E1$"
+# The TV player opens with its chrome down (#1765), so the Pause button can no
+# longer stand in for "the player has finished loading". Wait for the detail
+# screen to go first: the labelled spinner is necessarily up the moment the
+# player route owns the frame, and it only clears once playback reports its
+# first frame or gives up, so this can never advance before the media opens.
+- extendedWaitUntil:
+    notVisible: "(?s)^Play S1E1$"
+    timeout: 30000
+- extendedWaitUntil:
+    notVisible: "Loading video"
+    timeout: 30000
+- pressKey: "Remote Media Fast Forward"
+- pressKey: "Remote Media Fast Forward"
+# Gate on the prompt's own Cancel action, the label the iOS branch below taps.
+# "Next Episode" is the credits skip button at this point in the episode, so
+# waiting on it would let Back fire before the prompt ever opened.
+- extendedWaitUntil:
+    visible: "(?s)^Cancel$"
+    timeout: 20000
+- runFlow:
+    when:
+      platform: iOS
+    commands:
+      - tapOn: "Cancel"
+- runFlow:
+    when:
+      platform: Android
+    commands:
+      - pressKey: "back"
+# Dismissal is animated, so give it a bounded wait rather than one instant look.
+- extendedWaitUntil:
+    notVisible: "(?s)^Cancel$"
+    timeout: 10000
+- assertNotVisible: "Overview"
+- pressKey: "Remote Dpad Up"
+- extendedWaitUntil:
+    visible: "(?s).*Maestro Episode 1.*"
+    timeout: 10000

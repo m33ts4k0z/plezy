@@ -1,14 +1,184 @@
+import 'dart:async';
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:plezy/media/ids.dart';
 import 'package:plezy/media/media_backend.dart';
+import 'package:plezy/media/media_display_criteria.dart';
 import 'package:plezy/media/media_kind.dart';
 import 'package:plezy/media/media_stream.dart';
 import 'package:plezy/services/plex_mappers.dart';
+import 'package:sentry_flutter/sentry_flutter.dart';
 
 const _serverId = 'plex-machine-1';
 const _serverName = 'Home';
 
+void _expectSafePlexMapperEvent(
+  SentryEvent event, {
+  required Iterable<String> responseMarkers,
+  required int topLevelFieldCount,
+}) {
+  final eventJson = event.toJson();
+  final serializedEvent = jsonEncode(eventJson);
+  for (final marker in responseMarkers) {
+    expect(serializedEvent, isNot(contains(marker)), reason: marker);
+  }
+
+  final contexts = Map<String, dynamic>.from(eventJson['contexts'] as Map);
+  expect(contexts.containsKey('json'), isFalse);
+  expect(Map<String, dynamic>.from(contexts['plex_mapper'] as Map), {
+    'backend': 'plex',
+    'dto': 'PlexMetadataDto',
+    'topLevelFieldCount': topLevelFieldCount,
+  });
+
+  final exception = Map<String, dynamic>.from(((eventJson['exception'] as Map)['values'] as List).single as Map);
+  expect(exception['type'], contains('TypeError'));
+  final stackTrace = Map<String, dynamic>.from(exception['stacktrace'] as Map);
+  expect(stackTrace['frames'], isNotEmpty);
+}
+
 void main() {
+  group('Plex metadata Sentry diagnostics', () {
+    late Completer<SentryEvent> capturedEvent;
+
+    setUp(() async {
+      capturedEvent = Completer<SentryEvent>();
+      await Sentry.init((options) {
+        options
+          ..dsn = 'https://public@example.com/1'
+          ..beforeSend = (event, hint) {
+            capturedEvent.complete(event);
+            return null;
+          };
+      });
+      addTearDown(Sentry.close);
+    });
+
+    test('captures only a closed projection and rethrows malformed metadata', () async {
+      const responseMarkers = [
+        'cc004-rating-marker',
+        'cc004-title-marker',
+        'cc004-summary-marker',
+        'cc004-unmodeled-key-marker',
+        'cc004-nested-marker',
+        'cc004-file-marker',
+      ];
+      final malformedMetadata = <String, dynamic>{
+        'ratingKey': responseMarkers[0],
+        'title': responseMarkers[1],
+        'summary': responseMarkers[2],
+        responseMarkers[3]: {'value': responseMarkers[4]},
+        'Media': [
+          {
+            'id': 1,
+            'Part': [
+              {'id': 1, 'file': responseMarkers[5]},
+            ],
+          },
+        ],
+        'guid': 7,
+      };
+
+      expect(() => PlexMetadataDto.fromJson(malformedMetadata), throwsA(isA<TypeError>()));
+
+      final event = await capturedEvent.future;
+      _expectSafePlexMapperEvent(event, responseMarkers: responseMarkers, topLevelFieldCount: malformedMetadata.length);
+    });
+
+    test('captures diagnostics while a hub omits only the malformed sibling', () async {
+      const responseMarkers = [
+        'cc004-hub-rating-marker',
+        'cc004-hub-title-marker',
+        'cc004-hub-summary-marker',
+        'cc004-hub-unmodeled-key-marker',
+        'cc004-hub-nested-marker',
+        'cc004-hub-file-marker',
+      ];
+      final malformedMetadata = <String, dynamic>{
+        'ratingKey': responseMarkers[0],
+        'title': responseMarkers[1],
+        'summary': responseMarkers[2],
+        responseMarkers[3]: {'value': responseMarkers[4]},
+        'Media': [
+          {
+            'id': 1,
+            'Part': [
+              {'id': 1, 'file': responseMarkers[5]},
+            ],
+          },
+        ],
+        'guid': 7,
+      };
+
+      final hub = PlexMappers.mediaHubFromJson({
+        'key': '/hubs/cc004',
+        'title': 'Synthetic hub',
+        'type': 'movie',
+        'Metadata': [
+          {'ratingKey': 'valid-sibling', 'type': 'movie', 'title': 'Valid sibling'},
+          malformedMetadata,
+        ],
+      });
+
+      expect(hub.items, hasLength(1));
+      expect(hub.items.single.id, 'valid-sibling');
+      expect(hub.items.single.title, 'Valid sibling');
+
+      final event = await capturedEvent.future;
+      _expectSafePlexMapperEvent(event, responseMarkers: responseMarkers, topLevelFieldCount: malformedMetadata.length);
+    });
+  });
+  test('PlexMetadataDto accepts string ratings', () {
+    final dto = PlexMetadataDto.fromJson({
+      'ratingKey': '1',
+      'rating': '8.8',
+      'audienceRating': '9.1',
+      'userRating': '9.5',
+    });
+
+    expect(dto.rating, 8.8);
+    expect(dto.audienceRating, 9.1);
+    expect(dto.userRating, 9.5);
+  });
+
+  test('display criteria maps each Plex color metadata class', () {
+    final cases = <({Map<String, dynamic> stream, MediaDisplayColorType type, MediaDisplayColorTags tags})>[
+      (
+        stream: {'DOVIProfile': 5, 'DOVIPresent': 1},
+        type: MediaDisplayColorType.dolbyVision,
+        tags: (transfer: null, primaries: null, matrix: null),
+      ),
+      (
+        stream: {'DOVIProfile': 8, 'DOVIBLCompatID': 4},
+        type: MediaDisplayColorType.hlg,
+        tags: (transfer: 'arib-std-b67', primaries: 'bt2020', matrix: 'bt2020nc'),
+      ),
+      (
+        stream: {'colorTrc': 'smpte2084'},
+        type: MediaDisplayColorType.pq,
+        tags: (transfer: 'smpte2084', primaries: 'bt2020', matrix: 'bt2020nc'),
+      ),
+      (
+        stream: <String, dynamic>{},
+        type: MediaDisplayColorType.sdr,
+        tags: (transfer: 'bt709', primaries: 'bt709', matrix: 'bt709'),
+      ),
+    ];
+
+    for (final testCase in cases) {
+      final criteria = PlexMappers.displayCriteriaFromJson({'width': 1920, 'height': 1080}, testCase.stream);
+
+      expect(criteria, isNotNull);
+      expect(criteria!.colorType, testCase.type);
+      expect(
+        (transfer: criteria.transfer, primaries: criteria.primaries, matrix: criteria.matrix),
+        testCase.tags,
+        reason: testCase.type.name,
+      );
+    }
+  });
+
   group('PlexMappers.mediaItem (movie)', () {
     test('maps a Plex movie with watch state, ratings, genres, and people', () {
       final json = {
@@ -40,6 +210,14 @@ void main() {
         'librarySectionTitle': 'Movies',
         'ratingImage': 'rottentomatoes://image.rating.ripe',
         'audienceRatingImage': 'rottentomatoes://image.rating.upright',
+        'imdbRatingCount': 250858,
+        // The detail endpoint adds the multi-source array; the TMDB entry
+        // duplicates the audienceRating scalar and must not appear twice.
+        'Rating': [
+          {'image': 'imdb://image.rating', 'type': 'audience', 'value': 8.4},
+          {'image': 'rottentomatoes://image.rating.ripe', 'type': 'critic', 'value': 8.8},
+          {'image': 'themoviedb://image.rating', 'type': 'audience', 'value': 9.1},
+        ],
         'Genre': [
           {'tag': 'Action'},
           {'tag': 'Sci-Fi'},
@@ -78,10 +256,20 @@ void main() {
       expect(item.originallyAvailableAt, '2010-07-16');
       expect(item.contentRating, 'PG-13');
       expect(item.rating, 8.8);
-      expect(item.audienceRating, 9.1);
       expect(item.userRating, 9.5);
-      expect(item.ratingImage, 'rottentomatoes://image.rating.ripe');
-      expect(item.audienceRatingImage, 'rottentomatoes://image.rating.upright');
+
+      // Headline scalar first, then the array, deduped on (source, value):
+      // the RT critic entry repeats `rating`/`ratingImage`, and the TMDB entry
+      // is a distinct source so it survives alongside the RT audience scalar.
+      expect(item.ratings?.map((rating) => rating.source).toList(), [
+        'rottenTomatoesCritic',
+        'rottenTomatoesAudience',
+        'imdb',
+        'tmdb',
+      ]);
+      expect(item.ratings?.map((rating) => rating.value).toList(), [8.8, 9.1, 8.4, 9.1]);
+      // Vote counts are IMDb-only; Plex reports none for the other sources.
+      expect(item.ratings?.map((rating) => rating.votes).toList(), [null, null, 250858, null]);
 
       // Plex stores all temporal fields in milliseconds — pass-through.
       expect(item.durationMs, 8880000);
@@ -118,6 +306,63 @@ void main() {
       // Server-tagging.
       expect(item.serverId, _serverId);
       expect(item.serverName, _serverName);
+    });
+
+    test('a section listing yields the scalar pair alone', () {
+      // Plex sends no `Rating[]` outside /library/metadata/{id}, and no query
+      // parameter adds it, so listing-backed cards get one or two scores.
+      final item = PlexMappers.mediaItemFromJson({
+        'ratingKey': 'listing-1',
+        'type': 'movie',
+        'rating': 9.4,
+        'ratingImage': 'rottentomatoes://image.rating.ripe',
+        'audienceRating': 8.3,
+        'audienceRatingImage': 'themoviedb://image.rating',
+      }, serverId: ServerId(_serverId));
+
+      expect(item.ratings?.map((rating) => rating.source).toList(), ['rottenTomatoesCritic', 'tmdb']);
+      expect(item.ratings?.map((rating) => rating.value).toList(), [9.4, 8.3]);
+    });
+
+    test('an unrated item reports no ratings rather than an empty list', () {
+      final item = PlexMappers.mediaItemFromJson({
+        'ratingKey': 'unrated-1',
+        'type': 'movie',
+      }, serverId: ServerId(_serverId));
+
+      expect(item.rating, isNull);
+      expect(item.ratings, isNull);
+    });
+
+    test('scores outside the reportable range are dropped, not folded', () {
+      final item = PlexMappers.mediaItemFromJson({
+        'ratingKey': 'noisy-1',
+        'type': 'movie',
+        'rating': 140,
+        'audienceRating': -1,
+        'Rating': [
+          {'image': 'imdb://image.rating', 'type': 'audience', 'value': '8.5'},
+        ],
+      }, serverId: ServerId(_serverId));
+
+      // Only the IMDb entry survives, and its string value still parses.
+      expect(item.ratings?.single.source, 'imdb');
+      expect(item.ratings?.single.value, 8.5);
+    });
+
+    test('normalizes aggregate watch counts off leaf items', () {
+      final item = PlexMappers.mediaItemFromJson({
+        'ratingKey': 'leaf-with-counts',
+        'type': 'movie',
+        'viewCount': 0,
+        'leafCount': 1,
+        'viewedLeafCount': 1,
+      }, serverId: ServerId(_serverId));
+
+      expect(item.leafCount, 1);
+      expect(item.viewedLeafCount, isNull);
+      expect(item.isWatched, isFalse);
+      expect(item.unwatchedCount, isNull);
     });
   });
 
@@ -192,6 +437,7 @@ void main() {
         'parentIndex': 1,
         'parentRatingKey': '510',
         'parentTitle': 'Season 1',
+        'parentYear': 2008,
         'parentThumb': '/library/metadata/510/thumb/1',
         'grandparentRatingKey': '500',
         'grandparentTitle': 'Breaking Bad',
@@ -207,6 +453,7 @@ void main() {
       expect(item.parentIndex, 1);
       expect(item.parentId, '510');
       expect(item.parentTitle, 'Season 1');
+      expect(item.year, isNull);
       expect(item.parentThumbPath, '/library/metadata/510/thumb/1');
       expect(item.grandparentId, '500');
       expect(item.grandparentTitle, 'Breaking Bad');
@@ -248,6 +495,7 @@ void main() {
         'index': 8,
         'parentRatingKey': '700',
         'parentTitle': 'Random Access Memories',
+        'parentYear': 2013,
         'grandparentRatingKey': '699',
         'grandparentTitle': 'Daft Punk',
         'duration': 369000,
@@ -260,6 +508,8 @@ void main() {
       expect(item.durationMs, 369000);
       expect(item.parentId, '700');
       expect(item.parentTitle, 'Random Access Memories');
+      expect(item.year, 2013);
+      expect(item.albumYear, 2013);
       expect(item.grandparentId, '699');
       expect(item.grandparentTitle, 'Daft Punk');
     });

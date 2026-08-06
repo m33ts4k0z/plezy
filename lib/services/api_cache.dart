@@ -12,36 +12,73 @@ import '../utils/isolate_helper.dart';
 ///
 /// Stores raw JSON keyed by `serverId:endpoint` in the shared `ApiCache`
 /// Drift table. `serverId` values are globally unique across connected
-/// backends, so Plex and Jellyfin entries never collide despite sharing
+/// backends, so Plex and MediaBrowser entries never collide despite sharing
 /// the same table.
 ///
-/// Plex- and Jellyfin-specific helpers (item-id pinning, metadata parsing)
+/// Plex- and MediaBrowser-specific helpers (item-id pinning, metadata parsing)
 /// live on subclasses [PlexApiCache] / [JellyfinApiCache], which also
 /// implement the abstract [getMetadata] / [pinForOffline] / [deleteForItem]
 /// methods so callers can dispatch via [forBackend] instead of switching on
 /// the backend type at every call site.
-abstract class ApiCache {
-  static ApiCache? _instance;
+class ApiCacheSingleton<T extends ApiCache> {
+  ApiCacheSingleton(this.backends, this.typeName);
 
-  /// Returns the most recently registered cache instance — used by callers
-  /// that don't care which backend's helpers they're hitting (e.g. plain
-  /// `get`/`put` from `JellyfinClient`). Backend-specific operations should
-  /// route through [forBackend] instead.
-  static ApiCache get instance {
-    if (_instance == null) {
-      throw StateError('ApiCache not initialized. Call initialize() on a backend cache first.');
+  /// Every backend this cache answers for. Jellyfin and Emby share one
+  /// instance: their DTO shapes are identical and cache rows are keyed by the
+  /// compound `machineId/userId` scope, so there is nothing to isolate.
+  final Set<MediaBackend> backends;
+  final String typeName;
+  T? _instance;
+
+  T get instance {
+    final value = _instance;
+    if (value == null) {
+      throw StateError('$typeName not initialized. Call $typeName.initialize() first.');
     }
-    return _instance!;
+    return value;
   }
 
+  void install(T instance) {
+    _instance = instance;
+    ApiCache.registerInstance(instance, backends);
+  }
+}
+
+/// Decodes independent cached JSON rows, dropping only the malformed row.
+Map<String, MediaItem> decodeCachedMediaRows<T>(
+  Iterable<T> rows, {
+  required String Function(T row) serializedData,
+  required MapEntry<String, MediaItem>? Function(T row, Map<String, dynamic> json) decode,
+}) {
+  final result = <String, MediaItem>{};
+  for (final row in rows) {
+    try {
+      final json = jsonDecode(serializedData(row)) as Map<String, dynamic>;
+      final decoded = decode(row, json);
+      if (decoded != null) {
+        result[decoded.key] = decoded.value;
+      }
+    } catch (_) {
+      // A malformed cache row does not invalidate its siblings.
+    }
+  }
+  return result;
+}
+
+abstract class ApiCache {
   static final Map<MediaBackend, ApiCache> _byBackend = {};
 
-  /// Subclasses call this from their own `initialize` to register themselves
-  /// for backend dispatch. Also seeds [instance] so the legacy singleton
-  /// surface keeps working.
-  static void registerInstance(MediaBackend backend, ApiCache cache) {
-    _byBackend[backend] = cache;
-    _instance = cache;
+  /// Registers [instance] for each requested backend. A new database marks a
+  /// new application/test lifecycle, so registrations tied to the previous
+  /// database are discarded instead of leaving backend dispatch pointed at a
+  /// closed connection.
+  static void registerInstance(ApiCache instance, Set<MediaBackend> backends) {
+    if (_byBackend.values.any((registered) => !identical(registered.database, instance.database))) {
+      _byBackend.clear();
+    }
+    for (final backend in backends) {
+      _byBackend[backend] = instance;
+    }
   }
 
   /// Pick the cache for [backend]. Plex is the legacy default — covers items
@@ -52,6 +89,20 @@ abstract class ApiCache {
       throw StateError('No ApiCache registered for backend $backend');
     }
     return picked;
+  }
+
+  /// Clears volatile rows for every distinct registered database.
+  ///
+  /// Production backend caches share one [AppDatabase], while focused tests
+  /// may register only one backend. This operation is therefore independent
+  /// of backend initialization order and is a no-op before registration.
+  static Future<void> clearRegisteredVolatile() async {
+    final cleared = <AppDatabase>{};
+    for (final cache in _byBackend.values) {
+      if (cleared.add(cache.database)) {
+        await cache.clearVolatile();
+      }
+    }
   }
 
   final AppDatabase _db;
@@ -121,31 +172,10 @@ abstract class ApiCache {
     await (_db.delete(_db.apiCache)..where((t) => t.pinned.equals(false))).go();
   }
 
-  /// Pin every row whose `cacheKey` matches the SQL `LIKE` [pattern]. Used by
-  /// backend subclasses that pin by item-shape rather than a single endpoint
-  /// (e.g. Jellyfin's per-user item rows where the user segment is a
-  /// wildcard).
-  Future<void> pinByKeyPattern(String pattern) async {
-    await (_db.update(
-      _db.apiCache,
-    )..where((t) => t.cacheKey.like(pattern))).write(const ApiCacheCompanion(pinned: Value(true)));
-  }
-
-  Future<void> unpinByKeyPattern(String pattern) async {
-    await (_db.update(
-      _db.apiCache,
-    )..where((t) => t.cacheKey.like(pattern))).write(const ApiCacheCompanion(pinned: Value(false)));
-  }
-
-  Future<bool> hasPinnedMatching(String pattern) async {
-    final rows = await (_db.select(_db.apiCache)..where((t) => t.cacheKey.like(pattern) & t.pinned.equals(true))).get();
-    return rows.isNotEmpty;
-  }
-
   /// Pull pinned rows for [serverId] and extract the first capture group of
   /// [keyPattern] from each `cacheKey`. Returns the unique set of captured
   /// ids — backend subclasses use this to enumerate their pinned items
-  /// (Plex ratingKeys, Jellyfin item ids).
+  /// (Plex ratingKeys, MediaBrowser item ids).
   Future<Set<String>> extractPinnedIds(ServerId serverId, RegExp keyPattern) async {
     final rows = await (_db.select(
       _db.apiCache,
@@ -191,7 +221,7 @@ abstract class ApiCache {
   /// [itemId] so reloads (`getMetadata` / `getAllPinnedMetadata`) reflect the
   /// state without having to refetch from the server. No-op when the row
   /// isn't cached. Backend subclasses know which JSON fields to mutate
-  /// (Plex `viewCount`, Jellyfin `UserData.PlayCount` / `Played`).
+  /// (Plex `viewCount`, MediaBrowser `UserData.PlayCount` / `Played`).
   ///
   /// Optional positional progress fields ([viewOffsetMs], [lastViewedAt],
   /// [viewedLeafCount]) let the offline-watch-sync service mirror richer
@@ -204,7 +234,7 @@ abstract class ApiCache {
   /// shape + units are not. Adding a new watch-state input here means
   /// updating *both* concrete impls ([PlexApiCache.applyWatchState],
   /// [JellyfinApiCache.applyWatchState]) — Plex stores epoch-seconds and
-  /// flat fields, Jellyfin stores ISO-8601 + ticks under `UserData`.
+  /// flat fields, while Jellyfin and Emby store ISO-8601 + ticks under `UserData`.
   /// The mutations are too short (~3 lines per backend) for a shared
   /// adapter to be a net win, so they live duplicated by design.
   Future<void> applyWatchState({
@@ -216,8 +246,8 @@ abstract class ApiCache {
     int? viewedLeafCount,
   });
 
-  /// Bulk-load every pinned metadata row into a [MediaItem] map keyed by
-  /// `buildGlobalKey(ServerId(serverId), itemId)`. Used by [DownloadManagerService] on
-  /// cold start to hydrate offline state in a single query per backend.
-  Future<Map<String, MediaItem>> getAllPinnedMetadata();
+  /// Bulk-load pinned metadata whose private cache namespace is included in
+  /// [cacheServerIds]. A null set retains the backend's complete diagnostic
+  /// view; profile-visible hydration must always pass exact allowed scopes.
+  Future<Map<String, MediaItem>> getAllPinnedMetadata({Set<ServerId>? cacheServerIds});
 }

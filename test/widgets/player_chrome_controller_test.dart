@@ -119,6 +119,51 @@ void main() {
       expect(controller.takeFocusTarget(), isNull);
     });
 
+    test('hide keeps controls presented until the opacity animation completes', () {
+      final controller = PlayerChromeController();
+      addTearDown(controller.dispose);
+
+      controller.hide();
+
+      expect(controller.controlsVisible, isFalse);
+      expect(controller.controlsPresented, isTrue);
+
+      controller.markControlsHidden();
+
+      expect(controller.controlsPresented, isFalse);
+    });
+
+    test('a hidden start is also unpresented, so back is not classified as hide-the-chrome', () {
+      final controller = PlayerChromeController(initiallyVisible: false);
+      addTearDown(controller.dispose);
+
+      expect(controller.controlsVisible, isFalse);
+      expect(controller.controlsPresented, isFalse);
+      expect(controller.hide(), isFalse, reason: 'there is nothing to hide, so back must fall through to the route');
+    });
+
+    test('showing after a hidden start restores both visibility and presentation', () {
+      final controller = PlayerChromeController(initiallyVisible: false);
+      addTearDown(controller.dispose);
+
+      controller.show();
+
+      expect(controller.controlsVisible, isTrue);
+      expect(controller.controlsPresented, isTrue);
+    });
+
+    test('a stale fade-out completion cannot hide controls that were shown again', () {
+      final controller = PlayerChromeController();
+      addTearDown(controller.dispose);
+
+      controller.hide();
+      controller.show();
+      controller.markControlsHidden();
+
+      expect(controller.controlsVisible, isTrue);
+      expect(controller.controlsPresented, isTrue);
+    });
+
     test('silent release removes hold without notifying listeners', () {
       final controller = PlayerChromeController();
       addTearDown(controller.dispose);

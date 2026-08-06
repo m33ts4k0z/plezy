@@ -53,6 +53,7 @@ class DownloadedMedia extends Table {
   IntColumn get totalBytes => integer().nullable()();
   IntColumn get downloadedBytes => integer().withDefault(const Constant(0))();
   TextColumn get videoFilePath => text().nullable()();
+  TextColumn get safRootUri => text().nullable()();
   TextColumn get thumbPath => text().nullable()();
   IntColumn get downloadedAt => integer().nullable()();
   TextColumn get errorMessage => text().nullable()();
@@ -73,6 +74,8 @@ class DownloadedMedia extends Table {
 class DownloadOwners extends Table {
   TextColumn get profileId => text()();
   TextColumn get globalKey => text()();
+  TextColumn get backend => text().nullable()();
+  TextColumn get clientScopeId => text().nullable()();
   IntColumn get createdAt => integer()();
 
   @override
@@ -101,13 +104,35 @@ class SyncRules extends Table {
   IntColumn get lastExecutedAt => integer().nullable()();
   IntColumn get mediaIndex => integer().withDefault(const Constant(0))();
   TextColumn get downloadFilter => text().withDefault(const Constant('unwatched'))();
+  BoolColumn get includeSpecials => boolean().withDefault(const Constant(true))();
+
+  /// Gates collection/playlist backfill into [SyncRuleDownloads] before
+  /// destructive cleanup. Show/season coverage is re-derived from
+  /// [DownloadedMedia] ancestry at cleanup time regardless of this value.
+  BoolColumn get downloadLinksInitialized => boolean().withDefault(const Constant(false))();
+}
+
+/// Downloads covered by a sync rule for one profile.
+///
+/// Links are retained when list membership changes so removing a rule can
+/// clean up items it previously synced without re-fetching the list. A
+/// download may be linked to multiple rules.
+@DataClassName('SyncRuleDownloadItem')
+@TableIndex(name: 'idx_sync_rule_downloads_profile_key', columns: {#profileId, #downloadGlobalKey})
+class SyncRuleDownloads extends Table {
+  IntColumn get syncRuleId => integer().references(SyncRules, #id, onDelete: KeyAction.cascade)();
+  TextColumn get profileId => text()();
+  TextColumn get downloadGlobalKey => text()();
+
+  @override
+  Set<Column> get primaryKey => {syncRuleId, downloadGlobalKey};
 }
 
 /// Persisted media-server connections.
 ///
 /// One row per "connection" the user has added — a Plex account (with its
-/// discovered servers and active Home profile) or a single Jellyfin server.
-/// The [configJson] payload is backend-specific and parsed by the
+/// discovered servers and active Home profile) or a single MediaBrowser
+/// server/user. The [configJson] payload is backend-specific and parsed by the
 /// [Connection] sealed class.
 @DataClassName('ConnectionRow')
 @TableIndex(name: 'idx_connections_kind', columns: {#kind})
@@ -116,7 +141,7 @@ class Connections extends Table {
   /// (one per account); for Jellyfin it's the server's machineId.
   TextColumn get id => text()();
 
-  /// Backend kind: `'plex'` or `'jellyfin'`.
+  /// Backend kind: `'plex'`, `'jellyfin'`, or `'emby'`.
   TextColumn get kind => text()();
 
   /// User-visible label (account email, server name).
@@ -192,9 +217,9 @@ class ProfileConnections extends Table {
   // No FK on profile_id: Plex Home profiles are virtual (built by
   // Profile.virtualPlexHome from PlexHomeService's live cache, never
   // persisted in `profiles`), so an FK here would reject every join row
-  // they need. The two profile-delete sites clean up join rows manually
-  // via ProfileConnectionRegistry.removeAllForProfile before calling
-  // ProfileRegistry.remove.
+  // they need. Profile deletion instead cleans up join rows explicitly
+  // (ProfileConnectionCleanup.removeAllProfileConnections)
+  // before calling ProfileRegistry.remove.
   TextColumn get profileId => text()();
   TextColumn get connectionId => text().references(Connections, #id, onDelete: KeyAction.cascade)();
   TextColumn get userToken => text().withDefault(const Constant(''))();

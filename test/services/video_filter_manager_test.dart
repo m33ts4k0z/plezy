@@ -13,7 +13,7 @@ void main() {
     expect(manager.setZoomScale(1.234), 1.23);
     expect(manager.zoomScale, 1.23);
 
-    expect(manager.adjustZoom(VideoFilterManager.zoomStep), 1.24);
+    expect(manager.setZoomScale(manager.zoomScale + VideoFilterManager.zoomStep), 1.24);
     expect(manager.zoomScale, 1.24);
   });
 
@@ -26,7 +26,7 @@ void main() {
 
     expect(manager.setZoomScale(1.00008), 1.0);
     expect(manager.zoomScale, 1.0);
-    expect(manager.resetZoom(), 1.0);
+    expect(manager.setZoomScale(1.0), 1.0);
   });
 
   test('video zoom property is exact zero at normalized default', () async {
@@ -144,6 +144,39 @@ void main() {
     final aspectWrites = player.writes.where((write) => write.key == 'video-aspect-override').toList();
     expect(aspectWrites, hasLength(1));
     expect(double.parse(aspectWrites.single.value), closeTo(1.0, 0.0001));
+  });
+
+  // Pinching back is the touch path to an unzoomed picture (#1505). Without a
+  // detent, normalizeZoomScale's whole-percent rounding means an unaided pinch
+  // leaves the frame at 99% or 101% and the viewer cannot tell why it still
+  // looks cropped.
+  group('snapPinchZoomScale', () {
+    test('snaps to exactly 1.0 inside the detent', () {
+      for (final scale in [0.97, 0.99, 1.0, 1.01, 1.03]) {
+        expect(VideoFilterManager.snapPinchZoomScale(scale), 1.0, reason: '$scale is within the detent');
+      }
+    });
+
+    test('leaves scales outside the detent alone', () {
+      for (final scale in [0.5, 0.9, 0.96, 1.04, 1.1, 2.0]) {
+        expect(VideoFilterManager.snapPinchZoomScale(scale), scale, reason: '$scale is outside the detent');
+      }
+    });
+
+    test('does not swallow the neighbouring zoom presets', () {
+      // The sheet offers 0.9 and 1.1 either side of 100%; a detent that ate
+      // them would make those presets unreachable by pinch.
+      expect(VideoFilterManager.snapPinchZoomScale(0.9), 0.9);
+      expect(VideoFilterManager.snapPinchZoomScale(1.1), 1.1);
+    });
+
+    test('keeps the 1% keyboard step escapable', () {
+      // zoomStep is 1%, inside the detent — proof the detent is confined to the
+      // pinch path and never reaches normalizeZoomScale, or zoom-in from 100%
+      // could never leave 100%.
+      final stepped = VideoFilterManager.normalizeZoomScale(1.0 + VideoFilterManager.zoomStep);
+      expect(stepped, closeTo(1.01, 0.0001));
+    });
   });
 }
 
