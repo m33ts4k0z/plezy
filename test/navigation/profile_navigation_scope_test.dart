@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:plezy/navigation/profile_navigation_scope.dart';
+import 'package:provider/provider.dart';
 
 void main() {
   testWidgets('ProfileNavigationRegistry pops and detaches the active profile navigator', (tester) async {
@@ -32,5 +33,29 @@ void main() {
 
     registry.detachNavigator(firstKey);
     expect(registry.navigator, isNull);
+  });
+
+  testWidgets('navigation context stays below profile providers and selects the profile navigator', (tester) async {
+    final registry = ProfileNavigationRegistry();
+    final profileNavigatorKey = GlobalKey<NavigatorState>();
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Provider<String>.value(
+          value: 'profile-scoped',
+          child: Navigator(
+            key: profileNavigatorKey,
+            onGenerateRoute: (_) => MaterialPageRoute<void>(builder: (_) => const SizedBox.shrink()),
+          ),
+        ),
+      ),
+    );
+
+    registry.attachNavigator(profileNavigatorKey);
+    final navigationContext = registry.navigationContext;
+
+    expect(navigationContext, isNotNull);
+    expect(navigationContext!.read<String>(), 'profile-scoped');
+    expect(Navigator.of(navigationContext), same(profileNavigatorKey.currentState));
   });
 }

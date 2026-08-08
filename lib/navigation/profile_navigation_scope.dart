@@ -12,6 +12,7 @@ class ProfileNavigationRegistry {
   GlobalKey<ScaffoldMessengerState>? _mainScaffoldMessengerKey;
 
   NavigatorState? get navigator => _navigatorKey?.currentState;
+  BuildContext? get navigationContext => navigator?.overlay?.context;
   ScaffoldMessengerState? get mainScaffoldMessenger => _mainScaffoldMessengerKey?.currentState;
 
   void attachNavigator(GlobalKey<NavigatorState> key) {

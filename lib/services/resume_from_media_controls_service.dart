@@ -3,8 +3,8 @@ import 'dart:io' show Platform;
 
 import 'package:os_media_controls/os_media_controls.dart';
 
-import '../main.dart' show rootNavigatorKey;
 import '../media/media_item.dart';
+import '../navigation/profile_navigation_scope.dart';
 import '../utils/app_logger.dart';
 import '../utils/video_player_navigation.dart';
 import 'plezy_media_notification.dart';
@@ -161,10 +161,14 @@ class ResumeFromMediaControlsService {
     await _plezyNotifSubscription?.cancel();
     _plezyNotifSubscription = null;
 
-    final navigator = rootNavigatorKey.currentState;
-    final context = navigator?.context;
+    // Playback providers and the content navigator are profile-scoped. The
+    // app-wide root navigator sits above that scope, so pushing from its
+    // context builds a player that cannot resolve PlaybackStateProvider.
+    // Use the active profile navigator's overlay context: it is beneath the
+    // providers and Navigator.of(context) resolves to that same navigator.
+    final context = profileNavigationRegistry.navigationContext;
     if (context == null || !context.mounted) {
-      appLogger.w('ResumeFromMediaControlsService: no navigator context, dropping resume');
+      appLogger.w('ResumeFromMediaControlsService: no profile navigator context, dropping resume');
       return;
     }
 
