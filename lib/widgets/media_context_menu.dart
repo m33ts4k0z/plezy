@@ -11,6 +11,7 @@ import '../media/media_item.dart';
 import '../media/media_item_labels.dart';
 import '../media/media_item_types.dart';
 import '../media/media_kind.dart';
+import '../media/media_file_info.dart';
 import '../media/library_query.dart';
 import '../media/media_playlist.dart';
 import '../media/media_server_client.dart';
@@ -46,6 +47,7 @@ import '../utils/platform_detector.dart';
 import '../utils/snackbar_helper.dart';
 import '../utils/dialogs.dart';
 import '../services/external_player_service.dart';
+import '../services/downloaded_file_info_service.dart';
 import 'dialog_action_button.dart';
 import '../focus/focusable_text_field.dart';
 import '../focus/key_event_utils.dart';
@@ -1023,15 +1025,41 @@ class MediaContextMenuState extends State<MediaContextMenu> {
     var loadingShown = false;
 
     try {
-      final client = _getMediaClientForItem();
       if (context.mounted) {
         showLoadingDialog(context);
         loadingShown = true;
       }
 
-      // Fetch file info
+      // A downloaded item's server metadata still describes its original
+      // source. Probe the physical file first so a converted 720p copy does
+      // not present the original 4K resolution and size. Server File Info is
+      // retained as the fallback for online-only items or an unreadable copy.
       final item = _mediaItem!;
-      final fileInfo = await client.getFileInfo(item);
+      MediaFileInfo? fileInfo;
+      final downloadProvider = this.context.read<DownloadProvider?>();
+      if (downloadProvider != null) {
+        try {
+          final progress = downloadProvider.getProgress(item.globalKey);
+          final downloadedPath = await downloadProvider.getVideoFilePath(item.globalKey);
+          final fallbackSize = progress == null
+              ? null
+              : progress.downloadedBytes > 0
+              ? progress.downloadedBytes
+              : progress.totalBytes > 0
+              ? progress.totalBytes
+              : null;
+          if (downloadedPath != null) {
+            fileInfo = await DownloadedFileInfoService.instance.probe(downloadedPath, fallbackSizeBytes: fallbackSize);
+          }
+        } catch (error, stackTrace) {
+          appLogger.w(
+            'Could not read local File Info for ${item.globalKey}; using server metadata',
+            error: error,
+            stackTrace: stackTrace,
+          );
+        }
+      }
+      fileInfo ??= await _getMediaClientForItem().getFileInfo(item);
 
       // Close loading indicator
       if (loadingShown && context.mounted) {
@@ -1040,12 +1068,13 @@ class MediaContextMenuState extends State<MediaContextMenu> {
       }
 
       if (fileInfo != null && context.mounted && mounted) {
+        final resolvedFileInfo = fileInfo;
         // Show file info bottom sheet, presented from the menu's own context
         // so a screen-level OverlaySheetHost is found (see _showContextMenu).
         await OverlaySheetController.showAdaptive(
           this.context,
           isScrollControlled: true,
-          builder: (context) => FileInfoBottomSheet(fileInfo: fileInfo, title: item.displayTitle),
+          builder: (context) => FileInfoBottomSheet(fileInfo: resolvedFileInfo, title: item.displayTitle),
         );
       } else if (context.mounted) {
         showErrorSnackBar(context, t.messages.fileInfoNotAvailable);

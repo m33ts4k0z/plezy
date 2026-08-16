@@ -24,6 +24,7 @@ import android.widget.FrameLayout
 import androidx.annotation.RequiresApi
 import com.edde746.plezy.car.CarRestrictionsMonitor
 import com.edde746.plezy.exoplayer.ExoPlayerPlugin
+import com.edde746.plezy.localmedia.LocalMediaInfoPlugin
 import com.edde746.plezy.medianotification.MediaNotificationPlugin
 import com.edde746.plezy.mpv.MpvAudioPlayerPlugin
 import com.edde746.plezy.mpv.MpvPlayerPlugin
@@ -628,6 +629,7 @@ class MainActivity : FlutterActivity() {
     flutterEngine.plugins.add(ExoPlayerPlugin())
     flutterEngine.plugins.add(MpvAudioPlayerPlugin())
     flutterEngine.plugins.add(MediaNotificationPlugin())
+    flutterEngine.plugins.add(LocalMediaInfoPlugin())
 
     MethodChannel(flutterEngine.dartExecutor.binaryMessenger, DEVICE_CHANNEL).setMethodCallHandler { call, result ->
       when (call.method) {
