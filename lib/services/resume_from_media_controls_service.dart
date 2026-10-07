@@ -34,6 +34,13 @@ class ResumeFromMediaControlsService {
   /// `OsMediaControls.clear()` (e.g. the player's own teardown).
   bool get isArmed => _pending != null;
 
+  /// True from a launcher / lock-screen play until the resumed player's route
+  /// settles. The app usually returns to the foreground mid-flight, before the
+  /// new [VideoPlayerScreen] registers itself as active playback; resume-time
+  /// UI (the profile picker) must treat this as playback, or it opens over —
+  /// and can rebuild the profile scope under — the player being initialized.
+  bool get isResuming => _navigating;
+
   /// Capture the last-known playback state and keep the OS notification in
   /// the paused state. The caller MUST NOT call `OsMediaControls.clear()`
   /// after invoking this — that would defeat the whole feature.

@@ -1683,6 +1683,15 @@ class VideoPlayerScreenState extends State<VideoPlayerScreen>
       return;
     }
     _transitionGate.bumpGeneration();
+    // Unmount the video UI before its player and volume controller go null.
+    // That subtree also rebuilds on its own (the Video widget's first-frame
+    // listener re-runs its controls builder), so a rollback that cleared the
+    // fields first left a window for `player!` to throw mid-build — the red
+    // screen seen when a launcher resume's startup failed. Marking the screen
+    // dirty in the same turn lets its rebuild replace the subtree first.
+    if (_isPlayerInitialized && identical(player, attemptPlayer)) {
+      setState(() => _isPlayerInitialized = false);
+    }
     _disposeVolumeControllerForPlayer(attemptPlayer);
     if (identical(player, attemptPlayer)) {
       player = null;

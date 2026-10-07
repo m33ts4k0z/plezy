@@ -236,6 +236,13 @@ extension _VideoPlayerBuildMethods on VideoPlayerScreenState {
               Center(
                 child: LayoutBuilder(
                   builder: (context, constraints) {
+                    // Read once: a failed-startup rollback or teardown can clear
+                    // these before the next screen rebuild replaces this subtree,
+                    // and the Video widget re-runs `controls` on its own schedule.
+                    final currentPlayer = player;
+                    final volumeController = _volumeController;
+                    if (currentPlayer == null || volumeController == null) return _buildLoadingSpinner();
+
                     final newSize = Size(constraints.maxWidth, constraints.maxHeight);
                     _scheduleVideoLayoutUpdate(newSize);
 
@@ -274,11 +281,11 @@ extension _VideoPlayerBuildMethods on VideoPlayerScreenState {
                     final sourceSubtitleTracks = _sourceSubtitleTracksForControls();
 
                     return Video(
-                      player: player!,
+                      player: currentPlayer,
                       hasFirstFrame: _firstFrame.uiReady,
                       controls: (context) => PlexVideoControls(
-                        player: player!,
-                        volumeController: _volumeController!,
+                        player: currentPlayer,
+                        volumeController: volumeController,
                         metadata: _currentMetadata,
                         onNext: onNext,
                         onPrevious: onPrevious,

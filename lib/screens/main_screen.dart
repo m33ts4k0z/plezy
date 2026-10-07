@@ -51,6 +51,7 @@ import '../widgets/tv_virtual_keyboard.dart';
 import '../services/api_cache.dart';
 import '../services/multi_server_manager.dart';
 import '../services/offline_watch_sync_service.dart';
+import '../services/resume_from_media_controls_service.dart';
 import '../services/settings_service.dart';
 import '../providers/offline_mode_provider.dart';
 import '../services/companion_remote/companion_remote_host_controller.dart';
@@ -1185,7 +1186,10 @@ class _MainScreenState extends State<MainScreen>
       isOffline: _isOffline,
       alreadyShowingProfileSelection: _isShowingProfileSelection,
       isMobilePlatform: Platform.isAndroid || Platform.isIOS,
-      hasActiveVideoPlayback: VideoPlayerScreenState.activeGlobalKey != null,
+      // A launcher / lock-screen resume counts from the tap: its player is still
+      // initializing when the app returns to the foreground.
+      hasActiveVideoPlayback:
+          VideoPlayerScreenState.activeGlobalKey != null || ResumeFromMediaControlsService.instance.isResuming,
       // Short-circuit on resumedFromBackground: the provider is lazy and
       // otherwise unused on phones, so an unconditional read would create it
       // on the first lifecycle event for users who never open the remote.
