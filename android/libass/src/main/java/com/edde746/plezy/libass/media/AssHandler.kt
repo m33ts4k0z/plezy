@@ -111,6 +111,14 @@ class AssHandler(
   private var useMargins = false
 
   /**
+   * The user's subtitle size as a libass font scale. Kept here like the frame and
+   * margin state because every media item gets a fresh renderer: a scale pushed
+   * before the ASS track is parsed (a cold network open, e.g. resuming from the
+   * launcher's media controls) would otherwise be dropped on a null renderer.
+   */
+  private var fontScale = 1f
+
+  /**
    * Per-video-frame callback. Fired by ExoPlayer just before MediaCodec releases the frame
    * to the output surface. Carries the exact PTS of the frame and the System.nanoTime()
    * domain target release time, so subtitle renderers can align composition to the same
@@ -230,6 +238,18 @@ class AssHandler(
     }
     margins?.let { m -> render.setMargins(scaledForRender(m[0]), scaledForRender(m[1]), scaledForRender(m[2]), scaledForRender(m[3])) }
     render.setUseMargins(useMargins)
+    render.setFontScale(fontScale)
+  }
+
+  /**
+   * Sets the libass font scale for the current renderer and every renderer created
+   * later. Synchronized with [createTrack], which builds the renderer on the loader
+   * thread, so a scale set mid-creation is never lost between the two.
+   */
+  @Synchronized
+  fun setFontScale(scale: Float) {
+    fontScale = scale
+    render?.setFontScale(scale)
   }
 
   /**

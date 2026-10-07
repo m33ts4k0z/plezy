@@ -3084,7 +3084,13 @@ class ExoPlayerCore(private val activity: Activity) :
   // (common with HDR tunneling on unsupported devices — black screen, no error)
 
   private fun frameWatchdogElapsedMs(nowMs: Long, isPlaying: Boolean): Long {
-    if (!isPlaying) frameWatchdogStartTime = nowMs
+    // Frames can only reach a visible, valid surface. Playback running while the
+    // app is backgrounded (render layer hidden, or a player opened from the
+    // launcher's media controls before the activity is back) renders nothing by
+    // design: that is not a black screen and must not trigger the reload/fallback
+    // chain, so it never counts towards the timeout.
+    val hasSurface = currentVisible && surfaceView?.holder?.surface?.isValid == true
+    if (!isPlaying || !hasSurface) frameWatchdogStartTime = nowMs
     return nowMs - frameWatchdogStartTime
   }
 
@@ -4073,7 +4079,9 @@ class ExoPlayerCore(private val activity: Activity) :
       val defaultSize = 38f
       val scale = fontSize / defaultSize
       try {
-        assHandler?.render?.setFontScale(scale)
+        // Via the handler, not its current renderer: the renderer is rebuilt per
+        // media item, and the handler re-applies the scale to each new one.
+        assHandler?.setFontScale(scale)
       } catch (e: Exception) {
         Log.w(TAG, "Failed to set ASS font scale: ${e.message}")
       }

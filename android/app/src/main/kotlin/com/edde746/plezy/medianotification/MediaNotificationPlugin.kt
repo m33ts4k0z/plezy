@@ -52,6 +52,10 @@ class MediaNotificationPlugin : FlutterPlugin {
         /// [dispatchActionFromIntent] so the running plugin instance can
         /// emit an event for the Dart-side resume coordinator.
         const val EXTRA_ACTION = "com.plezy.media_notification.action"
+
+/// PendingIntent request key for the action-less "bring the player forward"
+/// launch, distinct from every action button's key.
+private const val LAUNCH_ONLY_REQUEST_KEY = "com.plezy.media_notification.launch_only"
         const val ACTION_PLAY_PAUSE = "playPause"
         const val ACTION_NEXT = "next"
         const val ACTION_PREV = "previous"
@@ -402,17 +406,19 @@ class MediaNotificationPlugin : FlutterPlugin {
     private fun buildContentIntent(ctx: Context): PendingIntent =
         buildActionIntent(ctx, ACTION_RESUME)
 
-    private fun buildActionIntent(ctx: Context, action: String): PendingIntent {
+    /// [action] null builds a plain "bring the player forward" launch whose
+    /// arrival dispatches nothing (see [handleSessionAction]).
+    private fun buildActionIntent(ctx: Context, action: String?): PendingIntent {
         val launchIntent = ctx.packageManager.getLaunchIntentForPackage(ctx.packageName)
             ?: Intent()
         // NEW_TASK is required when the PendingIntent is sent from a
         // non-activity context (the session callback path).
         launchIntent.flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_NEW_TASK
-        launchIntent.putExtra(EXTRA_ACTION, action)
+        if (action != null) launchIntent.putExtra(EXTRA_ACTION, action)
         // Distinct request codes so action buttons don't collide on a stale
         // PendingIntent — Android caches by (requestCode, intent components,
         // intent action), and our intent action is identical across buttons.
-        val requestCode = action.hashCode()
+        val requestCode = (action ?: LAUNCH_ONLY_REQUEST_KEY).hashCode()
         return PendingIntent.getActivity(
             ctx,
             requestCode,
@@ -431,20 +437,25 @@ class MediaNotificationPlugin : FlutterPlugin {
         }
     }
 
-    /// Bring MainActivity to the foreground via the same PendingIntent the
-    /// notification's action buttons use. Sending the PendingIntent (rather
-    /// than `context.startActivity`) bypasses Android's background-activity-
-    /// launch restrictions because PendingIntents inherit the privileges of
-    /// their creator. The activity's `onNewIntent` then dispatches the
-    /// action back to Dart via `dispatchActionFromIntent`, so we don't
-    /// emit here — that would produce a duplicate event.
+    /// Dispatch a launcher / system media-controls action to Dart and bring
+    /// MainActivity to the foreground. Sending the PendingIntent (rather than
+    /// `context.startActivity`) bypasses Android's background-activity-launch
+    /// restrictions because PendingIntents inherit the privileges of their
+    /// creator.
+    ///
+    /// Exactly one delivery per press: when Dart is listening the event is
+    /// emitted directly (so the resume coordinator acts even if the launch is
+    /// silently blocked) and the launch only brings the player forward. The
+    /// launch used to carry the action as well, which `onNewIntent` replayed
+    /// as a second `togglePlayPause` — a launcher "play" flipped straight back
+    /// to pause, or raced a second resume. Without a listener the launch is
+    /// the only path, so it carries the action for `dispatchActionFromIntent`.
     private fun handleSessionAction(activityAction: String, eventType: String) {
         val activity = MainActivity.current
         val ctx = context
-        // Always emit the event first so the resume coordinator can act
-        // even if the activity launch is silently blocked by background-
-        // activity-launch policy. The activity launch is best-effort.
+        val deliveredToDart = eventSink != null
         emitEvent(eventType)
+        val launchAction = if (deliveredToDart) null else activityAction
 
         if (activity != null) {
             // Live activity available: start the intent from its context so
@@ -453,7 +464,7 @@ class MediaNotificationPlugin : FlutterPlugin {
             // current FlutterEngine alive after PiP-X.
             val intent = Intent(activity, MainActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_SINGLE_TOP
-                putExtra(EXTRA_ACTION, activityAction)
+                if (launchAction != null) putExtra(EXTRA_ACTION, launchAction)
             }
             try {
                 activity.startActivity(intent)
@@ -474,7 +485,7 @@ class MediaNotificationPlugin : FlutterPlugin {
                         ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED
                 }
             }
-            buildActionIntent(ctx, activityAction).send(ctx, 0, null, null, null, null, options.toBundle())
+            buildActionIntent(ctx, launchAction).send(ctx, 0, null, null, null, null, options.toBundle())
         } catch (e: Exception) {
             Log.w(TAG, "Failed to send PendingIntent for $activityAction", e)
         }
