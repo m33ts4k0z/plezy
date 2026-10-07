@@ -5052,7 +5052,14 @@ class PlexClient
       'mediaBufferSize': '50000',
       'hasMDE': '1',
       'subtitles': 'none',
-      'audioBoost': '0',
+      // Loudness, in percent of the source, that PMS applies when it has to
+      // downmix multichannel audio to stereo (100 = unchanged; it never touches
+      // a stereo source). Only the 320 kbps preset leaves no room for 5.1, so
+      // only it is downmixed server-side — and PMS's downmix is normalised to
+      // avoid clipping, landing ~7.7 dB below the player-side downmix every
+      // higher preset gets. `0` made those copies near-silent; 225 (Plex's own
+      // "Large" boost) brings them level with the rest.
+      'audioBoost': '225',
       'copyts': '1',
       'location': 'wan',
     };
