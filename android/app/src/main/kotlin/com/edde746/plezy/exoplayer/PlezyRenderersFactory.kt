@@ -8,6 +8,7 @@ import androidx.annotation.OptIn
 import androidx.media3.common.Format
 import androidx.media3.common.MimeTypes
 import androidx.media3.common.PlaybackParameters
+import androidx.media3.common.audio.AudioProcessor
 import androidx.media3.common.audio.ChannelMixingAudioProcessor
 import androidx.media3.common.audio.ChannelMixingMatrix
 import androidx.media3.common.util.Clock
@@ -150,21 +151,30 @@ class PlezyRenderersFactory(context: Context) : DefaultRenderersFactory(context)
     )
   }
 
+  private var iecCarrierSink: IecCarrierSink? = null
+
+  /**
+   * Clears per-stream carrier state that must survive renderer resets but not a new media item.
+   * Call before setting a new source; see [IecCarrierSink.beginMediaItem].
+   */
+  fun beginMediaItem() {
+    iecCarrierSink?.beginMediaItem()
+  }
+
   override fun buildAudioSink(
     context: Context,
     enableFloatOutput: Boolean,
     enableAudioOutputPlaybackParams: Boolean
   ): AudioSink {
-    AudioTrackAudioOutputProvider.failOnSpuriousAudioTimestamp = false
-
+    // Media3 1.11's replacement is fixed at 500ms; preserve the dynamic 500–1000ms PCM policy.
+    @Suppress("DEPRECATION")
     val bufferSizeProvider = DefaultAudioTrackBufferSizeProvider.Builder()
       .setMinPcmBufferDurationUs(500_000)
       .setMaxPcmBufferDurationUs(1_000_000)
       .setPcmBufferMultiplicationFactor(4)
-      // media3 defaults passthrough to 250ms, which the AC3 factor doubles to 500ms — 40000
-      // bytes at 640 kbps. Some HDMI routes reject a buffer that short outright and the only
-      // retry media3 1.10.1 has is to keep halving it (#1790). Ask for a second up front;
-      // upstream adopted the same 1s floor as its last-resort retry in #3207.
+      // Media3 defaults passthrough to 250ms, which the AC3 factor doubles to 500ms. Some
+      // HDMI routes reject a buffer that short (#1790). Ask for a second up front; Media3 1.11
+      // now uses the same one-second floor for its last-resort retry (#3207).
       .setPassthroughBufferDurationUs(500_000)
       .build()
 
@@ -185,7 +195,7 @@ class PlezyRenderersFactory(context: Context) : DefaultRenderersFactory(context)
       .setAudioOutputProvider(RawPositionOutputProvider(realProvider, rawPositionUs, audioDiagnosticsLogger))
       .build()
 
-    return PositionFixAudioSink(
+    val processedSink = PositionFixAudioSink(
       defaultSink,
       rawPositionUs,
       audioDelayUs,
@@ -193,7 +203,92 @@ class PlezyRenderersFactory(context: Context) : DefaultRenderersFactory(context)
       onAudioCapabilitiesChanged,
       audioDiagnosticsLogger
     )
+
+    return IecCarrierSink(
+      defaultSink = processedSink,
+      carrierSink = buildCarrierSink(context, bufferSizeProvider),
+      carrierRouteAvailable = { format -> carrierRouteAvailableFor(context, format) },
+      directOutputBlocked = { format -> shouldBlockDirectAudioOutput?.invoke(format) == true },
+      log = audioDiagnosticsLogger
+    ).also { iecCarrierSink = it }
   }
+
+  /** TrueHD needs only the carrier tuple (#1804); DTS-HD also needs the route to advertise it. */
+  private fun carrierRouteAvailableFor(context: Context, format: Format): Boolean = if (format.sampleMimeType == MimeTypes.AUDIO_DTS_HD) supportsDtsHdIecCarrier(context) else supportsIecCarrier(context)
+
+  /**
+   * The delegate that carries packed TrueHD and DTS-HD (#1804, #1988).
+   *
+   * Deliberately separate from the processed sink, and deliberately barren: an empty
+   * [DefaultAudioSink.AudioProcessorChain] means no downmix, no Sonic, no silence skipping and no
+   * float conversion can ever touch the bytes. The carrier only looks like PCM; a single mutated
+   * sample reaches the receiver as full-scale noise rather than as a glitch.
+   *
+   * The output provider keeps `OutputConfig.encoding` at PCM 16-bit so every position, pending-data
+   * and release accounting in media3 stays in its mature PCM path — which is correct here, because
+   * after packing the stream genuinely is a fixed-rate 192kHz 8-channel carrier. Only the
+   * `AudioTrack` itself is switched to `ENCODING_IEC61937`, via the builder modifier that upstream
+   * applies immediately before `AudioTrack.Builder.build()`.
+   */
+  private fun buildCarrierSink(
+    context: Context,
+    bufferSizeProvider: DefaultAudioTrackBufferSizeProvider
+  ): AudioSink {
+    val provider = AudioTrackAudioOutputProvider.Builder(context)
+      .setAudioTrackBufferSizeProvider(bufferSizeProvider)
+      .apply {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+          setAudioTrackBuilderModifier { builder, config ->
+            builder.setAudioFormat(
+              android.media.AudioFormat.Builder()
+                .setEncoding(android.media.AudioFormat.ENCODING_IEC61937)
+                .setChannelMask(android.media.AudioFormat.CHANNEL_OUT_7POINT1_SURROUND)
+                .setSampleRate(config.sampleRate)
+                .build()
+            )
+            // The AudioTrackConfig media3 reports upstream is built from OutputConfig, which stays
+            // PCM so the accounting stays in the PCM domain — so it cannot show the real encoding.
+            // This is the only place that can confirm what the AudioTrack was actually built as.
+            audioDiagnosticsLogger?.invoke(
+              "info",
+              "audio",
+              "Carrier AudioTrack: encoding=IEC61937 rate=${config.sampleRate} " +
+                "mask=0x${android.media.AudioFormat.CHANNEL_OUT_7POINT1_SURROUND.toString(16)} " +
+                "buffer=${config.bufferSize}"
+            )
+          }
+        }
+      }
+      .build()
+
+    return DefaultAudioSink.Builder(context)
+      .setEnableFloatOutput(false)
+      // Not DefaultAudioProcessorChain: that one appends silence-skipping and Sonic whatever it is
+      // constructed with, and either would rewrite carrier bytes. This chain has nothing in it, so
+      // AudioProcessingPipeline is a straight passthrough. Speed is reported as applied without
+      // resampling because the carrier delegate routes playback parameters to the AudioTrack, and
+      // the sink refuses the carrier outright at any speed other than 1.0x.
+      .setAudioProcessorChain(EmptyAudioProcessorChain())
+      .setAudioOutputProvider(provider)
+      .build()
+  }
+}
+
+/**
+ * An [AudioProcessorChain] that owns no processors, for the MAT carrier delegate (#1804).
+ *
+ * `DefaultAudioProcessorChain` always contributes silence-skipping and Sonic; both rewrite samples,
+ * which is fatal to a bit-exact IEC 61937 carrier. Speed is reported back unchanged because the
+ * carrier delegate applies playback parameters at the AudioTrack, and the routing sink declines the
+ * carrier entirely at any speed other than 1.0x.
+ */
+@OptIn(UnstableApi::class)
+private class EmptyAudioProcessorChain : DefaultAudioSink.AudioProcessorChain {
+  override fun getAudioProcessors(): Array<AudioProcessor> = emptyArray()
+  override fun applyPlaybackParameters(playbackParameters: PlaybackParameters): PlaybackParameters = playbackParameters
+  override fun applySkipSilenceEnabled(skipSilenceEnabled: Boolean): Boolean = false
+  override fun getMediaDuration(playoutDuration: Long): Long = playoutDuration
+  override fun getSkippedOutputFrameCount(): Long = 0L
 }
 
 /**

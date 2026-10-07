@@ -9,11 +9,23 @@ extension _PlexVideoControlsPlaybackInputMethods on _PlexVideoControlsState {
     if (_suppressRateToastUntil != null && DateTime.now().isBefore(_suppressRateToastUntil!)) {
       return;
     }
+    // A Watch Together drift nudge moves the rate a few percent for a few
+    // seconds; that is the sync layer's business, not a speed change to
+    // announce. Keep the last reported rate so the nudge's exit is silent too.
+    if (_syncOwnsRate()) return;
     final prev = _lastReportedRate;
     if (prev != null && (prev - newRate).abs() < 0.005) return;
     _lastReportedRate = newRate;
     final icon = newRate >= 1.0 ? Symbols.fast_forward_rounded : Symbols.slow_motion_video_rounded;
     widget.toastController.show(icon, formatPlaybackRate(newRate));
+  }
+
+  bool _syncOwnsRate() {
+    try {
+      return context.read<WatchTogetherProvider>().syncOwnsRate;
+    } catch (_) {
+      return false; // No session provider above this surface.
+    }
   }
 
   void _seekToPreviousChapter() => unawaited(_seekToChapter(forward: false));
@@ -32,6 +44,10 @@ extension _PlexVideoControlsPlaybackInputMethods on _PlexVideoControlsState {
   /// so a burst of presses cannot rebase off a position a slow backend has not
   /// applied yet — without that the badge would report a total the player
   /// never actually seeks.
+  ///
+  /// The badge announces what the accumulator accepted, not what was asked:
+  /// once the target is pinned at the start, the end, or the live edge, a
+  /// press applies nothing and must not add a step to the readout (#2425).
   void _seekByWithFeedback(Duration delta) {
     if (!widget.canControl || delta == Duration.zero) return;
     final forward = !delta.isNegative;
@@ -40,16 +56,21 @@ extension _PlexVideoControlsPlaybackInputMethods on _PlexVideoControlsState {
     // an absolute target is meaningless against a moving live edge (#1253).
     if (widget.isLive && widget.onLiveSeekBy != null) {
       final stepSeconds = (delta.inMilliseconds.abs() / 1000).round().clamp(1, 300);
-      widget.onLiveSeekBy!(forward ? stepSeconds : -stepSeconds);
-      _registerSkipFeedback(isForward: forward, seconds: stepSeconds);
+      final applied = widget.onLiveSeekBy!(forward ? stepSeconds : -stepSeconds);
+      _registerSkipFeedback(
+        isForward: forward,
+        travelled: Duration(seconds: applied),
+      );
       return;
     }
 
     if (widget.player.state.duration.inMilliseconds <= 0) return;
 
-    _hiddenSeek.seekBy(delta);
-    _registerSkipFeedback(isForward: forward, seconds: (delta.inMilliseconds.abs() / 1000).round());
+    _registerSkipFeedback(isForward: forward, travelled: _hiddenSeek.seekBy(delta));
   }
+
+  /// Badge granularity: nearest whole second of a running total.
+  static int _wholeSeconds(Duration total) => (total.inMilliseconds / 1000).round();
 
   /// Seek requested by a configured keyboard shortcut (the default Left/Right
   /// and Shift+Left/Right bindings, plus any rebinding of them). Desktop never
@@ -279,7 +300,12 @@ extension _PlexVideoControlsPlaybackInputMethods on _PlexVideoControlsState {
     final hit = _edgeAdjustmentSurfaceHit(event.position);
     _handleEdgeAdjustmentEvent(
       _mobileTouchGesturesAllowed && hit != null
-          ? _edgeAdjustmentTracker.pointerDown(event.pointer, hit.position, hit.size)
+          ? _edgeAdjustmentTracker.pointerDown(
+              event.pointer,
+              hit.position,
+              hit.size,
+              isSideEnabled: _edgeAdjustmentGestureEnabled,
+            )
           : const MobileEdgeAdjustmentEvent.none(),
     );
   }
@@ -347,15 +373,53 @@ extension _PlexVideoControlsPlaybackInputMethods on _PlexVideoControlsState {
     return (position: renderObject.globalToLocal(globalPosition), size: renderObject.size);
   }
 
+  /// Whether a global touch position sits in an edge zone that can actually
+  /// start a gesture — a disabled swipe (#1810) must not keep stealing the
+  /// content-strip drag.
   bool _isGlobalPositionInEdgeAdjustmentZone(Offset globalPosition) {
     final hit = _edgeAdjustmentSurfaceHit(globalPosition);
     if (hit == null) return false;
-    return mobileEdgeAdjustmentZoneForPosition(position: hit.position, size: hit.size) != null;
+    final side = mobileEdgeAdjustmentZoneForPosition(position: hit.position, size: hit.size);
+    return side != null && _edgeAdjustmentGestureEnabled(side);
   }
+
+  /// Left edge adjusts brightness, right edge volume — mirror that split for
+  /// the per-gesture prefs.
+  bool _edgeAdjustmentGestureEnabled(MobileEdgeAdjustmentSide side) => SettingsService.instance.read(
+    side == MobileEdgeAdjustmentSide.left ? SettingsService.gestureBrightnessSwipe : SettingsService.gestureVolumeSwipe,
+  );
 
   void _refreshDeviceAdjustmentValues() {
     unawaited(_readEdgeAdjustmentValue(MobileEdgeAdjustmentSide.left));
     unawaited(_readEdgeAdjustmentValue(MobileEdgeAdjustmentSide.right));
+  }
+
+  /// Player entry and resume both funnel here: reapply the remembered swipe
+  /// brightness (#2178) before re-reading the gesture baselines, so the next
+  /// swipe starts from the level actually on screen.
+  void _handleDeviceAdjustmentResume() => unawaited(_applyRememberedBrightnessThenRefresh());
+
+  Future<void> _applyRememberedBrightnessThenRefresh() async {
+    final settings = SettingsService.instance;
+    if (settings.read(SettingsService.rememberBrightnessLevel) &&
+        settings.read(SettingsService.gestureBrightnessSwipe)) {
+      final value = settings.read(SettingsService.rememberedBrightnessLevel);
+      // Negative means "never set"; the write below only stores 0.0-1.0.
+      if (value >= 0.0 && value <= 1.0) {
+        // Await the queued set so the baseline read cannot race past it.
+        await _deviceAdjustmentService.setBrightness(value);
+      }
+    }
+    if (mounted) _refreshDeviceAdjustmentValues();
+  }
+
+  /// Persist the level a finished brightness swipe settled on (#2178). Runs
+  /// once per gesture, not per write, to spare SharedPreferences the drag spam.
+  void _persistRememberedBrightness() {
+    if (!SettingsService.instance.read(SettingsService.rememberBrightnessLevel)) return;
+    final value = _lastKnownBrightness;
+    if (value == null) return;
+    unawaited(SettingsService.instance.write(SettingsService.rememberedBrightnessLevel, value));
   }
 
   Future<double?> _readEdgeAdjustmentValue(MobileEdgeAdjustmentSide side) {
@@ -481,6 +545,7 @@ extension _PlexVideoControlsPlaybackInputMethods on _PlexVideoControlsState {
     _edgeAdjustmentIndicatorHideTimer?.cancel();
     _edgeAdjustmentIndicatorClearTimer?.cancel();
     _edgeAdjustmentWasActive = true;
+    _edgeAdjustmentActiveSide = side;
     _edgeAdjustmentStartValue = startValue;
     _lastEdgeAdjustmentWriteAt = null;
     _lastEdgeAdjustmentWriteValue = null;
@@ -527,7 +592,11 @@ extension _PlexVideoControlsPlaybackInputMethods on _PlexVideoControlsState {
 
   void _finishEdgeAdjustment({required bool suppressTap}) {
     if (suppressTap) _suppressTouchTaps();
+    if (_edgeAdjustmentWasActive && _edgeAdjustmentActiveSide == MobileEdgeAdjustmentSide.left) {
+      _persistRememberedBrightness();
+    }
     _edgeAdjustmentWasActive = false;
+    _edgeAdjustmentActiveSide = null;
     _edgeAdjustmentStartValue = null;
     _lastEdgeAdjustmentWriteAt = null;
     _lastEdgeAdjustmentWriteValue = null;
@@ -550,18 +619,33 @@ extension _PlexVideoControlsPlaybackInputMethods on _PlexVideoControlsState {
     _handleEdgeAdjustmentEvent(_edgeAdjustmentTracker.cancel());
   }
 
-  /// Timing-based double-click detection: avoids `onDoubleTap`'s ~300 ms
-  /// tap-resolution delay and the arena competition it introduces.
   void _handleOuterTap() {
-    if (PlatformDetector.isMobile(context) && _isTouchTapSuppressed) return;
+    if (PlatformDetector.isMobile(context)) {
+      if (_isTouchTapSuppressed) return;
+      // Mobile taps get the single-tap action only; the skip zones own touch
+      // double taps.
+      if (widget.canControl && _clickVideoTogglesPlayback) {
+        _playOrPause();
+      } else {
+        _toggleControls();
+      }
+      return;
+    }
 
+    _handleDesktopClickToggle();
+  }
+
+  /// Desktop click contract shared by the outer video surface and the controls
+  /// overlay: the single-click action fires immediately and a second click
+  /// within [kDoubleTapTimeout] toggles fullscreen. Timing-based detection
+  /// avoids `onDoubleTap`'s ~300 ms tap-resolution delay and the arena
+  /// competition it introduces.
+  void _handleDesktopClickToggle() {
     if (widget.canControl && _clickVideoTogglesPlayback) {
       _playOrPause();
     } else {
       _toggleControls();
     }
-
-    if (PlatformDetector.isMobile(context)) return;
 
     final now = DateTime.now();
     if (_lastSkipTapTime != null && now.difference(_lastSkipTapTime!) < kDoubleTapTimeout) {
@@ -609,27 +693,114 @@ extension _PlexVideoControlsPlaybackInputMethods on _PlexVideoControlsState {
     });
   }
 
-  Size _sizeOf(BuildContext context) {
-    final renderObject = context.findRenderObject();
-    return renderObject is RenderBox ? renderObject.size : Size.zero;
-  }
-
   /// Accumulate skip feedback. Consecutive skips in the same direction stack
   /// into one running total; a direction flip restarts the count.
-  void _registerSkipFeedback({required bool isForward, required int seconds}) {
+  ///
+  /// [travelled] is the distance actually applied, so a press the clamp
+  /// swallowed whole arrives as zero. The exact total is kept and rounded once
+  /// for display, so a burst of fractional accelerated steps reads as the
+  /// distance travelled rather than as the sum of rounded steps (#2425).
+  ///
+  /// A press that leaves a same-direction readout up keeps it alive at its
+  /// current value even when it added nothing — there is nothing left to
+  /// travel through, and the number not moving says so. With nothing up, a
+  /// press whose total rounds to zero announces nothing: zero on the badge
+  /// means nothing worth reading, whether the seek was swallowed or moved the
+  /// playhead by less than half a second, and a `0s` readout looks like a
+  /// broken control either way.
+  void _registerSkipFeedback({required bool isForward, required Duration travelled}) {
     final stacking = _showDoubleTapFeedback && _lastDoubleTapWasForward == isForward;
-    _accumulatedSkipSeconds = stacking ? _accumulatedSkipSeconds + seconds : seconds;
+    final total = stacking ? _accumulatedSkip + travelled.abs() : travelled.abs();
+    if (_wholeSeconds(total) == 0 && !stacking) return;
+    _setSkipTotal(total);
     _showSkipFeedback(isForward: isForward);
   }
 
+  /// The exact total and its whole-second rendering move together; the
+  /// notifier only rebuilds the label when the rounded value changes.
+  void _setSkipTotal(Duration total) {
+    _accumulatedSkip = total;
+    _accumulatedSkipSeconds.value = _wholeSeconds(total);
+  }
+
+  /// Wrap an absolute live action so it takes down the badge a pending live
+  /// skip raised.
+  ///
+  /// Live relative skips bypass [_hiddenSeek] for the parent's epoch
+  /// accumulator (#1253), so the jump the reopen announces finds no pending
+  /// target here and nothing retires the readout. The absolute action cancels
+  /// that queued skip, so its promised total is no longer going anywhere.
+  ValueChanged<int>? _liveSeekAbandoningBurst(ValueChanged<int>? onLiveSeek) {
+    if (onLiveSeek == null) return null;
+    return (offset) {
+      _dismissSkipFeedback();
+      onLiveSeek(offset);
+    };
+  }
+
+  /// Wrap an action that replaces what is playing — a live channel switch, the
+  /// next or previous item — so the badge goes with the timeline it described.
+  ///
+  /// The pending skip is cancelled by the switch itself (live keeps its offset
+  /// in the parent accumulator, video re-keys on the new item), but neither
+  /// route runs through [_hiddenSeek], so nothing else takes the readout down.
+  VoidCallback? _abandoningBurst(VoidCallback? action) {
+    if (action == null) return null;
+    return () {
+      // Cancel as well as hide: a held-arrow target stays armed across the
+      // asynchronous switch and would otherwise debounce into a seek on the
+      // outgoing player before the new item re-keys the controls. The focused
+      // desktop timeline coalesces into its own accumulator, so it needs the
+      // same treatment.
+      _hiddenSeek.cancel();
+      _desktopControlsKey.currentState?.abandonPendingSeek();
+      _dismissSkipFeedback();
+      action();
+    };
+  }
+
   /// Handle a completed skip-zone double tap.
+  ///
+  /// The travelled distance is resolved here, synchronously, rather than read
+  /// back from the seek: the badge must go up with the tap, not after a slow
+  /// backend or a live transcode reopen has answered.
+  ///
+  /// Measured from the clamped origin, the same rule as [_hiddenSeek]: the
+  /// duration is authoritative, so a position reported past it is already at
+  /// the end and a forward tap there travels nothing rather than clamping
+  /// backwards under a forward chevron. A tap that travels nothing dispatches
+  /// nothing — a seek to the position the playhead already occupies is not
+  /// worth a round trip, and on the screen's seek path it would also announce
+  /// a seek to a Watch Together room and re-poke the end-of-item trigger.
   void _handleDoubleTapSkip({required bool isForward}) {
     if (!widget.canControl) return;
 
-    _registerSkipFeedback(isForward: isForward, seconds: _seekTimeSmall);
+    // This tap supersedes any burst the keyboard/D-pad left pending, and it
+    // shares the badge with it. Retire that burst first, or its abandonment —
+    // triggered by this tap's own seek — would take down the readout this tap
+    // is about to put up.
+    _hiddenSeek.cancel();
 
     final delta = Duration(seconds: isForward ? _seekTimeSmall : -_seekTimeSmall);
-    unawaited(_seekByOffset(delta));
+    if (widget.isLive) {
+      // Without a capture buffer there is no window to move within: the
+      // stream is pinned to the live edge, and a raw player seek would only
+      // disturb it. Same rule as [_seekByWithFeedback].
+      if (widget.onLiveSeekBy == null) return;
+      final applied = widget.onLiveSeekBy!(delta.inSeconds);
+      _registerSkipFeedback(
+        isForward: isForward,
+        travelled: Duration(seconds: applied),
+      );
+      return;
+    }
+
+    final origin = clampSeekPosition(widget.player, widget.player.state.position);
+    final target = clampSeekPosition(widget.player, origin + delta);
+    final travelled = target - origin;
+    _registerSkipFeedback(isForward: isForward, travelled: travelled);
+    if (travelled == Duration.zero) return;
+    unawaited(_seekToPosition(target));
   }
 
   /// How long the skip badge stays at full opacity. 1200 ms gives time to read
@@ -642,17 +813,24 @@ extension _PlexVideoControlsPlaybackInputMethods on _PlexVideoControlsState {
 
   /// Show animated visual feedback for skip gesture
   void _showSkipFeedback({required bool isForward}) {
+    // Reads `tokens(context)` below, so a caller reaching here after disposal
+    // would touch a defunct element rather than merely no-op.
+    if (!mounted) return;
     // Cancel BOTH timers: a skip landing during the fade-out window must not
     // leave the old hide timer pending, or it kills the fresh readout and zeroes
     // the accumulated count mid-display.
     _feedbackTimer?.cancel();
     _feedbackHideTimer?.cancel();
 
-    _setControlsState(() {
-      _lastDoubleTapWasForward = isForward;
-      _showDoubleTapFeedback = true;
-      _doubleTapFeedbackOpacity = 1.0;
-    });
+    final feedbackAlreadyVisible =
+        _showDoubleTapFeedback && _lastDoubleTapWasForward == isForward && _doubleTapFeedbackOpacity == 1.0;
+    if (!feedbackAlreadyVisible) {
+      _setControlsState(() {
+        _lastDoubleTapWasForward = isForward;
+        _showDoubleTapFeedback = true;
+        _doubleTapFeedbackOpacity = 1.0;
+      });
+    }
 
     // Capture duration before timer to avoid context access in callback
     final slowDuration = tokens(context).slow;
@@ -667,40 +845,33 @@ extension _PlexVideoControlsPlaybackInputMethods on _PlexVideoControlsState {
           if (mounted) {
             _setControlsState(() {
               _showDoubleTapFeedback = false;
-              _accumulatedSkipSeconds = 0; // Reset when feedback hides
             });
+            _setSkipTotal(Duration.zero);
           }
         });
       }
     });
   }
 
-  /// Handle tap on controls overlay - route to skip zones or toggle controls
+  /// Take the skip readout down at once, because the burst it was counting will
+  /// never be committed. Fading it out would keep showing a total the player is
+  /// not going to seek to; zeroing it without hiding would flash `0s`.
+  void _dismissSkipFeedback() {
+    _feedbackTimer?.cancel();
+    _feedbackTimer = null;
+    _feedbackHideTimer?.cancel();
+    _feedbackHideTimer = null;
+    if (!mounted || (!_showDoubleTapFeedback && _accumulatedSkip == Duration.zero)) return;
+    _setControlsState(() {
+      _showDoubleTapFeedback = false;
+      _doubleTapFeedbackOpacity = 0.0;
+    });
+    _setSkipTotal(Duration.zero);
+  }
+
   void _handleControlsOverlayTap(TapUpDetails details, Size size) {
-    final isMobile = PlatformDetector.isMobile(context);
-
-    if (!isMobile) {
-      final DateTime now = DateTime.now();
-
-      // Always perform the single-click behavior immediately
-      if (widget.canControl && _clickVideoTogglesPlayback) {
-        _playOrPause();
-      } else {
-        _toggleControls();
-      }
-
-      final bool isDoubleClick = _lastSkipTapTime != null && now.difference(_lastSkipTapTime!) < kDoubleTapTimeout;
-
-      if (isDoubleClick) {
-        _lastSkipTapTime = null;
-
-        _toggleFullscreen();
-
-        return;
-      }
-
-      // Record this click as a candidate for double-click detection
-      _lastSkipTapTime = now;
+    if (!PlatformDetector.isMobile(context)) {
+      _handleDesktopClickToggle();
       return;
     }
 
@@ -716,6 +887,11 @@ extension _PlexVideoControlsPlaybackInputMethods on _PlexVideoControlsState {
     _toggleControls();
   }
 
+  /// Apply a user-requested playback rate through the owning screen when it
+  /// supplies a handler (Watch Together declares it to the room), else
+  /// directly on the player.
+  Future<void> _requestRate(double rate) => (widget.onRateRequested ?? widget.player.setRate)(rate);
+
   /// Handle long-press start - activate 2x speed
   void _handleLongPressStart() {
     if (!widget.canControl || widget.isLive) return;
@@ -725,7 +901,7 @@ extension _PlexVideoControlsPlaybackInputMethods on _PlexVideoControlsState {
       _rateBeforeLongPress = widget.player.state.rate;
       _showSpeedIndicator = true;
     });
-    widget.player.setRate(2.0);
+    unawaited(_requestRate(2.0));
   }
 
   /// Handle long-press end - restore original speed
@@ -734,7 +910,7 @@ extension _PlexVideoControlsPlaybackInputMethods on _PlexVideoControlsState {
     // Swallow the rate-restore emission so the stream-driven toast doesn't
     // flash as the rate snaps back to the prior value.
     _suppressRateToastUntil = DateTime.now().add(const Duration(milliseconds: 250));
-    widget.player.setRate(_rateBeforeLongPress ?? 1.0);
+    unawaited(_requestRate(_rateBeforeLongPress ?? 1.0));
     _setControlsState(() {
       _isLongPressing = false;
       _rateBeforeLongPress = null;

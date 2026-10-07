@@ -27,32 +27,80 @@ A modern client for Plex, Jellyfin, and Emby on desktop, mobile, and TV. Built w
 | Platform | Download |
 | --- | --- |
 | macOS | [DMG (x64, arm64)](https://github.com/edde746/plezy/releases/latest/download/plezy-macos.dmg) |
-| Linux x64 | [.deb](https://github.com/edde746/plezy/releases/latest/download/plezy-linux-x64.deb) · [.rpm](https://github.com/edde746/plezy/releases/latest/download/plezy-linux-x64.rpm) · [.pkg.tar.zst](https://github.com/edde746/plezy/releases/latest/download/plezy-linux-x64.pkg.tar.zst) · [portable tar.gz](https://github.com/edde746/plezy/releases/latest/download/plezy-linux-x64.tar.gz) |
-| Linux arm64 | [.deb](https://github.com/edde746/plezy/releases/latest/download/plezy-linux-arm64.deb) · [.rpm](https://github.com/edde746/plezy/releases/latest/download/plezy-linux-arm64.rpm) · [.pkg.tar.zst](https://github.com/edde746/plezy/releases/latest/download/plezy-linux-arm64.pkg.tar.zst) · [portable tar.gz](https://github.com/edde746/plezy/releases/latest/download/plezy-linux-arm64.tar.gz) |
+| Linux x64 | [.deb](https://github.com/edde746/plezy/releases/latest/download/plezy-linux-x64.deb) · [.rpm](https://github.com/edde746/plezy/releases/latest/download/plezy-linux-x64.rpm) · [.pkg.tar.zst](https://github.com/edde746/plezy/releases/latest/download/plezy-linux-x64.pkg.tar.zst) · [.flatpak](https://github.com/edde746/plezy/releases/latest/download/plezy-linux-x64.flatpak) · [portable tar.gz](https://github.com/edde746/plezy/releases/latest/download/plezy-linux-x64.tar.gz) |
+| Linux arm64 | [.deb](https://github.com/edde746/plezy/releases/latest/download/plezy-linux-arm64.deb) · [.rpm](https://github.com/edde746/plezy/releases/latest/download/plezy-linux-arm64.rpm) · [.pkg.tar.zst](https://github.com/edde746/plezy/releases/latest/download/plezy-linux-arm64.pkg.tar.zst) · [.flatpak](https://github.com/edde746/plezy/releases/latest/download/plezy-linux-arm64.flatpak) · [portable tar.gz](https://github.com/edde746/plezy/releases/latest/download/plezy-linux-arm64.tar.gz) |
 
-Package managers:
+<details>
+<summary>Install with a package manager</summary>
 
-- [Nix](https://search.nixos.org/packages?channel=unstable&query=plezy) - Community package by [@mio-19](https://github.com/mio-19) and [@MiniHarinn](https://github.com/MiniHarinn)
-- **Homebrew** (macOS):
-  ```bash
-  brew tap edde746/plezy https://github.com/edde746/plezy
-  brew install --cask plezy
-  ```
-- [AUR](https://aur.archlinux.org/packages/plezy-bin) (Arch Linux) - Community maintained by [@jianglai](https://github.com/jianglai):
-  ```bash
-  yay -S plezy-bin
-  ```
-- **WinGet** (Windows):
-  ```bash
-  winget install edde746.Plezy
-  ```
+### macOS — Homebrew
+
+```bash
+brew tap edde746/plezy https://github.com/edde746/plezy
+brew install --cask plezy
+```
+
+### Windows — WinGet
+
+```bash
+winget install edde746.Plezy
+```
+
+### Linux — Flatpak
+
+Install Flatpak with your distribution's package manager, download the bundle for your architecture above, then run:
+
+```bash
+flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+flatpak install --user flathub org.freedesktop.Platform//25.08
+flatpak install --user ./plezy-linux-x64.flatpak
+flatpak run com.edde746.plezy
+```
+
+On arm64, install `plezy-linux-arm64.flatpak`.
+
+<details>
+<summary>Sandbox, playback, and folder access</summary>
+
+- Not on Flathub — the remote supplies the Freedesktop runtime only.
+- Video playback needs a Wayland session; a pure X11 session shows the interface but cannot create the video plane.
+- No host or home filesystem access; app data lives in `~/.var/app/com.edde746.plezy/`. Add host folders through the desktop file chooser portal, and keep download folders writable.
+- Network, display, audio, and device access are enabled. `--device=all` (Flatpak 1.14 compatibility) exposes more than GPUs and controllers; session-bus access stays filtered.
+
+</details>
+
+### Arch Linux — Pacman
+
+[Distribution package](https://archlinux.org/packages/extra/x86_64/plezy/).
+
+```bash
+sudo pacman -S plezy
+```
+
+### Fedora / Red Hat — DNF
+
+[Installation instructions](https://github.com/aldobarr/plezy-rpm) · Community repository by [@aldobarr](https://github.com/aldobarr).
+
+### Nix
+
+[Community package](https://search.nixos.org/packages?channel=unstable&query=plezy) maintained by [@mio-19](https://github.com/mio-19) and [@MiniHarinn](https://github.com/MiniHarinn).
+
+### aerynOS — Moss
+
+[Distribution package](https://github.com/aerynOS/recipes/tree/main/p/plezy).
+
+```bash
+sudo moss it plezy
+```
+
+</details>
 
 ## Features
 
 ### <img src="assets/readme_icons/browse.svg" height="20" alt="" align="center" /> Browse & Discover
 - Libraries, collections, and playlists — video and audio
 - Discover hub — Continue Watching, Next Up, trending, and recommendations
-- Cross-server search across every connected Plex, Jellyfin, and Emby server
+- Cross-server search across every connected Plex, Jellyfin, and Emby server, including actors and directors
 - Filtering, sorting, and alphabetical jump navigation
 - Folder browsing and folder playback — home-video libraries open in folder view
 - Resolution, HDR/Dolby Vision, and audio-format badges on cards and detail pages
@@ -79,7 +127,7 @@ Package managers:
 - Chapter navigation with thumbnail scrub previews
 - Playback speed from 0.25x to 8x, audio sync offset, sleep timer (fixed durations or end of video)
 - Video zoom 50-200% with pinch, presets, and hotkeys
-- Audio passthrough[^pass], stereo downmix with center-channel boost, and loudness normalization
+- Audio passthrough[^pass], output channel limit (5.1 or stereo, with center-channel boost), and loudness normalization
 - File Info sheet — every version, file, and stream the server reports
 - Ambient lighting and GLSL shader presets[^mpv]
 - Picture-in-Picture[^pip]
@@ -110,6 +158,11 @@ Package managers:
 ### <img src="assets/readme_icons/watch-together.svg" height="20" alt="" align="center" /> Watch Together
 - Synchronized playback with friends
 - Real-time play / pause / seek sync
+- Host handoff when the relay and every connected peer support safe transfers
+- Automatic reconnect authenticates retained room membership; it never silently joins a reused room code.
+
+Self-hosted relays must support `authenticatedResume` for recovery. Deploy the updated relay before updating clients.
+Older relays still accept explicit create/join, but failed recovery requires joining or creating a room again.
 
 ### <img src="assets/readme_icons/integrations.svg" height="20" alt="" align="center" /> Integrations
 - Discord Rich Presence[^desktop]
@@ -132,7 +185,7 @@ Package managers:
 [^mb]: Jellyfin and Emby only.
 [^plex]: Plex only.
 [^connect]: Requires connecting the service under Settings > Services.
-[^hdr]: In-app HDR toggle on Windows, macOS, iOS, and tvOS. Dolby Vision on Android and Apple TV.
+[^hdr]: In-app HDR toggle on Windows, macOS, iOS, tvOS, and Linux — Linux needs a colour-managed Wayland compositor. Dolby Vision on Android and Apple TV.
 [^pass]: Desktop, Android TV, and Apple TV.
 [^mpv]: Requires the mpv player backend — unavailable on iOS and tvOS, and Android defaults to ExoPlayer.
 [^pip]: Android, iOS, and macOS — not on Android TV or Apple TV.
@@ -148,7 +201,7 @@ Package managers:
 ## Building from Source
 
 ### Prerequisites
-- Flutter SDK 3.44.0+
+- Flutter SDK 3.47.0+
 - A Plex account, or a Jellyfin or Emby server with user credentials
 
 ### Setup
@@ -161,7 +214,8 @@ scripts/codegen.sh
 flutter run
 ```
 
-### Code Generation
+<details>
+<summary>Code generation</summary>
 
 After modifying model classes or other generated sources:
 
@@ -175,7 +229,41 @@ After modifying translations:
 dart run slang
 ```
 
-### Local Checks
+</details>
+
+<details>
+<summary>Packaging a Flatpak bundle</summary>
+
+Packages an **already fully resolved Linux release bundle** — pinned libmpv and bundled libraries included, not a Flathub source-build manifest. Run it on Linux, on the same architecture as the bundle, after following the bundle preparation steps in [the Linux release workflow](.github/workflows/build.yml): `flutter build linux` alone does not produce all the required bundled libraries.
+
+Install the packaging tools (Debian/Ubuntu shown) plus the native-architecture SDK and runtime:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y flatpak flatpak-builder imagemagick
+flatpak remote-add --user --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+flatpak install --user flathub org.freedesktop.Platform//25.08 org.freedesktop.Sdk//25.08
+
+BUNDLE_DIR=build/linux/x64/release/bundle
+python3 linux/packaging/build-flatpak.py --bundle "$BUNDLE_DIR" --arch x64 --output "$PWD"
+```
+
+That writes `plezy-linux-x64.flatpak`, installable with the Flatpak commands above; on arm64, use the prepared arm64 bundle directory and `--arch arm64`. Package from the checkout matching the bundle, since the version comes from `pubspec.yaml`.
+
+Cross-architecture packaging needs native Flatpak tools, a registered binfmt interpreter, and the target SDK/runtime installed with `flatpak install --user --arch=x86_64` (or `aarch64`) — never run Flatpak's namespace tools under emulation. Pass `--arch x64` or `--arch arm64` to the checker and the matching Flatpak architecture to `flatpak run --arch=...`.
+
+Check the installed package against the runtime (not just the SDK), then launch it on a Wayland desktop and exercise streaming, audio, downloads/offline playback, and file chooser portals:
+
+```bash
+python3 linux/packaging/check-flatpak.py
+```
+
+The check fails on a non-executable entry point or an unresolved bundled ELF dependency. A container without a GPU can use `flatpak run --env=GALLIUM_DRIVER=softpipe com.edde746.plezy` for software-rendered verification; this is not a hardware-decoding or HDR test.
+
+</details>
+
+<details>
+<summary>Local checks</summary>
 
 ```bash
 scripts/ci_checks.sh
@@ -190,8 +278,10 @@ scripts/setup_hooks.sh
 End-to-end tests (Android emulator plus a Dockerized Jellyfin fixture):
 
 ```bash
-python3 scripts/run_maestro.py basic
+python3 scripts/maestro/run_maestro.py basic
 ```
+
+</details>
 
 ## Contributing
 
@@ -205,4 +295,4 @@ Plezy is licensed under [GPL-3.0](LICENSE).
 
 - Built with [Flutter](https://flutter.dev)
 - Supports [Plex Media Server](https://www.plex.tv), [Jellyfin](https://jellyfin.org), and [Emby](https://emby.media)
-- Playback powered by [mpv](https://mpv.io), [MPVKit](https://github.com/mpvkit/MPVKit), Android [ExoPlayer](https://developer.android.com/media/media3/exoplayer), [libass-android](https://github.com/peerless2012/libass-android), and [libmpv-android](https://github.com/jarnedemeulemeester/libmpv-android)
+- Playback powered by [mpv](https://mpv.io) via our [mpv-build](https://github.com/edde746/mpv-build) pipeline (started as a fork of [MPVKit](https://github.com/mpvkit/MPVKit); the Android Kotlin/JNI glue descends from [libmpv-android](https://github.com/jarnedemeulemeester/libmpv-android)), Android [ExoPlayer](https://developer.android.com/media/media3/exoplayer), and [libass-android](https://github.com/peerless2012/libass-android)

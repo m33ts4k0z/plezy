@@ -7,6 +7,7 @@ import '../../models/livetv_capture_buffer.dart';
 import '../../media/media_source_info.dart';
 import '../../services/scrub_preview_source.dart';
 import '../../utils/desktop_window_padding.dart';
+import '../../utils/platform_detector.dart';
 import '../../i18n/strings.g.dart';
 import 'player_chrome_controller.dart';
 import 'widgets/circular_control_button.dart';
@@ -61,19 +62,17 @@ class MobileVideoControls extends StatefulWidget {
   /// Whether this is a live TV stream
   final bool isLive;
 
-  /// Channel name for live TV display
   final String? liveChannelName;
 
   // Live TV time-shift
   final CaptureBuffer? captureBuffer;
   final bool isAtLiveEdge;
-  final double streamStartEpoch;
+  final int Function(Duration position)? liveEpochForPosition;
   final ValueChanged<int>? onLiveSeek;
 
   /// Server ID for chapter thumbnails in the content strip
   final String? serverId;
 
-  /// Whether to show the queue tab in the content strip
   final bool showQueueTab;
 
   /// Callback when a queue item is selected from the content strip
@@ -116,7 +115,7 @@ class MobileVideoControls extends StatefulWidget {
     this.liveChannelName,
     this.captureBuffer,
     this.isAtLiveEdge = true,
-    this.streamStartEpoch = 0,
+    this.liveEpochForPosition,
     this.onLiveSeek,
     this.serverId,
     this.showQueueTab = false,
@@ -291,7 +290,6 @@ class _MobileVideoControlsState extends State<MobileVideoControls> with SingleTi
                               child: ContentStrip(
                                 player: widget.player,
                                 chapters: widget.chapters,
-                                chaptersLoaded: widget.chaptersLoaded,
                                 canControl: widget.canControl,
                                 serverId: widget.serverId,
                                 showQueueTab: widget.showQueueTab,
@@ -315,6 +313,10 @@ class _MobileVideoControlsState extends State<MobileVideoControls> with SingleTi
   }
 
   Widget _buildTopBar(BuildContext context) {
+    // A portrait phone header is too narrow for the clock beside the back button,
+    // title, and track/chapter controls.
+    final isPortraitPhone =
+        PlatformDetector.isPhone(context) && MediaQuery.orientationOf(context) == Orientation.portrait;
     final topBar = _conditionalSafeArea(
       context: context,
       bottom: false, // Only respect top safe area when in portrait
@@ -327,6 +329,7 @@ class _MobileVideoControlsState extends State<MobileVideoControls> with SingleTi
           onStartAutoHide: widget.onStartAutoHide,
           trailing: widget.trackChapterControls,
           onBack: widget.onBack,
+          showClock: !isPortraitPhone,
         ),
       ),
     );
@@ -354,7 +357,6 @@ class _MobileVideoControlsState extends State<MobileVideoControls> with SingleTi
           mainAxisAlignment: .center,
           children: [
             if (!widget.isLive) ...[
-              // Previous episode button (greyed out when unavailable)
               CircularControlButton(
                 semanticLabel: t.videoControls.previousButton,
                 icon: Symbols.skip_previous_rounded,
@@ -378,7 +380,6 @@ class _MobileVideoControlsState extends State<MobileVideoControls> with SingleTi
             ),
             if (!widget.isLive) ...[
               const SizedBox(width: 24),
-              // Next episode button (greyed out when unavailable)
               CircularControlButton(
                 semanticLabel: t.videoControls.nextButton,
                 icon: Symbols.skip_next_rounded,
@@ -401,7 +402,7 @@ class _MobileVideoControlsState extends State<MobileVideoControls> with SingleTi
           builder: (context) => LiveTimelineBar(
             player: widget.player,
             captureBuffer: widget.captureBuffer!,
-            streamStartEpoch: widget.streamStartEpoch,
+            epochForPosition: widget.liveEpochForPosition!,
             isAtLiveEdge: widget.isAtLiveEdge,
             onSeekEnd: widget.onLiveSeek,
             horizontalLayout: false,
@@ -453,22 +454,17 @@ class _MobileVideoControlsState extends State<MobileVideoControls> with SingleTi
     );
   }
 
-  /// Conditionally wraps child with SafeArea only in portrait mode
+  /// Wraps [child] in a SafeArea: full insets in portrait, horizontal-only in
+  /// landscape. The landscape header and timeline must still clear the notch
+  /// and rounded corners; only the vertical insets are dropped so the
+  /// controls can hug the top/bottom edges over the full-bleed video surface.
   Widget _conditionalSafeArea({
     required BuildContext context,
     required Widget child,
     bool top = true,
     bool bottom = true,
   }) {
-    final orientation = MediaQuery.orientationOf(context);
-    final isPortrait = orientation == Orientation.portrait;
-
-    // Only apply SafeArea in portrait mode
-    if (isPortrait) {
-      return SafeArea(top: top, bottom: bottom, child: child);
-    }
-
-    // In landscape, return child without SafeArea
-    return child;
+    final isPortrait = MediaQuery.orientationOf(context) == Orientation.portrait;
+    return SafeArea(top: isPortrait && top, bottom: isPortrait && bottom, child: child);
   }
 }

@@ -8,6 +8,7 @@ import 'package:plezy/i18n/strings.g.dart';
 import 'package:plezy/media/media_backend.dart';
 import 'package:plezy/media/media_item.dart';
 import 'package:plezy/media/media_kind.dart';
+import 'package:plezy/mpv/mpv.dart';
 import 'package:plezy/providers/multi_server_provider.dart';
 import 'package:plezy/screens/music/now_playing_screen.dart';
 import 'package:plezy/services/music/music_playback_service.dart';
@@ -39,14 +40,24 @@ class _FakeMusicService extends StubMusicPlaybackService {
   MediaItem track;
   final MusicPlayContext context;
   final StreamController<Duration> _positionController = StreamController<Duration>.broadcast(sync: true);
+  final StreamController<Duration?> _playheadJumpController = StreamController<Duration?>.broadcast(sync: true);
+  final StreamController<Object> _errorsController = StreamController<Object>.broadcast(sync: true);
   final List<Duration> seeks = [];
   Duration _position = Duration.zero;
 
   _FakeMusicService({required this.track, required this.context});
 
+  bool _ended = false;
+
   void advanceTo(MediaItem next) {
     track = next;
     _position = Duration.zero;
+    notifyListeners();
+  }
+
+  /// The session stopped elsewhere (stop, error, video claimed audio).
+  void end() {
+    _ended = true;
     notifyListeners();
   }
 
@@ -55,8 +66,17 @@ class _FakeMusicService extends StubMusicPlaybackService {
     _positionController.add(position);
   }
 
+  /// Something outside the screen — OS media controls, a headset, the lock
+  /// screen — moved the playhead.
+  void emitPlayheadJump(Duration position) {
+    _position = position;
+    _playheadJumpController.add(position);
+  }
+
+  void emitError(Object error) => _errorsController.add(error);
+
   @override
-  MediaItem get currentTrack => track;
+  MediaItem? get currentTrack => _ended ? null : track;
 
   @override
   MusicPlaybackStatus get status => MusicPlaybackStatus.playing;
@@ -66,6 +86,12 @@ class _FakeMusicService extends StubMusicPlaybackService {
 
   @override
   Stream<Duration> get positionStream => _positionController.stream;
+
+  @override
+  Stream<Duration?> get playheadJumpStream => _playheadJumpController.stream;
+
+  @override
+  Stream<Object> get errors => _errorsController.stream;
 
   @override
   Duration get duration => const Duration(minutes: 3);
@@ -87,7 +113,9 @@ class _FakeMusicService extends StubMusicPlaybackService {
 
   @override
   void dispose() {
+    _playheadJumpController.close();
     _positionController.close();
+    _errorsController.close();
     super.dispose();
   }
 }
@@ -145,7 +173,7 @@ void main() {
       final second = _track(id: 'two', title: 'Second Track', album: 'Second Album', year: 1999);
       final service = _FakeMusicService(
         track: first,
-        context: const MusicPlayContext(id: 'album_one', title: 'First Album', kind: MusicPlayContextKind.album),
+        context: const MusicPlayContext(title: 'First Album', kind: MusicPlayContextKind.album),
       );
 
       await pumpNowPlaying(tester, service, isTv: isTv);
@@ -160,10 +188,63 @@ void main() {
     });
   }
 
+  testWidgets('an ended session removes a covered Now Playing without closing the screen above it', (tester) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(1200, 700);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPhysicalSize);
+    PlatformDetector.debugSetIsDesktopOSOverride(true);
+
+    final service = _FakeMusicService(
+      track: _track(id: 'one', title: 'First Track', album: 'First Album', year: 1973),
+      context: const MusicPlayContext(title: 'First Album', kind: MusicPlayContextKind.album),
+    );
+    addTearDown(service.dispose);
+    final navigatorKey = GlobalKey<NavigatorState>();
+
+    await tester.pumpWidget(
+      InputModeTracker(
+        child: TranslationProvider(
+          child: MultiProvider(
+            providers: [
+              ChangeNotifierProvider<MultiServerProvider>.value(value: testMultiServer().provider),
+              ChangeNotifierProvider<MusicPlaybackService>.value(value: service),
+            ],
+            child: MaterialApp(
+              navigatorKey: navigatorKey,
+              theme: monoTheme(dark: true).copyWith(platform: TargetPlatform.windows),
+              home: const Scaffold(body: Text('Home')),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    unawaited(navigatorKey.currentState!.push(MaterialPageRoute<void>(builder: (_) => const NowPlayingScreen())));
+    await tester.pump(const Duration(seconds: 1));
+    unawaited(
+      navigatorKey.currentState!.push(MaterialPageRoute<void>(builder: (_) => const Scaffold(body: Text('Album')))),
+    );
+    await tester.pump(const Duration(seconds: 1));
+
+    service.end();
+    // One frame rebuilds the covered screen and schedules the close; the next
+    // drops the removed route.
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 1));
+
+    expect(find.text('Album'), findsOneWidget);
+    expect(find.byType(NowPlayingScreen, skipOffstage: false), findsNothing);
+
+    navigatorKey.currentState!.pop();
+    await tester.pump(const Duration(seconds: 1));
+    expect(find.text('Home'), findsOneWidget);
+  });
+
   testWidgets('playlist playback retains its queue provenance label', (tester) async {
     final service = _FakeMusicService(
       track: _track(id: 'one', title: 'First Track', album: 'First Album', year: 1973),
-      context: const MusicPlayContext(id: 'playlist_1', title: 'Road Trip', kind: MusicPlayContextKind.playlist),
+      context: const MusicPlayContext(title: 'Road Trip', kind: MusicPlayContextKind.playlist),
     );
 
     await pumpNowPlaying(tester, service, isTv: false);
@@ -193,6 +274,44 @@ void main() {
     expect(service.seeks, isEmpty);
   });
 
+  testWidgets('a d-pad seek after an outside jump starts from where the jump landed', (tester) async {
+    // The seek bar pins its coalesced target so a slow backend cannot make the
+    // next press rebase off a stale position. OS media controls, a headset and
+    // the lock screen seek straight through the service, so that pin has to be
+    // retired when one of them moves the playhead (#1819).
+    final track = _track(id: 'one', title: 'First Track', album: 'First Album', year: 1973);
+    final service = _FakeMusicService(
+      track: track,
+      context: const MusicPlayContext(title: 'Queue', kind: MusicPlayContextKind.tracks),
+    );
+
+    await pumpNowPlaying(tester, service, isTv: true);
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+    await tester.pump();
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.arrowRight);
+    await tester.pump();
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.arrowRight);
+    await tester.pump();
+    expect(service.seeks, hasLength(1));
+    final step = service.seeks.single;
+    expect(step, greaterThan(Duration.zero));
+
+    service.emitPlayheadJump(const Duration(minutes: 2));
+    await tester.pump();
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.arrowRight);
+    await tester.pump();
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.arrowRight);
+    await tester.pump();
+
+    expect(
+      service.seeks.last,
+      const Duration(minutes: 2) + step,
+      reason: 'the step must build on the outside jump, not on the superseded pin',
+    );
+  });
+
   testWidgets('seek progress resets immediately when the track changes', (tester) async {
     final first = _track(id: 'one', title: 'First Track', album: 'First Album', year: 1973);
     final second = _track(id: 'two', title: 'Second Track', album: 'Second Album', year: 1999);
@@ -214,5 +333,22 @@ void main() {
     await tester.pump();
 
     expect(seekSlider().value, 0);
+  });
+
+  testWidgets('a failed native core is named, not printed as an exception class', (tester) async {
+    // The init sentinel deliberately carries no prose, so the default
+    // `toString()` path would put "PlayerInitializationException" in front of
+    // the user.
+    final service = _FakeMusicService(
+      track: _track(id: 'one', title: 'First Track', album: 'First Album', year: 1973),
+      context: const MusicPlayContext(title: 'Queue', kind: MusicPlayContextKind.tracks),
+    );
+
+    await pumpNowPlaying(tester, service, isTv: false);
+    service.emitError(const PlayerInitializationException());
+    await tester.pump();
+
+    expect(find.text(t.messages.playbackFailed), findsOneWidget);
+    expect(find.textContaining('PlayerInitializationException'), findsNothing);
   });
 }

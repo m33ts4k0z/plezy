@@ -1,5 +1,4 @@
 import '../i18n/strings.g.dart';
-import '../media/media_backend.dart';
 import '../media/media_item.dart';
 import '../media/media_kind.dart';
 import '../media/media_server_client.dart';
@@ -119,7 +118,6 @@ class MetadataEditDraft {
 }
 
 abstract class MetadataEditAdapter {
-  MediaBackend get backend;
   MediaServerClient get mediaClient;
 
   bool supportsKind(MediaKind kind);
@@ -145,6 +143,12 @@ abstract class MetadataEditAdapter {
     if (success) draft.acceptChanges();
     return success;
   }
+
+  /// Server-side suggestion values for a `stringList` field (e.g. the `label`
+  /// field's existing tags, `genre`'s genre list). Best-effort: backends
+  /// without a listing endpoint return empty and the UI falls back to
+  /// locally recorded recents.
+  Future<List<String>> fetchTagSuggestions(MetadataEditDraft draft, MetadataEditField field) async => const [];
 
   Future<List<MetadataArtworkOption>> fetchArtwork(MetadataEditDraft draft, MetadataEditField field);
 

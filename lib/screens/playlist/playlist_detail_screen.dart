@@ -6,19 +6,17 @@ import 'package:material_symbols_icons/symbols.dart';
 import '../../focus/focusable_action_bar.dart';
 import '../../media/library_query.dart';
 import '../../media/media_item.dart';
-import '../../media/media_kind.dart';
 import '../../media/media_playlist.dart';
 import '../../services/media_list_playback_launcher.dart';
-import '../../services/music/music_playback_service.dart';
 import '../../services/playlist_items_loader.dart';
 import '../../utils/app_logger.dart';
-import '../../utils/content_utils.dart';
 import '../../utils/error_message_utils.dart';
 import '../../utils/continuation_pagination_coordinator.dart';
 import '../../utils/music_navigation.dart';
 import '../../widgets/app_icon.dart';
 import '../../widgets/desktop_app_bar.dart';
 import '../../focus/dpad_navigator.dart';
+import '../../focus/dpad_select_long_press_controller.dart';
 import '../../focus/input_mode_tracker.dart';
 import '../../focus/key_event_utils.dart';
 import 'package:provider/provider.dart';
@@ -26,10 +24,9 @@ import 'playlist_item_card.dart';
 import '../../i18n/strings.g.dart';
 import '../../providers/download_provider.dart';
 import '../../utils/platform_detector.dart';
-import '../../utils/dialogs.dart';
 import '../../utils/download_utils.dart';
+import '../../utils/scroll_utils.dart';
 import '../../utils/snackbar_helper.dart';
-import '../../widgets/ios_status_bar_tap_scroll_to_top.dart';
 import '../../widgets/listenable_selector.dart';
 import '../base_media_list_detail_screen.dart';
 import '../focusable_detail_screen_mixin.dart';
@@ -76,9 +73,6 @@ class _PlaylistDetailScreenState extends BaseMediaListDetailScreen<PlaylistDetai
   /// now-playing) instead of the video play-queue launcher.
   bool get _isAudioPlaylist => widget.playlist.playlistType == 'audio';
 
-  MusicPlayContext get _musicPlayContext =>
-      MusicPlayContext(id: widget.playlist.id, title: widget.playlist.title, kind: MusicPlayContextKind.playlist);
-
   @override
   Future<void> playItems() => _isAudioPlaylist ? _playAudioPlaylist(shuffle: false) : super.playItems();
 
@@ -93,14 +87,15 @@ class _PlaylistDetailScreenState extends BaseMediaListDetailScreen<PlaylistDetai
       showAppSnackBar(context, emptyMessage);
       return;
     }
-    await playFetchedTracks(
+    await playAudioPlaylist(
       context,
-      fetch: () async => _isPlaylistFullyLoaded ? items : await fetchAllPlaylistItems(mediaClient, widget.playlist.id),
-      playContext: _musicPlayContext,
+      client: mediaClient,
+      playlist: widget.playlist,
+      shuffle: shuffle,
+      startTrack: startTrack,
+      preloadedItems: _isPlaylistFullyLoaded ? items : null,
       onError: (e, stackTrace) =>
           showErrorSnackBar(context, localizedLoadErrorMessage(e, stackTrace, context: widget.playlist.title)),
-      startTrack: startTrack,
-      shuffle: shuffle,
     );
   }
 
@@ -141,18 +136,6 @@ class _PlaylistDetailScreenState extends BaseMediaListDetailScreen<PlaylistDetai
     ];
   }
 
-  /// Synthesise a [MediaItem] view of the current playlist for the
-  /// download_utils helpers.
-  MediaItem _playlistAsMetadata() => MediaItem(
-    id: widget.playlist.id,
-    backend: widget.playlist.backend,
-    kind: MediaKind.playlist,
-    title: widget.playlist.title,
-    thumbPath: widget.playlist.thumbPath,
-    serverId: widget.playlist.serverId ?? mediaClient.serverId,
-    serverName: widget.playlist.serverName,
-  );
-
   // Focus management for regular (non-smart) reorderable lists
   final FocusNode _listFocusNode = FocusNode(debugLabel: 'playlist_list');
   final FocusNode _continuationRetryFocusNode = FocusNode(debugLabel: 'playlist_continuation_retry');
@@ -161,6 +144,17 @@ class _PlaylistDetailScreenState extends BaseMediaListDetailScreen<PlaylistDetai
   int _focusedIndex = 0;
   int _focusedColumn = 0; // 0=content, 1=drag handle, 2=remove button
   final ValueNotifier<int> _focusRevision = ValueNotifier<int>(0);
+
+  /// SELECT on the list node: short press activates the focused column, a
+  /// 500 ms hold opens the focused item's context menu (same gesture as a
+  /// [FocusableWrapper] card). The context-menu / gamepad-X key opens it too.
+  final _selectLongPress = DpadSelectLongPressController();
+
+  /// Cards are not focusable, so the list node reaches the focused item's
+  /// [MediaContextMenu] through its card state. Keyed by the same stable item
+  /// id as the row's [ValueKey] so a key follows its item through reorders
+  /// instead of being stolen between neighbouring rows.
+  final Map<String, GlobalKey<PlaylistItemCardState>> _cardKeys = {};
 
   void _notifyFocusChanged() => _focusRevision.value++;
 
@@ -183,12 +177,10 @@ class _PlaylistDetailScreenState extends BaseMediaListDetailScreen<PlaylistDetai
   bool get _canEditPlaylist => !_isReadOnly && _isPlaylistFullyLoaded;
   bool get _canMutatePlaylist => _canEditPlaylist && !_isPlaylistMutationPending;
 
-  // Estimated item height for scroll-into-view (card + vertical margins)
-  static const double _estimatedItemHeight = 114.0;
-
   @override
   void dispose() {
     _continuation.dispose();
+    _selectLongPress.dispose();
     _listFocusNode.dispose();
     _continuationRetryFocusNode.dispose();
     _focusRevision.dispose();
@@ -298,58 +290,21 @@ class _PlaylistDetailScreenState extends BaseMediaListDetailScreen<PlaylistDetai
     }
   }
 
-  Future<void> _downloadPlaylist() async {
-    final downloadProvider = Provider.of<DownloadProvider>(context, listen: false);
+  Future<void> _downloadPlaylist() => downloadPlaylist(
+    context,
+    client: mediaClient,
+    downloadProvider: Provider.of<DownloadProvider>(context, listen: false),
+    playlist: widget.playlist,
+  );
 
-    try {
-      final allItems = await fetchAllPlaylistItems(mediaClient, widget.playlist.id);
-      if (!mounted) return;
-      final result = await showListDownloadOptionsAndQueue(
-        context,
-        rootMetadata: _playlistAsMetadata(),
-        targetType: ContentTypes.playlist,
-        items: allItems,
-        client: mediaClient,
-        downloadProvider: downloadProvider,
-      );
-      if (result == null || !mounted) return;
-
-      showSuccessSnackBar(context, result.toSnackBarMessage());
-    } on CellularDownloadBlockedException {
-      if (mounted) {
-        showErrorSnackBar(context, t.settings.cellularDownloadBlocked);
-      }
-    } catch (e) {
-      if (mounted) {
-        showErrorSnackBar(context, t.messages.errorLoading(error: e.toString()));
-      }
-    }
-  }
-
-  Future<void> _deletePlaylist() async {
-    final confirmed = await showDeleteConfirmation(
-      context,
-      title: t.playlists.deleteConfirm,
-      message: t.playlists.deleteMessage(name: widget.playlist.title),
-    );
-
-    if (!confirmed || !mounted) return;
-
-    bool success = false;
-    try {
-      success = await mediaClient.deletePlaylist(widget.playlist);
-    } catch (e) {
-      appLogger.e('Failed to delete playlist', error: e);
-    }
-
-    if (!mounted) return;
-    if (success) {
-      showSuccessSnackBar(context, t.playlists.deleted);
-      Navigator.pop(context, true); // Signal the parent list to refresh.
-    } else {
-      showErrorSnackBar(context, t.playlists.errorDeleting);
-    }
-  }
+  Future<void> _deletePlaylist() => deletePlaylistWithConfirm(
+    context,
+    client: mediaClient,
+    playlist: widget.playlist,
+    confirmTitle: t.playlists.deleteConfirm,
+    // Signal the parent list to refresh.
+    onDeleted: () => Navigator.pop(context, true),
+  );
 
   /// The item that should sit immediately before the moved item at [newIndex],
   /// or null when moving to position 0. Pushes per-backend id-extraction down
@@ -454,6 +409,9 @@ class _PlaylistDetailScreenState extends BaseMediaListDetailScreen<PlaylistDetai
 
       if (!mounted) return;
       if (success) {
+        // The server's total shrank with the list; without this the loaded
+        // rows fall one short of the old total and editing locks.
+        _continuation.noteLoadedItemsRemoved();
         showSuccessSnackBar(context, t.playlists.itemRemoved);
         return;
       }
@@ -501,24 +459,12 @@ class _PlaylistDetailScreenState extends BaseMediaListDetailScreen<PlaylistDetai
     );
   }
 
-  /// Ensure the focused item is visible in the list using scroll arithmetic.
-  /// Uses estimated item height instead of per-item GlobalKeys.
+  /// Ensure the focused item is visible, measured from the laid-out rows so the
+  /// header sliver and real card heights are both accounted for.
   void _ensureFocusedVisible() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !scrollController.hasClients) return;
-      final targetOffset = _focusedIndex * _estimatedItemHeight;
-      final viewportHeight = scrollController.position.viewportDimension;
-      final currentOffset = scrollController.offset;
-
-      // Check if the item is outside the visible area (with some padding)
-      if (targetOffset < currentOffset || targetOffset > currentOffset + viewportHeight - _estimatedItemHeight) {
-        // Scroll so the item sits ~25% from the top of the viewport
-        final scrollTo = (targetOffset - viewportHeight * 0.25).clamp(
-          scrollController.position.minScrollExtent,
-          scrollController.position.maxScrollExtent,
-        );
-        scrollController.animateTo(scrollTo, duration: const Duration(milliseconds: 200), curve: Curves.easeOut);
-      }
+      scrollIndexIntoView(scrollController, _focusedIndex, duration: const Duration(milliseconds: 200));
     });
   }
 
@@ -538,6 +484,19 @@ class _PlaylistDetailScreenState extends BaseMediaListDetailScreen<PlaylistDetai
     });
     if (backResult != KeyEventResult.ignored) {
       return backResult;
+    }
+
+    // Navigation-mode SELECT needs the KeyUp too: the controller fires the
+    // column action on release and the context menu on a hold. Move-mode
+    // SELECT stays a one-shot confirm below; its trailing KeyUp lands here
+    // with no press in flight and is consumed without effect.
+    if (_movingIndex == null && key.isSelectKey) {
+      return _selectLongPress.handleKeyEvent(
+        event,
+        isOwnerActive: () => mounted,
+        onShortPress: _activateFocusedColumn,
+        onLongPress: _showContextMenuForFocusedItem,
+      );
     }
 
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
@@ -646,27 +605,48 @@ class _PlaylistDetailScreenState extends BaseMediaListDetailScreen<PlaylistDetai
           return KeyEventResult.handled;
         }
       }
-      if (key.isSelectKey) {
-        if (_focusedColumn == 0) {
-          // Play from this item
-          _playFromItem(_focusedIndex);
-        } else if (_focusedColumn == 1 && _canMutatePlaylist) {
-          // Enter move mode
-          setState(() {
-            _movingIndex = _focusedIndex;
-            _originalIndex = _focusedIndex;
-            _originalOrder = List.from(items);
-          });
-        } else if (_focusedColumn == 2 && _canMutatePlaylist) {
-          // Remove item
-          _removeItem(_focusedIndex);
-        }
+      if (key.isContextMenuKey) {
+        _showContextMenuForFocusedItem();
         return KeyEventResult.handled;
       }
     }
 
     return KeyEventResult.ignored;
   }
+
+  /// Short SELECT press in navigation mode: play, enter move mode or remove,
+  /// depending on the focused column.
+  void _activateFocusedColumn() {
+    if (_focusedColumn == 0) {
+      _playFromItem(_focusedIndex);
+    } else if (_focusedColumn == 1 && _canMutatePlaylist) {
+      // Enter move mode
+      setState(() {
+        _movingIndex = _focusedIndex;
+        _originalIndex = _focusedIndex;
+        _originalOrder = List.from(items);
+      });
+    } else if (_focusedColumn == 2 && _canMutatePlaylist) {
+      _removeItem(_focusedIndex);
+    }
+  }
+
+  /// Opens the focused row's [MediaContextMenu] (rate, watched state,
+  /// download, details, ...) — the same menu long-press and right-click reach
+  /// on the card. Whichever column is focused, the item is the same.
+  void _showContextMenuForFocusedItem() {
+    if (_focusedIndex < 0 || _focusedIndex >= items.length) return;
+    _cardKeys[_itemKeyId(items[_focusedIndex])]?.currentState?.showContextMenu();
+  }
+
+  /// Stable per-row identity shared by the reorderable list's [ValueKey] and
+  /// [_cardKeys]. Playlist entries can repeat a media id, so the playlist item
+  /// id wins when the backend exposes one.
+  String _itemKeyId(MediaItem item) => switch (item) {
+    PlexMediaItem(:final playlistItemId?) => 'p:$playlistItemId',
+    JellyfinMediaItem(:final playlistItemId?) => 'j:$playlistItemId',
+    _ => item.id,
+  };
 
   /// Cancel move mode if active, returns true if cancelled
   bool _cancelMoveMode() {
@@ -748,12 +728,13 @@ class _PlaylistDetailScreenState extends BaseMediaListDetailScreen<PlaylistDetai
             buildFocusableGrid(items: items, onRefresh: updateItem, shape: _isAudioPlaylist ? CardShape.square : null)
           else
             // Plex regular playlists: sliver reorderable list
-            _buildReorderableList(isKeyboardMode),
+            _buildReorderableList(),
           if (_continuation.isLoading || _continuation.error != null)
             ContinuationStatusSliver(
               error: _continuation.error,
               onRetry: _retryPlaylistContinuation,
               retryFocusNode: _continuationRetryFocusNode,
+              errorContext: widget.playlist.title,
               onNavigateUp: _isReadOnly ? navigateToGrid : _listFocusNode.requestFocus,
               onBack: handleBackFromContent,
             ),
@@ -768,7 +749,12 @@ class _PlaylistDetailScreenState extends BaseMediaListDetailScreen<PlaylistDetai
         focusNode: _listFocusNode,
         onKeyEvent: _handleListKeyEvent,
         onFocusChange: (hasFocus) {
-          if (hasFocus && mounted) {
+          if (!hasFocus) {
+            // A hold that opened the context menu never sees its KeyUp here.
+            _selectLongPress.reset();
+            return;
+          }
+          if (mounted) {
             setState(() {
               isAppBarFocused = false;
             });
@@ -789,26 +775,19 @@ class _PlaylistDetailScreenState extends BaseMediaListDetailScreen<PlaylistDetai
       },
       child: PrimaryScrollController(
         controller: scrollController,
-        child: IosStatusBarTapScrollToTop(
-          controller: scrollController,
-          child: Scaffold(body: scrollView),
-        ),
+        child: Scaffold(body: scrollView),
       ),
     );
   }
 
   /// Build a reorderable list for regular playlists with focus support
-  Widget _buildReorderableList(bool _) {
+  Widget _buildReorderableList() {
     return SliverReorderableList(
       onReorderItem: _onReorder,
       itemCount: items.length,
       itemBuilder: (context, index) {
         final item = items[index];
-        final keyId = switch (item) {
-          PlexMediaItem(:final playlistItemId?) => 'p:$playlistItemId',
-          JellyfinMediaItem(:final playlistItemId?) => 'j:$playlistItemId',
-          _ => item.id,
-        };
+        final keyId = _itemKeyId(item);
         return ListenableSelector<(bool, int?, bool)>(
           key: ValueKey(keyId),
           listenable: _focusRevision,
@@ -821,6 +800,7 @@ class _PlaylistDetailScreenState extends BaseMediaListDetailScreen<PlaylistDetai
             final isFocused = inKeyboardMode && focusState.$1;
             return RepaintBoundary(
               child: PlaylistItemCard(
+                key: _cardKeys.putIfAbsent(keyId, GlobalKey<PlaylistItemCardState>.new),
                 item: item,
                 index: index,
                 onRemove: _canMutatePlaylist ? () => _removeItem(index) : null,

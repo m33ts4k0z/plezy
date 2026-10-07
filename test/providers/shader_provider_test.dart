@@ -33,7 +33,6 @@ void main() {
       p.dispose();
     });
 
-
     test('setPreset persists, updates current/saved, and notifies', () async {
       final p = ShaderProvider();
       await Future.delayed(Duration.zero);
@@ -47,7 +46,6 @@ void main() {
       expect(p.isShaderEnabled, isTrue);
       expect(notified, 1);
 
-      // Verify persisted via the SettingsService directly.
       final svc = await SettingsService.getInstance();
       expect(svc.read(SettingsService.globalShaderPreset), ShaderPreset.nvscalerDefault.id);
 
@@ -68,7 +66,6 @@ void main() {
       expect(p.savedPreset, ShaderPreset.nvscalerDefault);
       expect(notified, 1);
 
-      // Same id → no notify.
       p.setCurrentPreset(ShaderPreset.none);
       expect(notified, 1);
 
@@ -91,7 +88,7 @@ void main() {
 
       await p.setPreset(saved);
       expect(p.savedPreset, saved);
-      expect(p.currentPreset, saved);
+      expect(p.currentPreset.id, saved.id);
 
       p.dispose();
     });
@@ -189,6 +186,54 @@ void main() {
       expect(identical(p.allPresets, ShaderPreset.allPresets), isTrue);
     });
 
+    test('deleting a scoped custom shader keeps the global default', () async {
+      final originalPathProvider = PathProviderPlatform.instance;
+      final root = await Directory.systemTemp.createTemp('plezy_shader_provider_test_');
+      PathProviderPlatform.instance = FakePathProvider(root);
+      addTearDown(() async {
+        PathProviderPlatform.instance = originalPathProvider;
+        if (await root.exists()) await root.delete(recursive: true);
+      });
+      final source = File(path.join(root.path, 'custom.glsl'))..writeAsStringSync('shader');
+      final p = ShaderProvider();
+      addTearDown(p.dispose);
+      await Future.delayed(Duration.zero);
+      await p.setPreset(ShaderPreset.nvscalerDefault);
+
+      final custom = await p.importCustomShader(source.path, 'Custom');
+      // Picked in the player for one scope only: current, never saved.
+      p.setCurrentPreset(custom);
+      await p.deleteCustomShader(custom);
+
+      final svc = await SettingsService.getInstance();
+      expect(svc.read(SettingsService.globalShaderPreset), ShaderPreset.nvscalerDefault.id);
+      expect(p.savedPreset, ShaderPreset.nvscalerDefault);
+      expect(p.currentPreset, ShaderPreset.none);
+    });
+
+    test('deleting the saved custom shader resets the global default', () async {
+      final originalPathProvider = PathProviderPlatform.instance;
+      final root = await Directory.systemTemp.createTemp('plezy_shader_provider_test_');
+      PathProviderPlatform.instance = FakePathProvider(root);
+      addTearDown(() async {
+        PathProviderPlatform.instance = originalPathProvider;
+        if (await root.exists()) await root.delete(recursive: true);
+      });
+      final source = File(path.join(root.path, 'custom.glsl'))..writeAsStringSync('shader');
+      final p = ShaderProvider();
+      addTearDown(p.dispose);
+      await Future.delayed(Duration.zero);
+
+      final custom = await p.importCustomShader(source.path, 'Custom');
+      await p.setPreset(custom);
+      await p.deleteCustomShader(custom);
+
+      final svc = await SettingsService.getInstance();
+      expect(svc.read(SettingsService.globalShaderPreset), ShaderPreset.none.id);
+      expect(p.savedPreset, ShaderPreset.none);
+      expect(p.currentPreset, ShaderPreset.none);
+    });
+
     test('filters unsafe persisted custom shader rows and invalid saved selection', () async {
       const valid = ShaderPreset(
         id: 'custom_ks9p7.glsl',
@@ -268,7 +313,6 @@ void main() {
       final p = ShaderProvider();
       await Future.delayed(Duration.zero);
       p.dispose();
-      // Should not throw — setPreset calls safeNotifyListeners under the hood.
       await p.setPreset(ShaderPreset.none);
     });
   });

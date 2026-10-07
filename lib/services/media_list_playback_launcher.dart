@@ -17,7 +17,9 @@ import '../utils/snackbar_helper.dart';
 import '../utils/video_player_navigation.dart';
 import 'jellyfin_sequential_launcher.dart';
 import 'play_queue_launcher.dart';
+import 'settings_service.dart';
 import '../widgets/dialog_action_button.dart';
+import '../utils/error_message_utils.dart';
 
 /// Result type for play queue launches. Same shape as the previous
 /// [PlexPlayQueueLauncher] result so existing call sites can keep their
@@ -127,9 +129,16 @@ abstract class MediaListPlaybackLauncher {
     return null;
   }
 
-  /// Show a loading dialog (when [showLoading] is true), invoke [execute],
+  /// Show a loading dialog (when [showLoading] is true), run [execute],
   /// dismiss the dialog, and translate exceptions into typed launch results.
   /// [actionLabel] feeds the failure-snackbar copy.
+  ///
+  /// The operation is started before the dialog's first frame is awaited, so
+  /// the spinner renders concurrently with the first network round trip
+  /// instead of in front of it. Dismissal still waits for the dialog to
+  /// mount (see [ScopedLoadingDialogController.dismiss]), so the dialog is
+  /// never popped before it exists and is dismissed exactly once on every
+  /// success and failure path.
   ///
   /// When [abort] is supplied, the loading route owns its lifecycle: Cancel,
   /// back, or scoped route disposal aborts the operation. Programmatic
@@ -150,61 +159,42 @@ abstract class MediaListPlaybackLauncher {
     AbortController? abort,
     required Future<PlayQueueResult> Function(Future<void> Function() dismissLoading) execute,
   }) async {
-    BuildContext? loadingDialogContext;
-    var loadingVisible = false;
-    Completer<void>? loadingDialogReady;
+    final loadingDialog = ScopedLoadingDialogController();
     final loadingOwner = abort == null ? null : _LoadingCancellationOwner(abort);
 
     if (showLoading) {
       if (!context.mounted) {
         abort?.abort();
       } else {
-        loadingVisible = true;
-        loadingDialogReady = Completer<void>();
-        unawaited(
-          showScopedDialog<void>(
-            context: context,
-            barrierDismissible: false,
-            builder: (dialogContext) {
-              loadingDialogContext = dialogContext;
-              if (!loadingDialogReady!.isCompleted) loadingDialogReady.complete();
-              return loadingOwner == null
-                  ? const Center(child: CircularProgressIndicator())
-                  : _CancellableLoadingDialog(owner: loadingOwner, actionLabel: actionLabel);
-            },
-          ).whenComplete(() {
-            loadingVisible = false;
-            if (!loadingDialogReady!.isCompleted) loadingDialogReady.complete();
-            loadingOwner?.cancel();
-          }),
+        loadingDialog.show(
+          context,
+          builder: (_) => loadingOwner == null
+              ? const Center(child: CircularProgressIndicator())
+              : _CancellableLoadingDialog(owner: loadingOwner, actionLabel: actionLabel),
+          onDisposed: () => loadingOwner?.cancel(),
         );
       }
     }
 
     Future<void> dismissLoading() async {
-      if (!showLoading || !loadingVisible) return;
-      // Complete before any early return: work can finish before the first
-      // dialog frame, and its eventual disposal must remain a success path.
+      if (!loadingDialog.isVisible) return;
+      // Complete before dismissing: work can finish before the first dialog
+      // frame, and the route's eventual disposal must remain a success path.
       loadingOwner?.complete();
-      final dialogContext = loadingDialogContext;
-      if (dialogContext == null) return;
-      if (!dialogContext.mounted) {
-        loadingVisible = false;
-        return;
-      }
-      // Only dismiss if the dialog is still the current route to avoid
-      // accidentally popping the player or the initiating screen.
-      final route = ModalRoute.of(dialogContext);
-      if (route?.isCurrent ?? false) {
-        Navigator.of(dialogContext).pop();
-      }
-      loadingVisible = false;
+      await loadingDialog.dismiss();
     }
 
     try {
-      await loadingDialogReady?.future;
       abort?.throwIfAborted();
-      final result = await execute(dismissLoading);
+      // Start the operation before waiting for the dialog's first frame so
+      // the first round trip overlaps the spinner's render.
+      final operationFuture = execute(dismissLoading);
+      // The await below still observes any failure; ignore() only keeps an
+      // error that lands before the dialog frame from being reported as
+      // unhandled.
+      operationFuture.ignore();
+      await loadingDialog.ready;
+      final result = await operationFuture;
       if (abort?.isAborted ?? false) return const PlayQueueCancelled();
 
       if (result is PlayQueueEmpty && context.mounted) {
@@ -218,14 +208,14 @@ abstract class MediaListPlaybackLauncher {
       }
       appLogger.e('Failed to $actionLabel', error: e);
       if (context.mounted) {
-        showErrorSnackBar(context, t.messages.failedPlayback(action: actionLabel, error: e.toString()));
+        showErrorSnackBar(context, t.messages.failedPlayback(action: actionLabel, error: localizedErrorReason(e)));
       }
       return PlayQueueError(e);
     } catch (e) {
       if (abort?.isAborted ?? false) return const PlayQueueCancelled();
       appLogger.e('Failed to $actionLabel', error: e);
       if (context.mounted) {
-        showErrorSnackBar(context, t.messages.failedPlayback(action: actionLabel, error: e.toString()));
+        showErrorSnackBar(context, t.messages.failedPlayback(action: actionLabel, error: localizedErrorReason(e)));
       }
       return PlayQueueError(e);
     } finally {
@@ -252,8 +242,26 @@ abstract class MediaListPlaybackLauncher {
       return PlayQueueError(RangeError.index(currentIndex, queue.items, 'currentIndex'));
     }
 
-    playbackState.setPlaybackFromLocalQueue(queue, contextKey: contextKey);
-    final itemToPlay = queue.items[currentIndex];
+    var itemToPlay = queue.items[currentIndex];
+    var queueToPublish = queue;
+    // Shuffle + "start at beginning" (#2303): strip the resume offset so
+    // external players — which read viewOffsetMs directly and cannot take an
+    // explicit start position — also open at 0:00. The built-in player
+    // applies the same override per item in resolveOpenResumePosition.
+    if (queue.shuffled && (itemToPlay.viewOffsetMs ?? 0) > 0) {
+      if ((await SettingsService.getInstance()).read(SettingsService.shuffleStartsFromBeginning)) {
+        itemToPlay = itemToPlay.copyWith(viewOffsetMs: 0);
+        // The published queue must hold the instance that is launched: queue
+        // membership is by identity (see isItemInActiveQueue), so launching a
+        // copy the queue does not hold would make the player drop the queue.
+        queueToPublish = LocalPlayQueue(
+          items: [...queue.items]..[currentIndex] = itemToPlay,
+          currentIndex: queue.currentIndex,
+          shuffled: queue.shuffled,
+        );
+      }
+    }
+    playbackState.setPlaybackFromLocalQueue(queueToPublish, contextKey: contextKey);
     if (navigateForTesting != null) {
       await navigateForTesting(itemToPlay);
     } else {

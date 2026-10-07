@@ -19,21 +19,17 @@ class TrackerSettingsToggle {
   final IconData icon;
   final String title;
   final String subtitle;
-  final FutureOr<void> Function(bool)? onAfterWrite;
 
-  const TrackerSettingsToggle({
-    required this.pref,
-    required this.icon,
-    required this.title,
-    required this.subtitle,
-    this.onAfterWrite,
-  });
+  const TrackerSettingsToggle({required this.pref, required this.icon, required this.title, required this.subtitle});
 }
 
 class TrackerAccountSettingsBody extends StatelessWidget {
   final Widget title;
   final String accountTitle;
   final String? accountSubtitle;
+
+  /// Service-specific rows shown under the account tile, in the same group.
+  final List<Widget> accountActions;
   final TrackerService service;
   final List<TrackerSettingsToggle> toggles;
   final FutureOr<void> Function() onDisconnect;
@@ -43,6 +39,7 @@ class TrackerAccountSettingsBody extends StatelessWidget {
     required this.title,
     required this.accountTitle,
     this.accountSubtitle,
+    this.accountActions = const [],
     required this.service,
     required this.toggles,
     required this.onDisconnect,
@@ -60,19 +57,14 @@ class TrackerAccountSettingsBody extends StatelessWidget {
               title: Text(accountTitle),
               subtitle: accountSubtitle != null ? Text(accountSubtitle!) : null,
             ),
+            ...accountActions,
           ],
         ),
         SettingsGroup(
           title: t.settings.behavior,
           children: [
             for (final toggle in toggles)
-              SettingSwitchTile(
-                pref: toggle.pref,
-                icon: toggle.icon,
-                title: toggle.title,
-                subtitle: toggle.subtitle,
-                onAfterWrite: toggle.onAfterWrite,
-              ),
+              SettingSwitchTile(pref: toggle.pref, icon: toggle.icon, title: toggle.title, subtitle: toggle.subtitle),
             SettingsBuilder(
               prefs: [SettingsService.trackerFilterModePref(service), SettingsService.trackerFilterIdsPref(service)],
               builder: (context) {

@@ -75,6 +75,14 @@ class KeyboardShortcutsScreen extends StatelessWidget {
   }
 
   Future<void> _resetShortcuts(BuildContext context) async {
+    final confirmed = await showConfirmDialog(
+      context,
+      title: t.settings.resetToDefault,
+      message: t.settings.resetShortcutsConfirm,
+      confirmText: t.common.reset,
+      isDestructive: true,
+    );
+    if (!confirmed || !context.mounted) return;
     await keyboardService.resetToDefaults();
     if (context.mounted) showSuccessSnackBar(context, t.settings.shortcutsReset);
   }
@@ -91,20 +99,17 @@ class KeyboardShortcutsScreen extends StatelessWidget {
           onHotKeyRecorded: (newHotkey) async {
             final navigator = Navigator.of(context);
 
-            if (newHotkey != null) {
-              final existingAction = keyboardService.getActionForHotkey(newHotkey);
-              if (existingAction != null && existingAction != actionId) {
-                navigator.pop();
-                showErrorSnackBar(
-                  screenContext,
-                  t.settings.shortcutAlreadyAssigned(action: keyboardService.getActionDisplayName(existingAction)),
-                );
-                return;
-              }
-            }
-
             try {
               await keyboardService.setHotkey(actionId, newHotkey);
+            } on HotkeyConflictException catch (error) {
+              if (context.mounted) navigator.pop();
+              if (screenContext.mounted) {
+                showErrorSnackBar(
+                  screenContext,
+                  t.settings.shortcutAlreadyAssigned(action: keyboardService.getActionDisplayName(error.action)),
+                );
+              }
+              return;
             } on PlatformException catch (error, stackTrace) {
               appLogger.e('Failed to update keyboard shortcut', error: error, stackTrace: stackTrace);
               if (screenContext.mounted) showErrorSnackBar(screenContext, t.common.error);

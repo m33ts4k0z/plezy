@@ -1,6 +1,10 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:plezy/models/trackers/tracker_context.dart';
 import 'package:plezy/providers/trackers_provider.dart';
 import 'package:plezy/services/base_shared_preferences_service.dart';
 import 'package:plezy/services/trackers/anilist/anilist_tracker.dart';
@@ -8,10 +12,13 @@ import 'package:plezy/services/trackers/tracker_account_store.dart';
 import 'package:plezy/services/trackers/tracker_constants.dart';
 import 'package:plezy/services/trackers/tracker_coordinator.dart';
 import 'package:plezy/services/trackers/tracker_session.dart';
+import 'package:plezy/services/trackers/tracker_write_queue.dart';
 import 'package:plezy/services/trackers/mal/mal_tracker.dart';
 import 'package:plezy/services/trackers/mdblist/mdblist_tracker.dart';
+import 'package:plezy/services/trackers/simkl/simkl_constants.dart';
 import 'package:plezy/services/trackers/simkl/simkl_tracker.dart';
 import 'package:plezy/services/trackers/trakt/trakt_tracker.dart';
+import 'package:plezy/utils/external_ids.dart';
 
 import '../test_helpers/io_fakes.dart';
 import '../test_helpers/prefs.dart';
@@ -43,6 +50,10 @@ TrackerSession _simkl({String? username}) => TrackerSession(
   username: username,
 );
 
+/// An AUTH V2 Simkl session, as every new sign-in now produces.
+TrackerSession _simklV2({String token = 'simkl_at_new'}) =>
+    TrackerSession(accessToken: token, refreshToken: 'simkl_rt_new', expiresAt: 2000000000, createdAt: 1900000000);
+
 TrackerSession _trakt({String? username}) => TrackerSession(
   accessToken: 'trakt-at',
   refreshToken: 'trakt-rt',
@@ -54,6 +65,24 @@ TrackerSession _trakt({String? username}) => TrackerSession(
 Future<void> _bindProfile(TrackersProvider provider, String? userUuid) async {
   await provider.onActiveProfileChanged(userUuid);
   await TrackerCoordinator.instance.flushWriteQueue();
+}
+
+/// A queued watched write for [service], as a failed live write would leave it.
+TrackerWriteQueueItem _queuedItem(TrackerService service) {
+  final ctx = TrackerContext.movie(
+    external: const ExternalIds(tmdb: 456),
+    anime: null,
+    ratingKey: 'movie-1',
+    libraryGlobalKey: 'server-1:8',
+  );
+  return TrackerWriteQueueItem(
+    service: service,
+    watched: true,
+    ctx: ctx,
+    coalesceKey: trackerItemCoalesceKey(service, ctx, trackerExternalRowIdentity(ctx.external))!,
+    progressClaim: null,
+    watchedAtIso: '2026-05-12T00:00:00.000Z',
+  );
 }
 
 void main() {
@@ -76,6 +105,7 @@ void main() {
       expect(p.isSimklConnected, isFalse);
       expect(p.isTraktConnected, isFalse);
       expect(p.isMdblistConnected, isFalse);
+      expect(p.mdblistCatalogClient, isNull);
       expect(p.malUsername, isNull);
       expect(p.anilistUsername, isNull);
       expect(p.simklUsername, isNull);
@@ -121,6 +151,7 @@ void main() {
       await _simklStore.save(uuid, _simkl(username: 'carol'));
       await _traktStore.save(uuid, _trakt(username: 'dave'));
 
+      await _mdblistStore.save(uuid, _session(TrackerService.mdblist, 'eve'));
       // Reset cached singletons so the provider reads fresh prefs state.
       BaseSharedPreferencesService.resetForTesting();
 
@@ -133,10 +164,13 @@ void main() {
       expect(p.isAnilistConnected, isTrue);
       expect(p.isSimklConnected, isTrue);
       expect(p.isTraktConnected, isTrue);
+      expect(p.isMdblistConnected, isTrue);
       expect(p.malUsername, 'alice');
       expect(p.anilistUsername, 'bob');
       expect(p.simklUsername, 'carol');
       expect(p.traktUsername, 'dave');
+      expect(p.mdblistUsername, 'eve');
+      expect(p.mdblistCatalogClient, same(MdblistTracker.instance.client));
       expect(notified, greaterThanOrEqualTo(1));
 
       p.dispose();
@@ -148,6 +182,7 @@ void main() {
       await _anilistStore.save(uuid, _anilist(username: 'bob'));
       await _simklStore.save(uuid, _simkl(username: 'carol'));
       await _traktStore.save(uuid, _trakt(username: 'dave'));
+      await _mdblistStore.save(uuid, _session(TrackerService.mdblist, 'eve'));
       BaseSharedPreferencesService.resetForTesting();
 
       final p = TrackersProvider();
@@ -159,6 +194,8 @@ void main() {
       expect(p.isAnilistConnected, isFalse);
       expect(p.isSimklConnected, isFalse);
       expect(p.isTraktConnected, isFalse);
+      expect(p.isMdblistConnected, isFalse);
+      expect(p.mdblistCatalogClient, isNull);
 
       p.dispose();
     });
@@ -216,6 +253,37 @@ void main() {
       expect(p.isAnilistConnected, isFalse);
       expect(p.isMalConnected, isTrue);
       expect(p.malUsername, 'alice');
+
+      p.dispose();
+    });
+
+    test('session invalidation purges the service queued writes so the next account cannot replay them', () async {
+      const uuid = 'profile-invalidated';
+      await _simklStore.save(uuid, _simkl(username: 'carol'));
+      BaseSharedPreferencesService.resetForTesting();
+
+      // Rows queued under the Simkl account about to be invalidated, plus a
+      // Trakt control row that must survive the purge.
+      final queue = TrackerWriteQueue();
+      await queue.enqueue(uuid, _queuedItem(TrackerService.simkl));
+      await queue.enqueue(uuid, _queuedItem(TrackerService.trakt));
+
+      final p = TrackersProvider();
+      await _bindProfile(p, uuid);
+      expect(p.isSimklConnected, isTrue);
+
+      // Fire the auth-failure teardown exactly as the client does on a 401.
+      SimklTracker.instance.client!.onSessionInvalidated();
+      expect(p.isSimklConnected, isFalse);
+      await pumpEventQueue();
+
+      // Account B connecting starts with a flush; nothing of A's may be waiting.
+      await TrackerCoordinator.instance.flushWriteQueue();
+      final survivors = await queue.load(uuid);
+      expect(survivors.map((item) => item.service), [
+        TrackerService.trakt,
+      ], reason: 'the invalidated service rows must not wait for the next account');
+      expect(await _simklStore.load(uuid), isNull);
 
       p.dispose();
     });
@@ -426,6 +494,156 @@ void main() {
       expect(staleProvider.mal, isNull);
       freshProvider.dispose();
     });
+
+    group('Simkl AUTH V2', () {
+      test('a refreshed Simkl session is persisted and published', () async {
+        const uuid = 'profile-simkl-refresh';
+        await _simklStore.save(uuid, _simklV2(token: 'simkl_at_old'));
+        BaseSharedPreferencesService.resetForTesting();
+
+        final p = TrackersProvider();
+        await _bindProfile(p, uuid);
+        var notified = 0;
+        p.addListener(() => notified++);
+
+        // Fire the refresh publication exactly as the client does.
+        SimklTracker.instance.client!.onSessionUpdated!(_simklV2());
+        await pumpEventQueue();
+
+        expect(p.simkl?.accessToken, 'simkl_at_new');
+        expect((await _simklStore.load(uuid))?.accessToken, 'simkl_at_new');
+        expect(notified, 1);
+        p.dispose();
+      });
+
+      test('disconnect clears locally, then revokes an AUTH V2 grant', () async {
+        const uuid = 'profile-simkl-revoke';
+        await _simklStore.save(uuid, _simklV2());
+        BaseSharedPreferencesService.resetForTesting();
+        final simkl = _SimklAccounts(const {});
+
+        final p = TrackersProvider.forTesting(
+          connectPipeline: _ControlledConnectPipeline(_mal()).call,
+          httpClientFactory: simkl.client,
+        );
+        await _bindProfile(p, uuid);
+        expect(p.isSimklLegacy, isFalse);
+
+        await p.disconnectSimkl();
+
+        expect(p.isSimklConnected, isFalse);
+        expect(await _simklStore.load(uuid), isNull);
+        final revoke = simkl.requests.single;
+        expect(revoke.url.toString(), SimklConstants.revokeUrl);
+        expect(revoke.bodyFields, {'client_id': SimklConstants.v2ClientId, 'token': 'simkl_rt_new'});
+        p.dispose();
+      });
+
+      test('disconnecting a legacy session sends nothing: AUTH V1 has no revoke', () async {
+        const uuid = 'profile-simkl-legacy-disconnect';
+        await _simklStore.save(uuid, _simkl(username: 'carol'));
+        BaseSharedPreferencesService.resetForTesting();
+        final simkl = _SimklAccounts(const {});
+
+        final p = TrackersProvider.forTesting(
+          connectPipeline: _ControlledConnectPipeline(_mal()).call,
+          httpClientFactory: simkl.client,
+        );
+        await _bindProfile(p, uuid);
+        expect(p.isSimklLegacy, isTrue);
+
+        await p.disconnectSimkl();
+
+        expect(p.isSimklConnected, isFalse);
+        expect(simkl.requests, isEmpty);
+        p.dispose();
+      });
+
+      test('reconnect only runs while a legacy session is bound', () async {
+        const uuid = 'profile-simkl-reconnect-guard';
+        var pipelineRuns = 0;
+        final p = TrackersProvider.forTesting(
+          connectPipeline:
+              ({required logLabel, required authorize, required enrich, required save, required assign}) async {
+                pipelineRuns++;
+                return true;
+              },
+        );
+        await _bindProfile(p, uuid);
+        expect(p.isSimklLegacy, isFalse);
+        expect(await p.reconnectSimkl(onCodeReady: (_) {}), isFalse);
+
+        await _simklStore.save(uuid, _simklV2());
+        BaseSharedPreferencesService.resetForTesting();
+        await _bindProfile(p, uuid);
+        expect(p.isSimklConnected, isTrue);
+        expect(p.isSimklLegacy, isFalse);
+        expect(await p.reconnectSimkl(onCodeReady: (_) {}), isFalse);
+
+        expect(pipelineRuns, 0);
+        p.dispose();
+      });
+
+      test('reconnecting to the same account replaces the session and keeps queued writes', () async {
+        const uuid = 'profile-simkl-reconnect-same';
+        await _simklStore.save(uuid, _simkl(username: 'carol'));
+        BaseSharedPreferencesService.resetForTesting();
+        final queue = TrackerWriteQueue();
+        await queue.enqueue(uuid, _queuedItem(TrackerService.simkl));
+        // Replay stays off so the kept row is observable rather than sent.
+        await SimklTracker.instance.setEnabled(false);
+        final simkl = _SimklAccounts({'simkl-at': 7, 'simkl_at_new': 7});
+
+        final p = TrackersProvider.forTesting(
+          connectPipeline: _enrichingPipeline(_simklV2()),
+          httpClientFactory: simkl.client,
+        );
+        await _bindProfile(p, uuid);
+        expect(p.isSimklLegacy, isTrue);
+
+        expect(await p.reconnectSimkl(onCodeReady: (_) {}), isTrue);
+        await TrackerCoordinator.instance.flushWriteQueue();
+
+        expect(simkl.settingsTokens, unorderedEquals(['simkl-at', 'simkl_at_new']));
+        expect(p.isSimklLegacy, isFalse);
+        expect(p.simkl?.accessToken, 'simkl_at_new');
+        expect(p.simklUsername, 'user-7');
+        expect(SimklTracker.instance.client?.session.accessToken, 'simkl_at_new');
+        expect((await _simklStore.load(uuid))?.accessToken, 'simkl_at_new');
+        expect((await queue.load(uuid)).map((item) => item.service), [TrackerService.simkl]);
+        p.dispose();
+      });
+
+      for (final (label, accounts) in [
+        ('a different account', <String, Object>{'simkl-at': 7, 'simkl_at_new': 8}),
+        ('an unverifiable account', <String, Object>{'simkl_at_new': 8}),
+      ]) {
+        test('reconnecting to $label purges the legacy queued writes', () async {
+          const uuid = 'profile-simkl-reconnect-other';
+          await _simklStore.save(uuid, _simkl(username: 'carol'));
+          BaseSharedPreferencesService.resetForTesting();
+          final queue = TrackerWriteQueue();
+          await queue.enqueue(uuid, _queuedItem(TrackerService.simkl));
+          await queue.enqueue(uuid, _queuedItem(TrackerService.trakt));
+          await SimklTracker.instance.setEnabled(false);
+          final simkl = _SimklAccounts(accounts);
+
+          final p = TrackersProvider.forTesting(
+            connectPipeline: _enrichingPipeline(_simklV2()),
+            httpClientFactory: simkl.client,
+          );
+          await _bindProfile(p, uuid);
+
+          expect(await p.reconnectSimkl(onCodeReady: (_) {}), isTrue);
+          await TrackerCoordinator.instance.flushWriteQueue();
+
+          expect(p.simkl?.accessToken, 'simkl_at_new');
+          expect(SimklTracker.instance.client?.session.accessToken, 'simkl_at_new');
+          expect((await queue.load(uuid)).map((item) => item.service), [TrackerService.trakt]);
+          p.dispose();
+        });
+      }
+    });
   });
 }
 
@@ -533,4 +751,44 @@ class _ControlledConnectPipeline {
     assign(session);
     return true;
   }
+}
+
+/// The production pipeline's step order with a scripted authorization, so the
+/// provider's own enrichment runs.
+TrackerSessionConnectPipeline _enrichingPipeline(TrackerSession authorized) =>
+    ({required logLabel, required authorize, required enrich, required save, required assign}) async {
+      final enriched = await enrich(authorized);
+      await save(enriched);
+      assign(enriched);
+      return true;
+    };
+
+/// Simkl's API as seen by the provider's short-lived clients: who each token
+/// belongs to, plus every request made.
+class _SimklAccounts {
+  _SimklAccounts(this.accountIdsByToken);
+
+  /// Tokens missing here answer 401. Only use legacy tokens for that: a V2
+  /// 401 would try a real refresh.
+  final Map<String, Object> accountIdsByToken;
+  final requests = <http.Request>[];
+
+  Iterable<String?> get settingsTokens => requests
+      .where((request) => request.url.path == '/users/settings')
+      .map((request) => request.headers['authorization']?.replaceFirst('Bearer ', ''));
+
+  http.Client client() => MockClient((request) async {
+    requests.add(request);
+    if (request.url.path != '/users/settings') return http.Response('', 200);
+    final token = request.headers['authorization']?.replaceFirst('Bearer ', '');
+    final id = accountIdsByToken[token];
+    if (id == null) return http.Response('', 401);
+    return http.Response(
+      json.encode({
+        'user': {'name': 'user-$id'},
+        'account': {'id': id},
+      }),
+      200,
+    );
+  });
 }

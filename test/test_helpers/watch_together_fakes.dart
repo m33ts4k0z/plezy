@@ -19,6 +19,7 @@ class FakeSyncPlayer implements Player {
     Duration duration = const Duration(minutes: 45),
     bool seekable = true,
     double rate = 1.0,
+    bool hasRenderedFrame = false,
   }) : _state = PlayerState(
          playing: playing,
          buffering: buffering,
@@ -26,6 +27,7 @@ class FakeSyncPlayer implements Player {
          duration: duration,
          seekable: seekable,
          rate: rate,
+         hasRenderedFrame: hasRenderedFrame,
        );
 
   PlayerState _state;
@@ -53,6 +55,7 @@ class FakeSyncPlayer implements Player {
   final _bufferingController = StreamController<bool>.broadcast();
   final _rateController = StreamController<double>.broadcast();
   final _playbackRestartController = StreamController<void>.broadcast();
+  final _fileStartedController = StreamController<void>.broadcast();
   final _durationController = StreamController<Duration>.broadcast();
 
   @override
@@ -80,6 +83,7 @@ class FakeSyncPlayer implements Player {
     audioDevices: const Stream<List<AudioDevice>>.empty(),
     bufferRanges: const Stream<List<BufferRange>>.empty(),
     playbackRestart: _playbackRestartController.stream,
+    fileStarted: _fileStartedController.stream,
     backendSwitched: const Stream<void>.empty(),
   );
 
@@ -123,7 +127,7 @@ class FakeSyncPlayer implements Player {
     nextCommandFuture = null;
     if (pending != null) await pending;
     _state = _state.copyWith(position: position);
-    if (emitRestartOnSeek) _playbackRestartController.add(null);
+    if (emitRestartOnSeek) emitPlaybackRestart();
   }
 
   @override
@@ -136,6 +140,20 @@ class FakeSyncPlayer implements Player {
     if (ignoreRateChanges || _state.rate == rate) return;
     _state = _state.copyWith(rate: rate);
     _rateController.add(rate);
+  }
+
+  /// Defaults to mpv so host-side cache tuning is exercised. Property writes
+  /// are recorded in [properties] rather than [commandLog], which is for
+  /// transport.
+  @override
+  String playerType = 'mpv';
+
+  final properties = <String, String>{};
+
+  @override
+  Future<void> setProperty(String name, String value) async {
+    _maybeThrow();
+    properties[name] = value;
   }
 
   /// Externally-caused playing transition (e.g. user pressed a media key).
@@ -158,8 +176,28 @@ class FakeSyncPlayer implements Player {
     _rateController.add(value);
   }
 
-  /// First frame rendered (after load).
-  void emitPlaybackRestart() => _playbackRestartController.add(null);
+  /// The screen asked the backend to open a replacement source and `open()`
+  /// resolved. Like the real player, the per-file facts reset here — before
+  /// the backend's `start-file` or anything else from the new file arrives.
+  void beginOpen() {
+    _state = _state.copyWith(completed: false, hasRenderedFrame: false);
+  }
+
+  /// The backend started a load (mpv `start-file`). Every real backend sends
+  /// this before the load's first frame, and the open outcome delimits an
+  /// attempt's signals by it; a fake `open` emits it before its restart.
+  /// Like the real player, the new file has rendered nothing yet.
+  void emitFileStarted() {
+    _state = _state.copyWith(hasRenderedFrame: false);
+    _fileStartedController.add(null);
+  }
+
+  /// First frame rendered (after load and after every seek). Like the real
+  /// player, the state records the fact before the event goes out.
+  void emitPlaybackRestart() {
+    _state = _state.copyWith(hasRenderedFrame: true);
+    _playbackRestartController.add(null);
+  }
 
   void emitDuration(Duration value) {
     _state = _state.copyWith(duration: value);
@@ -168,6 +206,12 @@ class FakeSyncPlayer implements Player {
 
   void setPosition(Duration position) {
     _state = _state.copyWith(position: position);
+  }
+
+  /// Seed the physical "current file rendered a frame" fact without an event,
+  /// for a binding made after the frame.
+  void setHasRenderedFrame(bool value) {
+    _state = _state.copyWith(hasRenderedFrame: value);
   }
 
   /// Advance the playhead as if [elapsed] of playback happened.
@@ -195,6 +239,7 @@ class FakeSyncPlayer implements Player {
     await _bufferingController.close();
     await _rateController.close();
     await _playbackRestartController.close();
+    await _fileStartedController.close();
     await _durationController.close();
   }
 

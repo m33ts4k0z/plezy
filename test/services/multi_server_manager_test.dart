@@ -25,6 +25,7 @@ import 'package:plezy/utils/active_client_scope.dart';
 import 'package:plezy/utils/device_identity.dart';
 
 import '../test_helpers/backend_client_fixtures.dart';
+import '../test_helpers/http_fixtures.dart';
 import '../test_helpers/prefs.dart';
 
 JellyfinConnection _jellyfinConnection(String userId) => testJellyfinConnection(
@@ -104,17 +105,8 @@ class _LoopbackJellyfinServer {
   }
 }
 
-// Coverage includes status and lifecycle changes, endpoint exhaustion,
-// in-place and fresh scoped Plex profile binding, endpoint persistence and
-// promotion ownership, connectivity monitoring/debounce teardown, Jellyfin
-// reuse/update, and selected registered-client health outcomes.
-
 void main() {
   setUp(resetSharedPreferencesForTest);
-
-  // ============================================================
-  // Initial state
-  // ============================================================
 
   group('initial state', () {
     test('a freshly constructed manager has no servers, clients, or status', () {
@@ -135,10 +127,6 @@ void main() {
       expect(m.isServerOnline(ServerId('nope')), isFalse);
     });
   });
-
-  // ============================================================
-  // updateServerStatus + status stream
-  // ============================================================
 
   group('updateServerStatus + statusStream', () {
     test('emits a snapshot when status flips for a tracked server', () async {
@@ -236,6 +224,31 @@ void main() {
 
       expect(manager.isServerOnline(ServerId('jf-machine')), isFalse);
       expect(manager.authErrorServerIds, {'jf-machine'});
+      expect(emitted, [
+        {'jf-machine': false},
+      ]);
+    });
+
+    test('an account refusal (403) is published as access denied, not as a sign-in prompt', () async {
+      final manager = MultiServerManager();
+      addTearDown(manager.dispose);
+      final client = testJellyfinClient(
+        connection: _jellyfinConnection('user-a'),
+        handler: (_) async => http.Response('', 403),
+      );
+      manager.debugRegisterJellyfinClientForTesting(client);
+
+      final emitted = <Map<String, bool>>[];
+      final sub = manager.statusStream.listen(emitted.add);
+      addTearDown(sub.cancel);
+
+      await manager.debugVerifyServerEndpointsExhaustedForTesting(ServerId('jf-machine'));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(manager.isServerOnline(ServerId('jf-machine')), isFalse);
+      expect(manager.accessDeniedServerIds, {'jf-machine'});
+      expect(manager.authErrorServerIds, isEmpty, reason: 'a new sign-in gets the same refusal');
+      // The server answered, so no endpoint failover or reconnection follows.
       expect(emitted, [
         {'jf-machine': false},
       ]);
@@ -386,9 +399,6 @@ void main() {
         return null;
       }
 
-      http.Response jsonResponse(Map<String, dynamic> body) =>
-          http.Response(jsonEncode(body), 200, headers: const {'content-type': 'application/json'});
-
       final client = PlexClient.forTesting(
         config: PlexConfig(
           baseUrl: 'https://plex.example',
@@ -466,6 +476,8 @@ void main() {
       expect(manager.authErrorServerIds, isNot(contains('server-1')));
       expect(client.config.token, 'new-token');
       expect(client.profileScopeId, buildPlexProfileScopeId(serverId: ServerId('server-1'), profileId: 'new-profile'));
+      // Live TV favorites are keyed by the owning account, not the device.
+      expect(client.plexAccountId, 'account-1');
       expect((await client.fetchLibraries()).map((library) => library.title), ['Fallback Movies']);
     });
 
@@ -569,50 +581,56 @@ void main() {
       expect(libraries.map((library) => library.title), ['Profile B Movies']);
     });
 
-    test('rejected refreshed Plex token remains offline and auth-failed', () async {
-      final db = AppDatabase.forTesting(NativeDatabase.memory());
-      PlexApiCache.initialize(db);
-      addTearDown(db.close);
+    for (final (status, refusal) in [(401, 'auth-failed'), (403, 'access-denied')]) {
+      test('refreshed Plex token rejected with $status remains offline and $refusal', () async {
+        final db = AppDatabase.forTesting(NativeDatabase.memory());
+        PlexApiCache.initialize(db);
+        addTearDown(db.close);
 
-      final client = PlexClient.forTesting(
-        config: PlexConfig(
-          baseUrl: 'https://plex.example',
-          token: 'old-token',
-          clientIdentifier: 'client-id',
-          product: 'Plezy',
-          version: '1.0.0',
-        ),
-        serverId: ServerId('server-1'),
-        profileScopeId: buildPlexProfileScopeId(serverId: ServerId('server-1'), profileId: 'old-profile'),
-        serverName: 'Plex',
-        httpClient: MockClient((request) async {
-          expect(request.url.path, '/');
-          return http.Response('rejected', 401);
-        }),
-      );
-      final manager = MultiServerManager();
-      addTearDown(manager.dispose);
-      manager.debugRegisterClientForTesting(client, online: true);
-
-      final bound = await manager.refreshTokensForProfile(
-        _plexAccount('account-1', [
-          PlexServer(
-            name: 'Plex',
-            clientIdentifier: 'server-1',
-            accessToken: 'rejected-token',
-            connections: const [],
-            owned: true,
+        final client = PlexClient.forTesting(
+          config: PlexConfig(
+            baseUrl: 'https://plex.example',
+            token: 'old-token',
+            clientIdentifier: 'client-id',
+            product: 'Plezy',
+            version: '1.0.0',
           ),
-        ]),
-        profileId: 'profile-b',
-      );
+          serverId: ServerId('server-1'),
+          profileScopeId: buildPlexProfileScopeId(serverId: ServerId('server-1'), profileId: 'old-profile'),
+          serverName: 'Plex',
+          httpClient: MockClient((request) async {
+            expect(request.url.path, '/');
+            return http.Response('rejected', status);
+          }),
+        );
+        final manager = MultiServerManager();
+        addTearDown(manager.dispose);
+        manager.debugRegisterClientForTesting(client, online: true);
 
-      expect(bound, isEmpty);
-      expect(manager.isServerOnline(ServerId('server-1')), isFalse);
-      expect(manager.authErrorServerIds, contains('server-1'));
-      expect(client.config.token, 'old-token');
-      expect(client.profileScopeId, buildPlexProfileScopeId(serverId: ServerId('server-1'), profileId: 'old-profile'));
-    });
+        final bound = await manager.refreshTokensForProfile(
+          _plexAccount('account-1', [
+            PlexServer(
+              name: 'Plex',
+              clientIdentifier: 'server-1',
+              accessToken: 'rejected-token',
+              connections: const [],
+              owned: true,
+            ),
+          ]),
+          profileId: 'profile-b',
+        );
+
+        expect(bound, isEmpty);
+        expect(manager.isServerOnline(ServerId('server-1')), isFalse);
+        expect(status == 401 ? manager.authErrorServerIds : manager.accessDeniedServerIds, contains('server-1'));
+        expect(status == 401 ? manager.accessDeniedServerIds : manager.authErrorServerIds, isEmpty);
+        expect(client.config.token, 'old-token');
+        expect(
+          client.profileScopeId,
+          buildPlexProfileScopeId(serverId: ServerId('server-1'), profileId: 'old-profile'),
+        );
+      });
+    }
 
     test('required Plex probe rejects a different server identity without committing the candidate', () async {
       final db = AppDatabase.forTesting(NativeDatabase.memory());
@@ -881,7 +899,7 @@ void main() {
     });
 
     test(
-      'connectivity monitoring is lazy, singular, ignores none, and coalesces connected events for two seconds',
+      'connectivity monitoring is lazy, singular, and coalesces every change, none included, for two seconds',
       () async {
         await _prepareFreshPlexManagerTest();
         final endpoint = _plexEndpoint('monitor');
@@ -913,19 +931,17 @@ void main() {
         expect(factory.calls, hasLength(1));
 
         fakeAsync((async) {
+          // Losing the network re-probes like any other change: it is how an
+          // unreachable server gets marked offline (#2505). A burst of changes
+          // still coalesces into one pass.
           connectivity.add([ConnectivityResult.none]);
-          async.flushMicrotasks();
-          async.elapse(const Duration(seconds: 3));
-          async.flushMicrotasks();
-          expect(server.discoveryCalls, 1);
-          expect(factory.requests['monitor-server']!.map((request) => request.url.path), ['/', '/media/providers']);
-
           connectivity.add([ConnectivityResult.wifi]);
           connectivity.add([ConnectivityResult.mobile]);
           async.flushMicrotasks();
           async.elapse(const Duration(milliseconds: 1999));
           async.flushMicrotasks();
           expect(server.discoveryCalls, 1);
+          expect(factory.requests['monitor-server']!.map((request) => request.url.path), ['/', '/media/providers']);
           async.elapse(const Duration(milliseconds: 1));
           async.flushMicrotasks();
 
@@ -935,6 +951,19 @@ void main() {
             '/media/providers',
             '/',
           ]);
+
+          connectivity.add([ConnectivityResult.none]);
+          async.flushMicrotasks();
+          async.elapse(const Duration(seconds: 2));
+          async.flushMicrotasks();
+
+          expect(server.discoveryCalls, 3);
+          expect(factory.requests['monitor-server']!.map((request) => request.url.path), [
+            '/',
+            '/media/providers',
+            '/',
+            '/',
+          ]);
           expect(connectivity.cancelCount, 0);
         });
 
@@ -942,6 +971,159 @@ void main() {
         expect(connectivity.cancelCount, 1);
       },
     );
+
+    test('losing the network keeps a reachable server online and drops an unreachable one (#2505)', () async {
+      final previousHttpOverrides = HttpOverrides.current;
+      HttpOverrides.global = null;
+      addTearDown(() => HttpOverrides.global = previousHttpOverrides);
+      final loopback = await _LoopbackJellyfinServer.start(machineId: 'jf-loopback');
+      final remote = await _LoopbackJellyfinServer.start(machineId: 'jf-remote');
+      addTearDown(loopback.close);
+      addTearDown(remote.close);
+      final connectivity = _DirectConnectivityStream();
+      final manager = MultiServerManager(
+        connectivityChanges: () => connectivity,
+        connectivityDebounceDuration: Duration.zero,
+      );
+      addTearDown(manager.dispose);
+
+      expect(
+        await manager.addJellyfinConnection(
+          testJellyfinConnection(machineId: 'jf-loopback', baseUrl: loopback.baseUrl),
+        ),
+        isTrue,
+      );
+      expect(
+        await manager.addJellyfinConnection(testJellyfinConnection(machineId: 'jf-remote', baseUrl: remote.baseUrl)),
+        isTrue,
+      );
+      expect(connectivity.listenCount, 1);
+
+      // The adapter goes down: the remote server loses its route, the
+      // loopback one does not, and connectivity_plus reports `none`.
+      await remote.close();
+      final remoteDropped = manager.statusStream.firstWhere((status) => status['jf-remote'] == false);
+      connectivity.add(const [ConnectivityResult.none]);
+      await remoteDropped.timeout(const Duration(seconds: 5));
+
+      expect(manager.isServerOnline(ServerId('jf-remote')), isFalse);
+      expect(manager.isServerOnline(ServerId('jf-loopback')), isTrue);
+    });
+
+    test('a server recovered by a health probe is re-probed when the network drops (#2505)', () async {
+      var reachable = true;
+      final client = JellyfinClient.forTesting(
+        connection: _jellyfinConnection('user-a'),
+        httpClient: MockClient((_) async {
+          if (!reachable) throw const SocketException('Connection refused');
+          return http.Response(
+            '{"Policy":{"IsAdministrator":false}}',
+            200,
+            headers: {'content-type': 'application/json'},
+          );
+        }),
+      );
+      addTearDown(client.close);
+      final connectivity = _DirectConnectivityStream();
+      final manager = MultiServerManager(
+        connectivityChanges: () => connectivity,
+        connectivityDebounceDuration: Duration.zero,
+      );
+      addTearDown(manager.dispose);
+
+      // The session started with the server unreachable, so no bind brought
+      // it online; the Reconnect / resume health probe does.
+      manager.debugRegisterJellyfinClientForTesting(client, online: false);
+      await manager.checkServerHealth();
+      expect(manager.isServerOnline(ServerId('jf-machine')), isTrue);
+
+      reachable = false;
+      final dropped = manager.statusStream.firstWhere((status) => status['jf-machine'] == false);
+      connectivity.add(const [ConnectivityResult.none]);
+      await dropped.timeout(const Duration(seconds: 5));
+
+      expect(manager.isServerOnline(ServerId('jf-machine')), isFalse);
+    });
+
+    test('a Plex client that connects after the timeout is closed instead of leaked', () async {
+      await _prepareFreshPlexManagerTest();
+      final endpoint = _plexEndpoint('late');
+      final server = _ControlledPlexServer(
+        serverId: 'late-server',
+        endpoints: [endpoint],
+        discoveryStreams: [() => Stream.value(endpoint)],
+      );
+      final release = Completer<void>();
+      final transport = _CloseRecordingHttpClient();
+      PlexClient? lateClient;
+      final manager = MultiServerManager(
+        connectivityChanges: () => const Stream.empty(),
+        plexClientFactory:
+            (
+              config, {
+              required serverId,
+              required profileScopeId,
+              serverName,
+              prioritizedEndpoints,
+              onEndpointChanged,
+              onAllEndpointsExhausted,
+              seedTranscoderVideoSupport,
+            }) async {
+              await release.future;
+              return lateClient = PlexClient.forTesting(
+                config: config,
+                serverId: serverId,
+                profileScopeId: profileScopeId,
+                httpClient: transport,
+              );
+            },
+      );
+      addTearDown(manager.dispose);
+
+      final bound = await manager.refreshTokensForProfile(
+        _plexAccount('late-account', [server]),
+        profileId: 'profile-a',
+        timeout: const Duration(milliseconds: 10),
+      );
+      expect(bound, isEmpty);
+      expect(manager.isServerOnline(ServerId('late-server')), isFalse);
+
+      release.complete();
+      await pumpEventQueue(times: 20);
+
+      expect(lateClient, isNotNull);
+      expect(manager.getClient(ServerId('late-server')), isNull);
+      expect(transport.closed, isTrue);
+    });
+
+    test('an offline client of another profile is dropped when this profile cannot connect', () async {
+      await _prepareFreshPlexManagerTest();
+      final server = _ControlledPlexServer(
+        serverId: 'server-1',
+        endpoints: [_plexEndpoint('down')],
+        discoveryStreams: [],
+      );
+      final transport = _CloseRecordingHttpClient();
+      final previous = testPlexClient(
+        serverId: ServerId('server-1'),
+        profileScopeId: buildPlexProfileScopeId(serverId: ServerId('server-1'), profileId: 'profile-a'),
+        httpClient: transport,
+      );
+      final manager = MultiServerManager(connectivityChanges: () => const Stream.empty());
+      addTearDown(manager.dispose);
+      manager.debugRegisterClientForTesting(previous, online: false);
+
+      final bound = await manager.refreshTokensForProfile(_plexAccount('account', [server]), profileId: 'profile-b');
+      await pumpEventQueue();
+
+      expect(bound, isEmpty);
+      expect(manager.getClient(ServerId('server-1')), isNull);
+      expect(transport.closed, isTrue);
+      // Still registered — for profile B, so a reconnect retries it with B's token.
+      expect(manager.registeredServerIds, ['server-1']);
+      expect(manager.isRegisteredForOtherProfile(ServerId('server-1'), profileId: 'profile-b'), isFalse);
+      expect(manager.isRegisteredForOtherProfile(ServerId('server-1'), profileId: 'profile-a'), isTrue);
+    });
 
     test('dispose cancels a pending connectivity debounce with no later mutation', () async {
       final storage = await _prepareFreshPlexManagerTest();
@@ -978,6 +1160,304 @@ void main() {
         expect(manager.serverIds, isEmpty);
         expect(manager.onlineServerIds, isEmpty);
       });
+    });
+  });
+
+  group('checkServerHealth', () {
+    test('a probe result from a client replaced mid-probe is not applied', () async {
+      final probeStarted = Completer<void>();
+      final original = testPlexClient(
+        serverId: ServerId('server-1'),
+        handler: (_) async {
+          if (!probeStarted.isCompleted) probeStarted.complete();
+          await Completer<void>().future;
+          throw StateError('unreachable');
+        },
+      );
+      final replacement = testPlexClient(serverId: ServerId('server-1'));
+      final manager = MultiServerManager();
+      addTearDown(manager.dispose);
+      manager.debugRegisterClientForTesting(original);
+
+      final health = manager.checkServerHealth();
+      await probeStarted.future;
+      // A profile switch: the old client is removed (aborting its probe) and
+      // the new profile's client is bound under the same server id.
+      manager.removeServer(ServerId('server-1'));
+      manager.debugRegisterClientForTesting(replacement);
+      await health;
+
+      expect(manager.getClient(ServerId('server-1')), same(replacement));
+      expect(manager.isServerOnline(ServerId('server-1')), isTrue);
+    });
+  });
+
+  group('relay endpoint handling', () {
+    test('a relay phase-1 winner is never persisted; a later direct promotion is', () async {
+      final storage = await _prepareFreshPlexManagerTest();
+      final direct = _plexEndpoint('direct');
+      final relay = _plexRelayEndpoint('relay');
+      final discoveries = StreamController<PlexConnection>(sync: true);
+      final server = _ControlledPlexServer(
+        serverId: 'relay-server',
+        endpoints: [direct, relay],
+        discoveryStreams: [() => discoveries.stream],
+      );
+      final factory = _RecordingPlexFactory();
+      final manager = MultiServerManager(
+        plexClientFactory: factory.create,
+        connectivityChanges: () => const Stream.empty(),
+      );
+      addTearDown(manager.dispose);
+      addTearDown(discoveries.close);
+
+      final refresh = manager.refreshTokensForProfile(_plexAccount('relay-account', [server]), profileId: 'profile-a');
+      await pumpEventQueue();
+      discoveries.add(relay);
+      expect(await refresh, {'relay-server'});
+      await pumpEventQueue();
+
+      final client = factory.clients['relay-server']!;
+      expect(client.config.baseUrl, relay.uri);
+      expect(client.plexAccountId, 'relay-account');
+      expect(storage.getServerEndpoint(ServerId('relay-server')), isNull);
+      expect(manager.debugHasPendingRelayEscapeForTesting(ServerId('relay-server')), isTrue);
+
+      discoveries.add(direct);
+      await discoveries.close();
+      await pumpEventQueue(times: 20);
+
+      expect(client.config.baseUrl, direct.uri);
+      expect(storage.getServerEndpoint(ServerId('relay-server')), direct.uri);
+      expect(manager.debugHasPendingRelayEscapeForTesting(ServerId('relay-server')), isFalse);
+    });
+
+    test('failover onto a relay endpoint never overwrites the preferred endpoint', () async {
+      final storage = await _prepareFreshPlexManagerTest();
+      final direct = _plexEndpoint('failover-direct');
+      final relay = _plexRelayEndpoint('failover-relay');
+      final server = _ControlledPlexServer(
+        serverId: 'failover-server',
+        endpoints: [direct, relay],
+        discoveryStreams: [() => Stream.value(direct)],
+      );
+      final factory = _RecordingPlexFactory();
+      final manager = MultiServerManager(
+        plexClientFactory: factory.create,
+        connectivityChanges: () => const Stream.empty(),
+      );
+      addTearDown(manager.dispose);
+
+      expect(
+        await manager.refreshTokensForProfile(_plexAccount('failover-account', [server]), profileId: 'profile-a'),
+        {'failover-server'},
+      );
+      await pumpEventQueue(times: 20);
+      expect(storage.getServerEndpoint(ServerId('failover-server')), direct.uri);
+
+      // Mid-session failover walks onto the relay candidate: the client may
+      // use it, but it must not become the next bind's head-start endpoint.
+      final onEndpointChanged = factory.calls.single.endpointChanged!;
+      await onEndpointChanged(relay.uri);
+      expect(storage.getServerEndpoint(ServerId('failover-server')), direct.uri);
+
+      // Reverse rotation (PR #1974 review): a profile refresh rotates the
+      // relay URI away, then the old relay URL reports a late failover
+      // switch. The live server no longer lists it — the custom-hostname
+      // fallback alone would classify it as remote — but the connect-time
+      // capture still recognizes it as relay.
+      final rotated = _ControlledPlexServer(
+        serverId: 'failover-server',
+        endpoints: [direct, _plexRelayEndpoint('rotated-relay')],
+        discoveryStreams: [() => Stream.value(direct)],
+      );
+      expect(
+        await manager.refreshTokensForProfile(_plexAccount('failover-account', [rotated]), profileId: 'profile-a'),
+        {'failover-server'},
+      );
+      await onEndpointChanged(relay.uri);
+      expect(storage.getServerEndpoint(ServerId('failover-server')), direct.uri);
+    });
+
+    test('a relay session re-probes on backoff and promotes a returning direct endpoint', () async {
+      final storage = await _prepareFreshPlexManagerTest();
+      final direct = _plexEndpoint('escape-direct');
+      final relay = _plexRelayEndpoint('escape-relay');
+      final server = _ControlledPlexServer(
+        serverId: 'escape-server',
+        endpoints: [direct, relay],
+        discoveryStreams: [
+          () => Stream.value(relay), // bind: only relay answers
+          () => Stream.value(relay), // first escape probe: still relay-only
+          () => Stream.value(direct), // second escape probe: direct is back
+        ],
+      );
+      final factory = _RecordingPlexFactory();
+      final manager = MultiServerManager(
+        plexClientFactory: factory.create,
+        connectivityChanges: () => const Stream.empty(),
+      );
+      addTearDown(manager.dispose);
+
+      expect(await manager.refreshTokensForProfile(_plexAccount('escape-account', [server]), profileId: 'profile-a'), {
+        'escape-server',
+      });
+      await pumpEventQueue(times: 20);
+      final client = factory.clients['escape-server']!;
+      expect(client.config.baseUrl, relay.uri);
+      expect(server.discoveryCalls, 1);
+      expect(manager.debugHasPendingRelayEscapeForTesting(ServerId('escape-server')), isTrue);
+
+      fakeAsync((async) {
+        // Fire the bind-scheduled probe (its real timer lives outside this zone).
+        unawaited(manager.debugFireRelayEscapeForTesting(ServerId('escape-server')));
+        async.flushMicrotasks();
+        expect(server.discoveryCalls, 2);
+        expect(client.config.baseUrl, relay.uri);
+
+        // Still relay-only: rescheduled with a doubled backoff (30s -> 60s).
+        async.elapse(const Duration(seconds: 60) - const Duration(milliseconds: 1));
+        async.flushMicrotasks();
+        expect(server.discoveryCalls, 2);
+        async.elapse(const Duration(milliseconds: 1));
+        async.flushMicrotasks();
+
+        expect(server.discoveryCalls, 3);
+        expect(client.config.baseUrl, direct.uri);
+        expect(storage.getServerEndpoint(ServerId('escape-server')), direct.uri);
+        expect(manager.debugHasPendingRelayEscapeForTesting(ServerId('escape-server')), isFalse);
+
+        // Off relay: the prober stays stopped.
+        async.elapse(const Duration(minutes: 10));
+        async.flushMicrotasks();
+        expect(server.discoveryCalls, 3);
+      });
+    });
+
+    test('removing a relay-connected server cancels its escape prober', () async {
+      await _prepareFreshPlexManagerTest();
+      final relay = _plexRelayEndpoint('removed-relay');
+      final server = _ControlledPlexServer(
+        serverId: 'removed-server',
+        endpoints: [_plexEndpoint('removed-direct'), relay],
+        discoveryStreams: [() => Stream.value(relay)],
+      );
+      final factory = _RecordingPlexFactory();
+      final manager = MultiServerManager(
+        plexClientFactory: factory.create,
+        connectivityChanges: () => const Stream.empty(),
+      );
+      addTearDown(manager.dispose);
+
+      expect(await manager.refreshTokensForProfile(_plexAccount('removed-account', [server]), profileId: 'profile-a'), {
+        'removed-server',
+      });
+      await pumpEventQueue(times: 20);
+      expect(manager.debugHasPendingRelayEscapeForTesting(ServerId('removed-server')), isTrue);
+
+      manager.removeServer(ServerId('removed-server'));
+      expect(manager.debugHasPendingRelayEscapeForTesting(ServerId('removed-server')), isFalse);
+      expect(server.discoveryCalls, 1);
+    });
+  });
+
+  group('reoptimizeDemotedServers', () {
+    test('re-races a server sitting on remote while it publishes a local connection', () async {
+      final storage = await _prepareFreshPlexManagerTest();
+      final local = _plexEndpoint('demoted-local');
+      final remote = _plexRemoteEndpoint('demoted-remote');
+      final server = _ControlledPlexServer(
+        serverId: 'demoted-server',
+        endpoints: [local, remote],
+        discoveryStreams: [
+          () => Stream.value(remote), // bind: LAN was unreachable
+          () => Stream.value(local), // resume: LAN is back
+        ],
+      );
+      final factory = _RecordingPlexFactory();
+      final manager = MultiServerManager(
+        plexClientFactory: factory.create,
+        connectivityChanges: () => const Stream.empty(),
+      );
+      addTearDown(manager.dispose);
+
+      expect(await manager.refreshTokensForProfile(_plexAccount('demoted-account', [server]), profileId: 'profile-a'), {
+        'demoted-server',
+      });
+      await pumpEventQueue(times: 20);
+      final client = factory.clients['demoted-server']!;
+      expect(client.config.baseUrl, remote.uri);
+      expect(storage.getServerEndpoint(ServerId('demoted-server')), remote.uri);
+      expect(server.discoveryCalls, 1);
+
+      await manager.reoptimizeDemotedServers(reason: 'resume');
+      await pumpEventQueue(times: 20);
+
+      expect(server.discoveryCalls, 2);
+      expect(client.config.baseUrl, local.uri);
+      expect(storage.getServerEndpoint(ServerId('demoted-server')), local.uri);
+
+      // Back on local: a second resume is a no-op.
+      await manager.reoptimizeDemotedServers(reason: 'resume');
+      expect(server.discoveryCalls, 2);
+    });
+
+    test('leaves alone a server on local and a remote-only server', () async {
+      await _prepareFreshPlexManagerTest();
+      final onLocal = _ControlledPlexServer(
+        serverId: 'on-local',
+        endpoints: [_plexEndpoint('on-local-lan'), _plexRemoteEndpoint('on-local-wan')],
+        discoveryStreams: [() => Stream.value(_plexEndpoint('on-local-lan'))],
+      );
+      final remoteOnly = _ControlledPlexServer(
+        serverId: 'remote-only',
+        endpoints: [_plexRemoteEndpoint('remote-only-wan')],
+        discoveryStreams: [() => Stream.value(_plexRemoteEndpoint('remote-only-wan'))],
+      );
+      final factory = _RecordingPlexFactory();
+      final manager = MultiServerManager(
+        plexClientFactory: factory.create,
+        connectivityChanges: () => const Stream.empty(),
+      );
+      addTearDown(manager.dispose);
+
+      expect(
+        await manager.refreshTokensForProfile(_plexAccount('mixed-account', [onLocal, remoteOnly]), profileId: 'p'),
+        {'on-local', 'remote-only'},
+      );
+      await pumpEventQueue(times: 20);
+
+      await manager.reoptimizeDemotedServers(reason: 'resume');
+
+      expect(onLocal.discoveryCalls, 1);
+      expect(remoteOnly.discoveryCalls, 1);
+    });
+
+    test('skips offline servers — the reconnect path owns those', () async {
+      await _prepareFreshPlexManagerTest();
+      final local = _plexEndpoint('offline-lan');
+      final remote = _plexRemoteEndpoint('offline-wan');
+      final server = _ControlledPlexServer(
+        serverId: 'offline-server',
+        endpoints: [local, remote],
+        discoveryStreams: [() => Stream.value(remote)],
+      );
+      final factory = _RecordingPlexFactory();
+      final manager = MultiServerManager(
+        plexClientFactory: factory.create,
+        connectivityChanges: () => const Stream.empty(),
+      );
+      addTearDown(manager.dispose);
+
+      expect(await manager.refreshTokensForProfile(_plexAccount('offline-account', [server]), profileId: 'p'), {
+        'offline-server',
+      });
+      await pumpEventQueue(times: 20);
+      manager.updateServerStatus(ServerId('offline-server'), false);
+
+      await manager.reoptimizeDemotedServers(reason: 'resume');
+
+      expect(server.discoveryCalls, 1);
     });
   });
 
@@ -1242,7 +1722,7 @@ void main() {
 
       expect(m.getClient(ServerId('jf-machine')), same(userB));
       expect(m.isServerOnline(ServerId('jf-machine')), isTrue);
-      expect(m.authErrorServerIds, isNot(contains('jf-machine')));
+      expect(m.refusedServerIds, isNot(contains('jf-machine')));
     });
   });
 
@@ -1436,10 +1916,6 @@ void main() {
     });
   });
 
-  // ============================================================
-  // addJellyfinConnection reuse
-  // ============================================================
-
   group('addJellyfinConnection reuse', () {
     // The reuse branch is what keeps a passive rebind (re-adding the same
     // persisted connection) from tearing down a live client and aborting its
@@ -1543,10 +2019,6 @@ void main() {
     });
   });
 
-  // ============================================================
-  // removeServer
-  // ============================================================
-
   group('removeServer', () {
     test('removes a tracked server\'s status entry and emits a snapshot', () async {
       final m = MultiServerManager();
@@ -1602,10 +2074,6 @@ void main() {
     });
   });
 
-  // ============================================================
-  // disconnectAll
-  // ============================================================
-
   group('disconnectAll', () {
     test('clears all status and emits an empty snapshot', () async {
       final m = MultiServerManager();
@@ -1642,18 +2110,45 @@ void main() {
     });
   });
 
-  // ============================================================
-  // dispose
-  // ============================================================
-
-  group('dispose', () {
-    test('disposing without connectivity monitoring does not throw', () {
+  group('shutdown', () {
+    test('clears all state without emitting a snapshot and closes the stream', () async {
       final m = MultiServerManager();
-      // No startNetworkMonitoring call → _connectivitySubscription is null.
-      // dispose() must handle the null-subscription path cleanly.
-      expect(m.dispose, returnsNormally);
+      addTearDown(m.dispose);
+
+      m.updateServerStatus(ServerId('a'), true);
+      m.updateServerStatus(ServerId('b'), false);
+
+      final emitted = <Map<String, bool>>[];
+      var done = false;
+      final sub = m.statusStream.listen(emitted.add, onDone: () => done = true);
+      addTearDown(sub.cancel);
+
+      await m.shutdown();
+      await Future<void>.delayed(Duration.zero);
+
+      // Exit teardown must stay invisible: an empty snapshot would flip the
+      // still-mounted UI into offline mode while the app shuts down.
+      expect(m.serverIds, isEmpty);
+      expect(m.onlineServerIds, isEmpty);
+      expect(m.offlineServerIds, isEmpty);
+      expect(emitted, isEmpty);
+      expect(done, isTrue);
     });
 
+    test('a health result landing after shutdown is a silent no-op', () async {
+      final m = MultiServerManager();
+      addTearDown(m.dispose);
+
+      m.updateServerStatus(ServerId('a'), true);
+      await m.shutdown();
+
+      // A probe that was in flight when the exit began must not throw into
+      // the closed status controller.
+      expect(() => m.updateServerStatus(ServerId('a'), false), returnsNormally);
+    });
+  });
+
+  group('dispose', () {
     test('dispose closes the status stream (existing subscribers get onDone)', () async {
       final m = MultiServerManager();
       var done = false;
@@ -1673,6 +2168,28 @@ PlexConnection _plexEndpoint(String label) => PlexConnection(
   port: 32400,
   uri: 'https://$label.invalid:32400',
   local: true,
+  relay: false,
+  ipv6: false,
+);
+
+/// Mirrors a plex.tv relay connection: remote, `relay: true`.
+PlexConnection _plexRelayEndpoint(String label) => PlexConnection(
+  protocol: 'https',
+  address: '$label.invalid',
+  port: 8443,
+  uri: 'https://$label.invalid:8443',
+  local: false,
+  relay: true,
+  ipv6: false,
+);
+
+/// A plex.tv-published WAN connection: `local: false`, direct (not relay).
+PlexConnection _plexRemoteEndpoint(String label) => PlexConnection(
+  protocol: 'https',
+  address: '$label.invalid',
+  port: 32400,
+  uri: 'https://$label.invalid:32400',
+  local: false,
   relay: false,
   ipv6: false,
 );
@@ -1706,7 +2223,7 @@ class _PlexFactoryCall {
     required this.serverId,
     required this.profileScopeId,
     required this.prioritizedEndpoints,
-    required this.hasEndpointCallback,
+    required this.endpointChanged,
     required this.hasExhaustionCallback,
     required this.seedTranscoderVideoSupport,
   });
@@ -1715,9 +2232,11 @@ class _PlexFactoryCall {
   final ServerId serverId;
   final PlexProfileScopeId profileScopeId;
   final List<String>? prioritizedEndpoints;
-  final bool hasEndpointCallback;
+  final Future<void> Function(String newBaseUrl)? endpointChanged;
   final bool hasExhaustionCallback;
   final bool? seedTranscoderVideoSupport;
+
+  bool get hasEndpointCallback => endpointChanged != null;
 }
 
 class _RecordingPlexFactory {
@@ -1744,7 +2263,7 @@ class _RecordingPlexFactory {
         serverId: serverId,
         profileScopeId: profileScopeId,
         prioritizedEndpoints: prioritizedEndpoints,
-        hasEndpointCallback: onEndpointChanged != null,
+        endpointChanged: onEndpointChanged,
         hasExhaustionCallback: onAllEndpointsExhausted != null,
         seedTranscoderVideoSupport: seedTranscoderVideoSupport,
       ),
@@ -1861,4 +2380,15 @@ class _TrackedStreamSubscription<T> implements StreamSubscription<T> {
 
   @override
   Future<E> asFuture<E>([E? futureValue]) => _delegate.asFuture(futureValue);
+}
+
+class _CloseRecordingHttpClient extends http.BaseClient {
+  bool closed = false;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async =>
+      http.StreamedResponse(Stream.value(utf8.encode('{}')), 200);
+
+  @override
+  void close() => closed = true;
 }

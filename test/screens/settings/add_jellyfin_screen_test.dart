@@ -389,8 +389,12 @@ void main() {
     await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
     await tester.pumpAndSettle();
 
-    expect(FocusManager.instance.primaryFocus?.debugLabel, 'TvVirtualKeyboard');
-    expect(find.byKey(const Key('tv_virtual_keyboard_panel')), findsOneWidget);
+    // A deliberate return to the field opens the native IME (afterFirstFocus):
+    // the field becomes editable in place — no Flutter overlay, focus stays on
+    // the field itself.
+    expect(FocusManager.instance.primaryFocus?.debugLabel, 'AddJellyfin:Url');
+    expect(find.byKey(const Key('tv_virtual_keyboard_panel')), findsNothing);
+    expect(tester.widget<TextField>(find.byType(TextField)).readOnly, isFalse);
   });
 
   testWidgets('TV discovery keeps initial URL focus and D-pad reaches discovered servers', (tester) async {
@@ -517,8 +521,8 @@ void main() {
     // arriving at a field is an intent to type.
     await walk();
 
-    // Every later pass must be silent. `onFocus` re-raised the system keyboard
-    // on every single traversal step, which made the form unusable.
+    // Every later pass must be silent. Re-raising the system keyboard on
+    // every single traversal step made the form unusable.
     for (var pass = 2; pass <= 3; pass++) {
       drainTextInput(tester);
       await walk();

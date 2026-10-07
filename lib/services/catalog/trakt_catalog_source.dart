@@ -226,10 +226,14 @@ class TraktCatalogSource with CatalogWatchlistMachinery implements CatalogSource
   @override
   Future<WatchlistKeyPage> fetchWatchlistKeyPage(int page, int limit) async {
     final res = await _client.getWatchlist(page: page, limit: limit);
-    return (
-      groups: [for (final item in _fromEntries(res.items)) membershipKeysFor(item.kind, item.ids)],
-      hasMore: res.hasMore,
-    );
+    final groups = <List<String>>[];
+    for (final entry in res.items) {
+      final media = entry.media;
+      final kind = _entryKind(entry, null);
+      if (media == null || kind == null || !media.ids.hasAny) continue;
+      groups.add(membershipKeysFor(kind, _idsFor(media.ids)));
+    }
+    return (groups: groups, hasMore: res.hasMore);
   }
 
   @override
@@ -241,11 +245,6 @@ class TraktCatalogSource with CatalogWatchlistMachinery implements CatalogSource
     };
     add ? await _client.addToWatchlist(body) : await _client.removeFromWatchlist(body);
   }
-
-  @override
-  List<String> membershipKeysFor(MediaKind kind, CatalogItemIds ids) => [
-    for (final key in ids.allKeys) '${kind.id}/$key',
-  ];
 
   List<CatalogItem> _fromEntries(List<TraktCatalogEntry> entries, {MediaKind? kind}) => [
     for (final entry in entries)
@@ -274,6 +273,9 @@ class TraktCatalogSource with CatalogWatchlistMachinery implements CatalogSource
       _ => null, // seasons/episodes on the watchlist are not Explore rows
     };
   }
+
+  static CatalogItemIds _idsFor(TraktIds ids) =>
+      CatalogItemIds(trakt: ids.trakt, slug: ids.slug, imdb: ids.imdb, tmdb: ids.tmdb, tvdb: ids.tvdb);
 
   /// Normalize Trakt's status strings. Movies' `released` maps to null —
   /// a "Released" chip on every movie is noise.
@@ -312,13 +314,7 @@ class TraktCatalogSource with CatalogWatchlistMachinery implements CatalogSource
       airStatus: airStatusFor(media.status),
       episodeCount: media.airedEpisodes,
       network: media.network,
-      ids: CatalogItemIds(
-        trakt: media.ids.trakt,
-        slug: media.ids.slug,
-        imdb: media.ids.imdb,
-        tmdb: media.ids.tmdb,
-        tvdb: media.ids.tvdb,
-      ),
+      ids: _idsFor(media.ids),
       posterUrl: media.images?.primaryPoster,
       backdropUrl: media.images?.primaryBackdrop,
       logoUrl: media.images?.primaryLogo,

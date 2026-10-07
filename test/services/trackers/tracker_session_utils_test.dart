@@ -6,11 +6,6 @@ import 'package:plezy/services/trackers/tracker_session_utils.dart';
 
 void main() {
   group('tracker token expiry helpers', () {
-    test('detects expired token', () {
-      expect(isTrackerTokenExpired(100, nowSeconds: 100), isTrue);
-      expect(isTrackerTokenExpired(101, nowSeconds: 100), isFalse);
-    });
-
     test('detects refresh window', () {
       expect(trackerTokenNeedsRefresh(400, nowSeconds: 100), isTrue);
       expect(trackerTokenNeedsRefresh(401, nowSeconds: 100), isFalse);
@@ -19,12 +14,11 @@ void main() {
   });
 
   group('tracker session json codec', () {
-    test('round-trips Trakt sessions with snake-case keys and default scope', () {
+    test('round-trips Trakt sessions with snake-case keys', () {
       const session = TrackerSession(
         accessToken: 'trakt-at',
         refreshToken: 'trakt-rt',
         expiresAt: 2000,
-        scope: 'public',
         createdAt: 1000,
       );
 
@@ -33,7 +27,6 @@ void main() {
         'refresh_token': 'trakt-rt',
         'expires_at': 2000,
         'username': null,
-        'scope': 'public',
         'created_at': 1000,
       });
 
@@ -48,7 +41,6 @@ void main() {
       expect(decoded.refreshToken, 'trakt-rt');
       expect(decoded.expiresAt, 2000);
       expect(decoded.username, isNull);
-      expect(decoded.scope, isNull);
       expect(decoded.createdAt, 1000);
     });
 
@@ -70,7 +62,7 @@ void main() {
       expect(decoded.createdAt, 1000);
     });
 
-    test('builds Trakt token sessions with default scope', () {
+    test('builds Trakt token sessions', () {
       final session = TrackerSession.fromTokenResponse(TrackerService.trakt, {
         'access_token': 'trakt-at',
         'refresh_token': 'trakt-rt',
@@ -78,20 +70,34 @@ void main() {
         'created_at': 1000,
       });
 
-      expect(session.scope, 'public');
+      expect(session.accessToken, 'trakt-at');
       expect(session.expiresAt, 2000);
     });
 
-    test('defaults missing scope only when decoding stored Trakt sessions', () {
-      final encoded = encodeTrackerSessionJson({
-        'access_token': 'trakt-at',
-        'refresh_token': 'trakt-rt',
-        'expires_at': 2000,
+    test('builds Simkl AUTH V2 token sessions with a refresh token and expiry', () {
+      final session = TrackerSession.fromTokenResponse(TrackerService.simkl, {
+        'access_token': 'simkl_at_new',
+        'refresh_token': 'simkl_rt_new',
+        'expires_in': 604800,
+        'token_type': 'Bearer',
+        'scope': 'media:read media:write',
         'created_at': 1000,
       });
 
-      expect(TrackerSession.decode(encoded).scope, isNull);
-      expect(TrackerSession.decode(encoded, service: TrackerService.trakt).scope, 'public');
+      expect(session.accessToken, 'simkl_at_new');
+      expect(session.refreshToken, 'simkl_rt_new');
+      expect(session.expiresAt, 1000 + 604800);
+    });
+
+    test('rejects a Simkl token response without a refresh token', () {
+      expect(
+        () => TrackerSession.fromTokenResponse(TrackerService.simkl, {
+          'access_token': 'simkl_at_new',
+          'expires_in': 604800,
+          'created_at': 1000,
+        }),
+        throwsA(isA<TrackerAuthException>()),
+      );
     });
   });
 
@@ -141,7 +147,7 @@ void main() {
       expect(session.expiresAt, 2000);
     });
 
-    test('decodes a legacy Trakt blob and defaults the scope', () {
+    test('decodes a legacy Trakt blob', () {
       final raw = encodeTrackerSessionJson({
         'access_token': 'trakt-at',
         'refresh_token': 'trakt-rt',
@@ -152,7 +158,7 @@ void main() {
       final session = TrackerSession.decode(raw, service: TrackerService.trakt);
 
       expect(session.refreshToken, 'trakt-rt');
-      expect(session.scope, 'public');
+      expect(session.expiresAt, 2000);
     });
 
     test('rejects a MAL/Trakt blob missing the refresh token', () {
@@ -200,10 +206,39 @@ void main() {
       });
     });
 
-    test('Simkl accepts a blob with neither expiry nor refresh token', () {
+    test('Simkl accepts a legacy V1 blob with neither expiry nor refresh token', () {
       final raw = encodeTrackerSessionJson({'access_token': 'at', 'created_at': 1000});
 
       expect(TrackerSession.decode(raw, service: TrackerService.simkl).accessToken, 'at');
+    });
+
+    test('decodes a Simkl AUTH V2 blob', () {
+      final raw = encodeTrackerSessionJson({
+        'access_token': 'simkl_at_x',
+        'refresh_token': 'simkl_rt_x',
+        'expires_at': 2000,
+        'username': 'carol',
+        'created_at': 1000,
+      });
+
+      final session = TrackerSession.decode(raw, service: TrackerService.simkl);
+
+      expect(session.refreshToken, 'simkl_rt_x');
+      expect(session.expiresAt, 2000);
+    });
+
+    test('rejects a Simkl AUTH V2 blob missing the refresh token or the expiry', () {
+      for (final blob in <Map<String, dynamic>>[
+        {'access_token': 'simkl_at_x', 'expires_at': 2000, 'created_at': 1000},
+        {'access_token': 'simkl_at_x', 'refresh_token': '', 'expires_at': 2000, 'created_at': 1000},
+        {'access_token': 'simkl_at_x', 'refresh_token': 'simkl_rt_x', 'created_at': 1000},
+      ]) {
+        expect(
+          () => TrackerSession.decode(encodeTrackerSessionJson(blob), service: TrackerService.simkl),
+          throwsA(isA<TrackerAuthException>()),
+          reason: '$blob',
+        );
+      }
     });
   });
 }

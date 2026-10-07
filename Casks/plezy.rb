@@ -1,6 +1,6 @@
 cask "plezy" do
-  version "2.12.1"
-  sha256 "7a5e30d125d5a379108bf691ae8ce5e2af0a1acf98ee40897909a9576ebe3ef9"
+  version "2.22.0"
+  sha256 "e1802829f4726c48e38f8bd6e77b544eadebe17388f72d0cdd3e34f7ff2d720f"
 
   url "https://github.com/edde746/plezy/releases/download/#{version}/plezy-macos.dmg"
   name "Plezy"
@@ -16,10 +16,10 @@ cask "plezy" do
 
   app "Plezy.app"
 
-  postflight do
-    system_command "/usr/bin/xattr",
-                   args: ["-cr", "#{appdir}/Plezy.app"],
-                   sudo: false
+  postflight_steps do
+    run "/usr/bin/xattr",
+        args: ["-cr", "{{appdir}}/Plezy.app"],
+        sudo: false
   end
 
   uninstall quit: "com.edde746.plezy"

@@ -2,13 +2,12 @@ part of '../../video_player_screen.dart';
 
 extension _VideoPlayerPipMethods on VideoPlayerScreenState {
   void _attachPipStateListener() {
-    final pipState = PipService().isPipActive;
-    pipState.removeListener(_onPipStateChanged);
-    pipState.addListener(_onPipStateChanged);
+    _releasePipStateListener ??= bindListenable(PipService().isPipActive, _onPipStateChanged);
   }
 
   void _detachPipStateListener() {
-    PipService().isPipActive.removeListener(_onPipStateChanged);
+    _releasePipStateListener?.call();
+    _releasePipStateListener = null;
   }
 
   void _clearAutoPipEnteringCallback() {
@@ -37,9 +36,15 @@ extension _VideoPlayerPipMethods on VideoPlayerScreenState {
     if (needsVideoFilter && _videoFilterManager == null && settings != null) {
       _videoFilterManager = VideoFilterManager(
         player: currentPlayer,
-        initialBoxFitMode: settings.read(SettingsService.defaultBoxFitMode),
+        // iOS and tvOS zoom the native video layer; mpv's video-zoom would
+        // force vo_avfoundation's Core Image path and kill HDR/DV passthrough.
+        nativeVideoZoom: Platform.isIOS,
+        initialBoxFitMode: ScopedPlayerPrefs.resolve(ScopedPlayerPrefs.boxFitMode, _currentMetadata),
         initialPlayerSize: initialPlayerSize,
-        onBoxFitModeChanged: (mode) => settings.write(SettingsService.defaultBoxFitMode, mode),
+        // Reads _currentMetadata at invocation time so a cycle after an
+        // in-place episode swap keys against the item actually on screen.
+        onBoxFitModeChanged: (mode) =>
+            unawaited(ScopedPlayerPrefs.write(ScopedPlayerPrefs.boxFitMode, _currentMetadata, mode)),
       );
       unawaited(_videoFilterManager!.updateVideoFilter());
     }
@@ -53,7 +58,7 @@ extension _VideoPlayerPipMethods on VideoPlayerScreenState {
 
     final supported = await PipService.isSupported();
     if (!supported) {
-      _onPipRequestFailed('PiP not supported on this device');
+      _onPipRequestFailed(t.videoControls.pipErrors.notSupported);
       return;
     }
 
@@ -154,7 +159,7 @@ extension _VideoPlayerPipMethods on VideoPlayerScreenState {
     filterManager.exitPipMode();
     if (restoreAmbient) {
       filterManager.clearPipAmbientLightingFlag();
-      unawaited(_restoreAmbientLighting());
+      unawaited(_visualEffects.restoreAmbientLighting());
     }
     _pipFiltersPrepared = false;
   }

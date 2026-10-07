@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
+import 'package:plezy/i18n/strings.g.dart';
 import 'package:plezy/media/media_kind.dart';
 import 'package:plezy/media/media_rating.dart';
 import 'package:plezy/models/catalog/catalog_item.dart';
@@ -102,6 +103,36 @@ void main() {
       expect(item.genres, ['Science Fiction']);
     });
 
+    test('sends the current app language so Discover localizes metadata', () async {
+      LocaleSettings.setLocaleSync(AppLocale.en);
+      addTearDown(() => LocaleSettings.setLocaleSync(AppLocale.en));
+      final languages = <String?>[];
+      final source = PlexCatalogSource(
+        PlexDiscoverClient(
+          _session,
+          httpClient: MockClient((request) async {
+            languages.add(request.headers['X-Plex-Language']);
+            return jsonResponse({
+              'MediaContainer': {
+                'offset': 0,
+                'size': 1,
+                'totalSize': 1,
+                'Metadata': [_metadata()],
+              },
+            });
+          }),
+        ),
+      );
+      addTearDown(source.dispose);
+
+      await source.fetchRow(CatalogRowId.watchlist, page: 1, limit: 25);
+      // A language switch reaches the already-built client on its next request.
+      await LocaleSettings.setLocale(AppLocale.zhHant);
+      await source.fetchRow(CatalogRowId.watchlist, page: 1, limit: 25);
+
+      expect(languages, ['en', 'zh-TW']);
+    });
+
     test('maps every attributed score and leaves absent optional metadata null', () async {
       final source = PlexCatalogSource(
         PlexDiscoverClient(
@@ -168,7 +199,6 @@ void main() {
       expect(absent.rating, isNull);
       expect(absent.ratings, isNull);
       expect(absent.releaseDate, isNull);
-      expect(absent.playState, isNull);
       expect(absent.posterVariants, isNull);
       expect(absent.backdropVariants, isNull);
     });
@@ -221,14 +251,7 @@ void main() {
               case '/hubs/sections/home/platforms':
                 return jsonResponse({
                   'MediaContainer': {
-                    'Metadata': [
-                      {
-                        ..._metadata(ratingKey: 'platform-1', title: 'A Platform Title'),
-                        'viewCount': 2,
-                        'viewOffset': 12345,
-                        'viewedLeafCount': 7,
-                      },
-                    ],
+                    'Metadata': [_metadata(ratingKey: 'platform-1', title: 'A Platform Title')],
                   },
                 });
               case '/hubs/sections/home/chris-nolan':
@@ -277,9 +300,7 @@ void main() {
       expect(show.endDate, isNull);
 
       final platformItem = hubs[1].page.items.single;
-      expect(platformItem.playState?.viewCount, 2);
-      expect(platformItem.playState?.viewOffsetMs, 12345);
-      expect(platformItem.playState?.viewedLeafCount, 7);
+      expect(platformItem.title, 'A Platform Title');
       expect(hubs.last.page.items.single.title, 'The Prestige');
       expect(hubs.last.page.hasMore, isFalse);
     });
@@ -451,7 +472,6 @@ void main() {
       expect(captured.url.queryParameters, containsPair('searchProviders', 'discover'));
       expect(results, hasLength(1));
       expect(results.single.ids.plex, 'plex-movie-1');
-      expect(results.single.relevance, 0.91);
     });
 
     test('watchlist snapshot and mutation use the advertised action endpoint', () async {
@@ -490,6 +510,41 @@ void main() {
       // The snapshot page must stay under Discover's container-size cap
       // (#1715: 500 was rejected outright).
       expect(requests.first.url.queryParameters['X-Plex-Container-Size'], '100');
+    });
+
+    test('watchlist snapshot keeps the first entry per identity and never unions discarded ids', () async {
+      final source = PlexCatalogSource(
+        PlexDiscoverClient(
+          _session,
+          httpClient: MockClient(
+            (request) async => jsonResponse({
+              'MediaContainer': {
+                'totalSize': 4,
+                'Metadata': [
+                  _metadata(),
+                  // Same imdb identity, different Plex/tmdb ids: discarded,
+                  // and its keys must not join the surviving entry's group.
+                  _metadata(ratingKey: 'plex-movie-1-dupe', tmdb: 99999),
+                  // Seasons are not Explore kinds.
+                  _metadata(ratingKey: 'plex-season-1', type: 'season', imdb: 'tt5555555', tmdb: 5555),
+                  // A missing title is rejected.
+                  _metadata(ratingKey: 'plex-movie-2', title: '', imdb: 'tt6666666', tmdb: 6666),
+                ],
+              },
+            }),
+          ),
+        ),
+      );
+      addTearDown(source.dispose);
+
+      await source.ensureWatchlistLoaded();
+
+      expect(source.isOnWatchlist(MediaKind.movie, const CatalogItemIds(plex: 'plex-movie-1')), isTrue);
+      expect(source.isOnWatchlist(MediaKind.movie, const CatalogItemIds(imdb: 'tt1375666')), isTrue);
+      expect(source.isOnWatchlist(MediaKind.movie, const CatalogItemIds(plex: 'plex-movie-1-dupe')), isFalse);
+      expect(source.isOnWatchlist(MediaKind.movie, const CatalogItemIds(tmdb: 99999)), isFalse);
+      expect(source.isOnWatchlist(MediaKind.show, const CatalogItemIds(imdb: 'tt5555555')), isFalse);
+      expect(source.isOnWatchlist(MediaKind.movie, const CatalogItemIds(imdb: 'tt6666666')), isFalse);
     });
 
     test('an oversized watchlist page refetches as chunks when Discover rejects it', () async {
@@ -566,6 +621,8 @@ void main() {
             requests.add(request);
             if (request.url.path == '/library/metadata/matches') {
               expect(request.url.queryParameters['guid'], 'imdb://tt1375666');
+
+              expect(request.url.queryParameters['type'], '1');
               return jsonResponse({
                 'MediaContainer': {
                   'Metadata': [_metadata()],
@@ -585,6 +642,42 @@ void main() {
 
       expect(requests.map((request) => request.url.path), ['/library/metadata/matches', '/actions/addToWatchlist']);
     });
+    test('external-id matching sends the Discover metadata type for the requested kind', () async {
+      // Discover answers a guid lookup only when paired with the numeric
+      // type; a bare guid returns an empty container for every item (#1873).
+      final types = <String?>[];
+      final source = PlexCatalogSource(
+        PlexDiscoverClient(
+          _session,
+          httpClient: MockClient((request) async {
+            expect(request.url.path, '/library/metadata/matches');
+            types.add(request.url.queryParameters['type']);
+            final type = switch (request.url.queryParameters['type']) {
+              '1' => 'movie',
+              '2' => 'show',
+              _ => null,
+            };
+            if (type == null) return jsonResponse({'MediaContainer': const <String, Object?>{}});
+            return jsonResponse({
+              'MediaContainer': {
+                'Metadata': [_metadata(ratingKey: 'plex-$type-1', type: type)],
+              },
+            });
+          }),
+        ),
+      );
+      addTearDown(source.dispose);
+
+      const external = ExternalIds(tvdb: 73762);
+      final show = await source.resolveItemIds(MediaKind.show, external);
+      final movie = await source.resolveItemIds(MediaKind.movie, external);
+      final episode = await source.resolveItemIds(MediaKind.episode, external);
+
+      expect(show?.plex, 'plex-show-1');
+      expect(movie?.plex, 'plex-movie-1');
+      expect(episode, isNull, reason: 'only movies and shows have a Discover watchlist identity');
+      expect(types, ['2', '1'], reason: 'unsupported kinds never hit the network');
+    });
     test('external-id matching and fetchDetail return enriched item, cast, and related', () async {
       final requests = <http.Request>[];
       final metadataResponse = Completer<http.Response>();
@@ -597,6 +690,7 @@ void main() {
             switch (request.url.path) {
               case '/library/metadata/matches':
                 expect(request.url.queryParameters['guid'], 'imdb://tt1375666');
+                expect(request.url.queryParameters['type'], '2');
                 return Future.value(
                   jsonResponse({
                     'MediaContainer': {
@@ -636,7 +730,6 @@ void main() {
         title: 'Inception',
         overview: 'Row overview.',
         ids: CatalogItemIds(plex: 'plex-movie-1'),
-        relevance: 0.73,
       );
       final detailFuture = source.fetchDetail(item);
       await Future<void>.delayed(Duration.zero);
@@ -721,7 +814,6 @@ void main() {
       final detail = await detailFuture;
 
       expect(detail.item.overview, 'A complete and much longer summary from detail metadata.');
-      expect(detail.item.relevance, 0.73);
       expect(detail.item.genres, ['Science Fiction', 'Thriller']);
       expect(detail.item.studios, ['Warner Bros.']);
       expect(detail.item.countries, ['GB', 'US']);

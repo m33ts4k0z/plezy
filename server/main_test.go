@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -33,6 +34,7 @@ func TestGeneratedRelayProtocolVersionsMatchSpec(t *testing.T) {
 	var spec struct {
 		ProtocolVersion       int `json:"protocolVersion"`
 		LegacyProtocolVersion int `json:"legacyProtocolVersion"`
+		ReconnectTokenBytes   int `json:"reconnectTokenBytes"`
 	}
 	if err := json.Unmarshal(data, &spec); err != nil {
 		t.Fatalf("decode relay protocol spec: %v", err)
@@ -47,23 +49,44 @@ func TestGeneratedRelayProtocolVersionsMatchSpec(t *testing.T) {
 			spec.LegacyProtocolVersion,
 		)
 	}
+	if reconnectTokenSize != spec.ReconnectTokenBytes {
+		t.Fatalf("generated reconnectTokenSize=%d, spec=%d", reconnectTokenSize, spec.ReconnectTokenBytes)
+	}
+	for _, version := range []int{legacyRelayProtocolVersion, relayProtocolVersion} {
+		if !supportedRelayProtocolVersion(version) {
+			t.Fatalf("supportedRelayProtocolVersion(%d)=false", version)
+		}
+	}
+	for _, version := range []int{relayProtocolVersion + 1, -1} {
+		if supportedRelayProtocolVersion(version) {
+			t.Fatalf("supportedRelayProtocolVersion(%d)=true", version)
+		}
+	}
 }
 
-// newTestServer builds a Server wired for tests: no goroutines and no network.
-// Its snapshotter is not started; storage tests drive the narrow synchronous
-// write entry directly.
+// newTestServer builds a goroutine-free, network-free test server.
 func newTestServer(t *testing.T, stateFile string) *Server {
 	t.Helper()
 	s := &Server{
 		rooms:         make(map[string]*Room),
 		logs:          newLogStore(t.TempDir()),
 		posters:       newPosterStore(t.TempDir(), maxPosterStoreSize, posterMaxAge),
-		posterUploads: newPosterUploadLimiter(posterPerIPRateBurst, posterPerIPRateSustained, posterGlobalRateBurst, posterGlobalRateSustained, maxConcurrentPosterUploads, time.Now()),
+		posterUploads: newPosterUploadLimiter(posterPerIPRateBurst, posterPerIPRateSustained, posterGlobalRateBurst, posterGlobalRateSustained, maxConcurrentPosterUploads, maxConcurrentPosterUploadsPerIP, time.Now()),
+		posterFetches: newPosterUploadLimiter(posterFetchPerIPRateBurst, posterFetchPerIPRateSustained, posterFetchGlobalRateBurst, posterFetchGlobalRateSustained, maxConcurrentPosterFetches, maxConcurrentPosterFetchesPerIP, time.Now()),
 		conns:         newConnTracker(),
 		clientIPs:     newClientIPResolver(nil),
 	}
 	s.snap = newSnapshotter(stateFile, s.buildSnapshot)
 	return s
+}
+
+// write is the synchronous storage-test entry point; production uses the
+// single writer's writeNextGeneration.
+func (sn *snapshotter) write() error {
+	sn.writeMu.Lock()
+	defer sn.writeMu.Unlock()
+	_, err := sn.captureAndPersist()
+	return err
 }
 
 func mustReconnectToken(t *testing.T) (string, reconnectVerifier) {
@@ -94,6 +117,76 @@ func makeRoomSnapshots(count int, maximumLengthIDs bool, now time.Time) []roomSn
 		})
 	}
 	return rooms
+}
+
+func TestSnapshotKeepsOccupiedRoomsAcrossRestart(t *testing.T) {
+	dir := t.TempDir()
+	stateFile := filepath.Join(dir, "rooms.json")
+	h := newRelayHarnessAt(t, t.TempDir(), stateFile)
+	createModernRoomWithGuest(t, h, "BUSY", "6.9.0.1", "6.9.0.2")
+
+	// Only relayed messages have happened since the last membership change,
+	// and those never dirty the snapshot.
+	h.srv.mu.RLock()
+	room := h.srv.rooms["BUSY"]
+	h.srv.mu.RUnlock()
+	stale := time.Now().Add(-emptyRoomMaxAge - time.Minute)
+	room.mu.Lock()
+	room.LastActivityAt = stale
+	room.mu.Unlock()
+
+	captured := h.srv.buildSnapshot()
+	if len(captured.Rooms) != 1 || !captured.Rooms[0].LastActivityAt.Equal(captured.SavedAt) {
+		t.Fatalf("occupied room activity=%v, want capture time %v", captured.Rooms, captured.SavedAt)
+	}
+
+	// The periodic cleanup persists that activity without any mutation.
+	waitForSnapshot := func(done func(stateSnapshot) bool) stateSnapshot {
+		t.Helper()
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			var persisted stateSnapshot
+			data, err := os.ReadFile(stateFile)
+			if err == nil && json.Unmarshal(data, &persisted) == nil && done(persisted) {
+				return persisted
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("expected snapshot was never persisted: %s", data)
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+	}
+	admitted := waitForSnapshot(func(persisted stateSnapshot) bool {
+		return len(persisted.Rooms) == 1 && persisted.Rooms[0].PeerReservations["G"].Verifier != ""
+	})
+	h.srv.runCleanupStep(time.Now())
+	waitForSnapshot(func(persisted stateSnapshot) bool {
+		return persisted.SavedAt.After(admitted.SavedAt) &&
+			len(persisted.Rooms) == 1 && persisted.Rooms[0].LastActivityAt.Equal(persisted.SavedAt)
+	})
+
+	restarted := newTestServer(t, copySnapshotForRestart(t, stateFile))
+	if _, err := restarted.loadSnapshot(restarted.snap.path); err != nil {
+		t.Fatalf("loadSnapshot: %v", err)
+	}
+	if restarted.rooms["BUSY"] == nil {
+		t.Fatal("restart dropped a room that had connected peers")
+	}
+
+	// An empty room keeps its own activity and still ages out.
+	empty := &Room{
+		SessionID:      "IDLE",
+		HostPeerID:     "H",
+		Peers:          map[string]*Client{},
+		CreatedAt:      stale,
+		LastActivityAt: stale,
+	}
+	restarted.rooms["IDLE"] = empty
+	for _, snapshot := range restarted.buildSnapshot().Rooms {
+		if snapshot.SessionID == "IDLE" && !snapshot.LastActivityAt.Equal(stale) {
+			t.Fatalf("empty room activity=%v, want %v", snapshot.LastActivityAt, stale)
+		}
+	}
 }
 
 func TestSnapshotRoundTrip(t *testing.T) {
@@ -135,7 +228,7 @@ func TestSnapshotRoundTrip(t *testing.T) {
 		t.Fatalf("snapshot persisted process-local client identity: %s", data)
 	}
 
-	// Reconstruct into a fresh Server and verify identity.
+	// Reload from disk into a fresh server.
 	s2 := newTestServer(t, path)
 	if _, err := s2.loadSnapshot(path); err != nil {
 		t.Fatalf("loadSnapshot: %v", err)
@@ -229,7 +322,7 @@ func TestLoadHandlesCorrupt(t *testing.T) {
 	if len(s.rooms) != 0 {
 		t.Fatalf("expected empty rooms after corrupt load, got %d", len(s.rooms))
 	}
-	// File should be preserved for debugging.
+	// Corrupt snapshots remain available for diagnosis.
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("corrupt file should NOT be deleted: %v", err)
 	}
@@ -270,7 +363,7 @@ func TestCleanupUsesIdleNotAge(t *testing.T) {
 	s := newTestServer(t, filepath.Join(t.TempDir(), "rooms.json"))
 	now := time.Now()
 
-	// 2h-old room that has activity 1min ago — must NOT be cleaned up.
+	// Recent activity keeps this old room.
 	s.rooms["KEEP"] = &Room{
 		SessionID:      "KEEP",
 		HostPeerID:     "h",
@@ -278,7 +371,7 @@ func TestCleanupUsesIdleNotAge(t *testing.T) {
 		CreatedAt:      now.Add(-2 * time.Hour),
 		LastActivityAt: now.Add(-1 * time.Minute),
 	}
-	// 2h-old room that emptied 10min ago — MUST be cleaned up.
+	// Idle rooms are removed.
 	s.rooms["GONE"] = &Room{
 		SessionID:      "GONE",
 		HostPeerID:     "h",
@@ -286,11 +379,11 @@ func TestCleanupUsesIdleNotAge(t *testing.T) {
 		CreatedAt:      now.Add(-2 * time.Hour),
 		LastActivityAt: now.Add(-10 * time.Minute),
 	}
-	// 25h-old room — absolute TTL nukes it even if recently active.
+	// The absolute TTL removes this room despite recent activity.
 	s.rooms["OLD"] = &Room{
 		SessionID:      "OLD",
 		HostPeerID:     "h",
-		Peers:          map[string]*Client{}, // empty anyway
+		Peers:          map[string]*Client{},
 		CreatedAt:      now.Add(-25 * time.Hour),
 		LastActivityAt: now.Add(-10 * time.Second),
 	}
@@ -352,7 +445,7 @@ func TestSnapshotAtomicWriteSurvivesRenameFailure(t *testing.T) {
 	path := filepath.Join(dir, "rooms.json")
 	s := newTestServer(t, path)
 
-	// Seed a valid snapshot on disk.
+	// Seed the on-disk snapshot.
 	s.rooms["ORIG"] = &Room{
 		SessionID:      "ORIG",
 		HostPeerID:     "h",
@@ -368,8 +461,7 @@ func TestSnapshotAtomicWriteSurvivesRenameFailure(t *testing.T) {
 		t.Fatalf("read orig: %v", err)
 	}
 
-	// Block the temporary-file open with a directory at the same path. This
-	// deterministically fails before rename on every supported platform.
+	// A directory at the temporary path makes the open fail before rename.
 	if err := os.Mkdir(path+".tmp", 0755); err != nil {
 		t.Fatalf("create blocking temporary directory: %v", err)
 	}
@@ -598,7 +690,7 @@ func TestSnapshotDebounceCoalesces(t *testing.T) {
 	go sn.run()
 	t.Cleanup(func() { _ = sn.flushAndStop(time.Second) })
 
-	// Fire a burst — should collapse into one write due to debounce.
+	// A burst should collapse into one debounced write.
 	for i := 0; i < 20; i++ {
 		sn.recordMutation()
 	}
@@ -1132,12 +1224,6 @@ func TestSnapshotDirectorySyncWarningIsThrottled(t *testing.T) {
 	}
 }
 
-// ======================================================================
-// Integration harness — boots a real Server behind httptest with the full
-// HTTP mux. Each dial sets X-Forwarded-For so tests control the perceived
-// client IP independently of the rate limiters.
-// ======================================================================
-
 type relayHarness struct {
 	srv     *Server
 	httpSrv *httptest.Server
@@ -1171,8 +1257,7 @@ func newRelayHarnessNoTrust(t *testing.T) *relayHarness {
 	)
 }
 
-// newRelayHarnessAt lets a test control the stateFile path so two harnesses
-// can share a snapshot across a simulated restart.
+// newRelayHarnessAt allows two harnesses to share a snapshot across restarts.
 func newRelayHarnessAt(t *testing.T, logDir, stateFile string) *relayHarness {
 	t.Helper()
 	return newRelayHarnessAtWithResolver(t, logDir, stateFile, mustClientIPResolver(t, "127.0.0.0/8"))
@@ -1194,7 +1279,8 @@ func newStorageHarness(t *testing.T, logs *logStore, posters *posterStore) *rela
 		rooms:         make(map[string]*Room),
 		logs:          logs,
 		posters:       posters,
-		posterUploads: newPosterUploadLimiter(posterPerIPRateBurst, posterPerIPRateSustained, posterGlobalRateBurst, posterGlobalRateSustained, maxConcurrentPosterUploads, time.Now()),
+		posterUploads: newPosterUploadLimiter(posterPerIPRateBurst, posterPerIPRateSustained, posterGlobalRateBurst, posterGlobalRateSustained, maxConcurrentPosterUploads, maxConcurrentPosterUploadsPerIP, time.Now()),
+		posterFetches: newPosterUploadLimiter(posterFetchPerIPRateBurst, posterFetchPerIPRateSustained, posterFetchGlobalRateBurst, posterFetchGlobalRateSustained, maxConcurrentPosterFetches, maxConcurrentPosterFetchesPerIP, time.Now()),
 		logLookups:    make(chan struct{}, maxConcurrentLogLookups),
 		conns:         newConnTracker(),
 		clientIPs:     mustClientIPResolver(t, "127.0.0.0/8"),
@@ -1251,6 +1337,39 @@ func createModernRoomWithGuest(
 	})
 	guest.expectAuthority(relayTypeJoined, "H")
 	host.expect(relayTypePeerJoined)
+	return host, guest, hostToken, guestToken
+}
+
+func currentAdmission(msg clientMsg) clientMsg {
+	msg.SyncProtocolVersion = 3
+	msg.Capabilities = []string{relayCapabilityHostTransfer}
+	return msg
+}
+
+func createTransferRoomWithGuest(
+	t *testing.T,
+	h *relayHarness,
+	sessionID, hostIP, guestIP string,
+) (host, guest *testConn, hostToken, guestToken string) {
+	t.Helper()
+	hostToken, _ = mustReconnectToken(t)
+	host = h.dial(t, hostIP)
+	host.send(currentAdmission(clientMsg{
+		Type: relayTypeCreate, SessionID: sessionID, PeerID: "H",
+		ReconnectToken: hostToken, ProtocolVersion: relayProtocolVersion,
+	}))
+	host.expectAuthority(relayTypeCreated, "H")
+	host.expectEligibility(sessionID, "H")
+	guestToken, _ = mustReconnectToken(t)
+	guest = h.dial(t, guestIP)
+	guest.send(currentAdmission(clientMsg{
+		Type: relayTypeJoin, SessionID: sessionID, PeerID: "G",
+		ReconnectToken: guestToken, ProtocolVersion: relayProtocolVersion,
+	}))
+	guest.expectAuthority(relayTypeJoined, "H")
+	guest.expectEligibility(sessionID, "H", "G")
+	host.expect(relayTypePeerJoined)
+	host.expectEligibility(sessionID, "H", "G")
 	return host, guest, hostToken, guestToken
 }
 
@@ -1498,11 +1617,30 @@ func (c *testConn) expectAuthority(typ, hostPeerID string) serverMsg {
 	if _, ok := reconnectVerifierFromToken(message.ReconnectToken); !ok {
 		c.t.Fatalf("%s reconnectToken has invalid shape", typ)
 	}
+	if !slices.Contains(message.Features, relayFeatureAtomicHostTransfer) {
+		c.t.Fatalf("%s did not acknowledge atomic host transfer: %+v", typ, message)
+	}
 	return message
 }
 
-// recvNothing asserts no message arrives within the given window. Used to
-// verify silent paths (sender not receiving own broadcast, stale-peer skip).
+func (c *testConn) expectEligibility(sessionID, hostPeerID string, targets ...string) {
+	c.t.Helper()
+	message := c.expect(relayTypeHostTransferEligibility)
+	if message.SessionID != sessionID || message.HostPeerID != hostPeerID {
+		c.t.Fatalf("eligibility authority=%+v, want session=%s host=%s", message, sessionID, hostPeerID)
+	}
+	if message.HostTransferTargets == nil || *message.HostTransferTargets == nil {
+		c.t.Fatalf("eligibility omitted its target array: %+v", message)
+	}
+	got := *message.HostTransferTargets
+	slices.Sort(got)
+	slices.Sort(targets)
+	if !slices.Equal(got, targets) {
+		c.t.Fatalf("host transfer targets=%v, want %v", got, targets)
+	}
+}
+
+// recvNothing asserts that no frame arrives within the window.
 func (c *testConn) recvNothing(within time.Duration) {
 	c.t.Helper()
 	c.conn.SetReadDeadline(time.Now().Add(within))
@@ -1515,8 +1653,7 @@ func (c *testConn) recvNothing(within time.Duration) {
 	}
 }
 
-// recvUntilClosed consumes any frames already queued on the wire and requires
-// a permanent terminal read error before the absolute deadline.
+// recvUntilClosed drains queued frames and waits for terminal closure.
 func (c *testConn) recvUntilClosed(within time.Duration) ([]serverMsg, error) {
 	c.t.Helper()
 	if err := c.conn.SetReadDeadline(time.Now().Add(within)); err != nil {
@@ -1606,11 +1743,13 @@ func TestClientQueueOverflowBroadcastKeepsHealthyRecipient(t *testing.T) {
 		},
 	}
 	payload := json.RawMessage(`{"sequence":2}`)
-	room.broadcastExcept("sender", serverMsg{
+	room.mu.Lock()
+	room.broadcastExceptLocked("sender", serverMsg{
 		Type:    relayTypeMessage,
 		From:    "sender",
 		Payload: payload,
 	})
+	room.mu.Unlock()
 
 	requireClientClosed(t, slow)
 	requirePeerClosed(t, slowPeerConn)
@@ -1681,63 +1820,70 @@ func TestClientWriteFailureClosesConnection(t *testing.T) {
 	client.close()
 }
 
-// ======================================================================
-// Unit tests — pure logic
-// ======================================================================
-
 func TestRateLimiterBurstExhausts(t *testing.T) {
-	rl := newRateLimiter(5, 10)
-	for i := 0; i < 5; i++ {
-		if !rl.allow() {
+	now := time.Unix(1700000000, 0)
+	rl := newRateLimiterAt(5, 10, now)
+	for i := range 5 {
+		if !rl.allowAt(now) {
 			t.Fatalf("allow %d: expected true", i)
 		}
 	}
-	if rl.allow() {
+	if rl.allowAt(now) {
 		t.Fatal("allow 6: expected false (burst exhausted)")
 	}
 }
 
 func TestRateLimiterRefillsOverTime(t *testing.T) {
-	rl := newRateLimiter(5, 10) // 10 tokens/sec
-	for i := 0; i < 5; i++ {
-		rl.allow()
+	start := time.Unix(1700000000, 0)
+	rl := newRateLimiterAt(5, 10, start)
+	for range 5 {
+		rl.allowAt(start)
 	}
-	if rl.allow() {
-		t.Fatal("burst should be exhausted before sleep")
+	if rl.allowAt(start) {
+		t.Fatal("burst should be exhausted before any refill")
 	}
-	time.Sleep(1200 * time.Millisecond)
-	count := 0
-	for rl.allow() {
-		count++
+
+	// 250ms at 10 tokens/s refills 2.5 tokens: two admissions, no third.
+	partial := start.Add(250 * time.Millisecond)
+	for i := range 2 {
+		if !rl.allowAt(partial) {
+			t.Fatalf("partial refill allow %d: expected true", i)
+		}
 	}
-	if count < 1 {
-		t.Fatalf("expected at least 1 token after 1.2s refill, got %d", count)
+	if rl.allowAt(partial) {
+		t.Fatal("fractional token admitted a third request")
 	}
-	if count > 5 {
-		t.Fatalf("expected at most burst=5 after refill, got %d", count)
+
+	saturated := start.Add(time.Hour)
+	for i := range 5 {
+		if !rl.allowAt(saturated) {
+			t.Fatalf("saturated allow %d: expected true", i)
+		}
+	}
+	if rl.allowAt(saturated) {
+		t.Fatal("refill exceeded burst capacity")
 	}
 }
 
 func TestRateLimiterAllowRace(t *testing.T) {
-	rl := newRateLimiter(100, 1000)
+	now := time.Unix(1700000000, 0)
+	rl := newRateLimiterAt(100, 1000, now)
 	var wg sync.WaitGroup
 	var successes atomic.Int64
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for j := 0; j < 50; j++ {
-				if rl.allow() {
+			for range 50 {
+				if rl.allowAt(now) {
 					successes.Add(1)
 				}
 			}
 		}()
 	}
 	wg.Wait()
-	// Real assertion is that -race finds no data race. Spot-check the
-	// result is within plausible bounds.
-	if got := successes.Load(); got <= 0 || got > 500 {
-		t.Fatalf("unexpected successes count %d (want 1..500)", got)
+	if got := successes.Load(); got != 100 {
+		t.Fatalf("concurrent admissions=%d, want exactly burst=100", got)
 	}
 }
 
@@ -1774,10 +1920,6 @@ func TestCleanupRateWindowsUsesWindowBoundary(t *testing.T) {
 		t.Fatal("expired fixed-window limiter was retained")
 	}
 }
-
-// ======================================================================
-// connTracker unit tests
-// ======================================================================
 
 func TestConnTrackerPerIPLimit(t *testing.T) {
 	ct := newConnTracker()
@@ -1821,7 +1963,7 @@ func TestConnTrackerDisconnectFrees(t *testing.T) {
 		t.Errorf("globalCount=%d, want 0", ct.globalCount)
 	}
 	ct.mu.Unlock()
-	// Extra disconnect is a no-op (doesn't panic).
+	// Extra disconnect is a no-op.
 	ct.disconnect(ip)
 }
 
@@ -1881,9 +2023,7 @@ func TestConnTrackerConnectRateLimit(t *testing.T) {
 			t.Fatalf("warmup tryConnect %d: expected true", i)
 		}
 	}
-	// Free one slot so the perIP check won't be what rejects us.
-	ct.disconnect(ip)
-	// Rate-limit bucket is empty now; this should be the denial path.
+	// Free a slot so the next denial comes from the rate limiter.
 	if ct.tryConnect(ip) {
 		t.Fatal("expected false from rate-limit bucket, not per-IP cap")
 	}
@@ -1893,12 +2033,12 @@ func TestPosterUploadLimiterAdmissionPolicy(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 
 	t.Run("per IP burst and independent clients", func(t *testing.T) {
-		limiter := newPosterUploadLimiter(2, 1, 10, 1, 10, now)
+		limiter := newPosterUploadLimiter(2, 1, 10, 1, 10, 10, now)
 		for range 2 {
 			if !limiter.tryStart("203.0.113.1", now) {
 				t.Fatal("per-IP burst rejected early")
 			}
-			limiter.finish()
+			limiter.finish("203.0.113.1")
 		}
 		if limiter.tryStart("203.0.113.1", now) {
 			t.Fatal("request beyond per-IP burst succeeded")
@@ -1906,16 +2046,16 @@ func TestPosterUploadLimiterAdmissionPolicy(t *testing.T) {
 		if !limiter.tryStart("203.0.113.2", now) {
 			t.Fatal("independent IP was denied")
 		}
-		limiter.finish()
+		limiter.finish("203.0.113.2")
 	})
 
 	t.Run("global burst spans distinct clients", func(t *testing.T) {
-		limiter := newPosterUploadLimiter(10, 1, 2, 1, 10, now)
+		limiter := newPosterUploadLimiter(10, 1, 2, 1, 10, 10, now)
 		for _, ip := range []string{"203.0.113.1", "203.0.113.2"} {
 			if !limiter.tryStart(ip, now) {
 				t.Fatalf("%s rejected before global burst exhausted", ip)
 			}
-			limiter.finish()
+			limiter.finish(ip)
 		}
 		if limiter.tryStart("203.0.113.3", now) {
 			t.Fatal("request beyond global burst succeeded")
@@ -1926,41 +2066,79 @@ func TestPosterUploadLimiterAdmissionPolicy(t *testing.T) {
 	})
 
 	t.Run("concurrency denial consumes no tokens", func(t *testing.T) {
-		limiter := newPosterUploadLimiter(1, 0, 2, 0, 1, now)
+		limiter := newPosterUploadLimiter(1, 0, 2, 0, 1, 1, now)
 		if !limiter.tryStart("203.0.113.1", now) {
 			t.Fatal("first upload denied")
 		}
 		if limiter.tryStart("203.0.113.2", now) {
 			t.Fatal("upload above concurrency limit succeeded")
 		}
-		limiter.finish()
+		limiter.finish("203.0.113.1")
 		if !limiter.tryStart("203.0.113.2", now) {
 			t.Fatal("concurrency denial consumed admission tokens")
 		}
-		limiter.finish()
+		limiter.finish("203.0.113.2")
+	})
+
+	t.Run("per IP concurrency cap leaves slots for other clients", func(t *testing.T) {
+		limiter := newPosterUploadLimiter(3, 0, 10, 0, 8, 2, now)
+		for range 2 {
+			if !limiter.tryStart("203.0.113.1", now) {
+				t.Fatal("request within per-IP concurrency cap denied")
+			}
+		}
+		if limiter.tryStart("203.0.113.1", now) {
+			t.Fatal("request above per-IP concurrency cap succeeded")
+		}
+		if !limiter.tryStart("203.0.113.2", now) {
+			t.Fatal("saturated client starved an independent IP")
+		}
+		// The capped denial consumed no admission tokens: the IP's third and
+		// final burst token must still admit it once a slot frees up.
+		limiter.finish("203.0.113.1")
+		if !limiter.tryStart("203.0.113.1", now) {
+			t.Fatal("per-IP concurrency denial consumed admission tokens")
+		}
+	})
+
+	t.Run("finish releases the slot of the finishing IP only", func(t *testing.T) {
+		limiter := newPosterUploadLimiter(10, 0, 10, 0, 10, 1, now)
+		if !limiter.tryStart("203.0.113.1", now) {
+			t.Fatal("first client denied")
+		}
+		if !limiter.tryStart("203.0.113.2", now) {
+			t.Fatal("second client denied")
+		}
+		limiter.finish("203.0.113.1")
+		if !limiter.tryStart("203.0.113.1", now) {
+			t.Fatal("released client was still capped")
+		}
+		if limiter.tryStart("203.0.113.2", now) {
+			t.Fatal("finish released the wrong client's slot")
+		}
 	})
 
 	t.Run("per IP denial refunds global token", func(t *testing.T) {
-		limiter := newPosterUploadLimiter(1, 0, 2, 0, 2, now)
+		limiter := newPosterUploadLimiter(1, 0, 2, 0, 2, 2, now)
 		if !limiter.tryStart("203.0.113.1", now) {
 			t.Fatal("first upload denied")
 		}
-		limiter.finish()
+		limiter.finish("203.0.113.1")
 		if limiter.tryStart("203.0.113.1", now) {
 			t.Fatal("exhausted IP unexpectedly admitted")
 		}
 		if !limiter.tryStart("203.0.113.2", now) {
 			t.Fatal("refunded global token was unavailable to another IP")
 		}
-		limiter.finish()
+		limiter.finish("203.0.113.2")
 	})
 
 	t.Run("finish restores only concurrency and time restores rate", func(t *testing.T) {
-		limiter := newPosterUploadLimiter(1, 1, 1, 1, 1, now)
+		limiter := newPosterUploadLimiter(1, 1, 1, 1, 1, 1, now)
 		if !limiter.tryStart("203.0.113.1", now) {
 			t.Fatal("first upload denied")
 		}
-		limiter.finish()
+		limiter.finish("203.0.113.1")
 		if limiter.active != 0 {
 			t.Fatalf("active=%d, want 0", limiter.active)
 		}
@@ -1970,15 +2148,15 @@ func TestPosterUploadLimiterAdmissionPolicy(t *testing.T) {
 		if !limiter.tryStart("203.0.113.1", now.Add(time.Second)) {
 			t.Fatal("sustained refill did not restore capacity")
 		}
-		limiter.finish()
+		limiter.finish("203.0.113.1")
 	})
 
 	t.Run("cleanup retains effective buckets then reclaims full ones", func(t *testing.T) {
-		limiter := newPosterUploadLimiter(2, 1, 10, 1, 2, now)
+		limiter := newPosterUploadLimiter(2, 1, 10, 1, 2, 2, now)
 		if !limiter.tryStart("203.0.113.1", now) {
 			t.Fatal("first upload denied")
 		}
-		limiter.finish()
+		limiter.finish("203.0.113.1")
 		limiter.cleanup(now)
 		if _, ok := limiter.perIP["203.0.113.1"]; !ok {
 			t.Fatal("cleanup removed effective per-IP limiter")
@@ -1989,10 +2167,6 @@ func TestPosterUploadLimiterAdmissionPolicy(t *testing.T) {
 		}
 	})
 }
-
-// ======================================================================
-// clientIPResolver unit tests
-// ======================================================================
 
 func TestClientIPResolverTrustChains(t *testing.T) {
 	tests := []struct {
@@ -2088,12 +2262,7 @@ func TestParseTrustedProxyCIDRs(t *testing.T) {
 	}
 }
 
-// ======================================================================
-// generateLogID
-// ======================================================================
-
-// Random ids may legitimately repeat, so shape is the only contract here;
-// collision retry is covered deterministically by
+// Random IDs may repeat; this test checks shape. Collision retry is covered by
 // TestLogStorePersistsAcrossRestartAndAvoidsIDCollisions.
 func TestGenerateLogIDShape(t *testing.T) {
 	for range 200 {
@@ -2102,16 +2271,12 @@ func TestGenerateLogIDShape(t *testing.T) {
 			t.Fatalf("len=%d want %d (id=%q)", len(id), logIDLength, id)
 		}
 		for _, c := range id {
-			if !strings.ContainsRune(idChars, c) {
+			if !strings.ContainsRune(logIDChars, c) {
 				t.Fatalf("id %q has unexpected char %q", id, c)
 			}
 		}
 	}
 }
-
-// ======================================================================
-// handleWS — create case
-// ======================================================================
 
 func TestCreateSucceeds(t *testing.T) {
 	h := newRelayHarness(t)
@@ -2144,7 +2309,7 @@ func TestCreateDuplicateReturnsRoomExists(t *testing.T) {
 	c1.send(clientMsg{Type: "create", SessionID: "SAME", PeerID: "host-1"})
 	c1.expect("created")
 
-	// Different IP to avoid the per-IP rooms quota interfering.
+	// Use a different IP so the rooms quota does not interfere.
 	c2 := h.dial(t, "1.1.1.5")
 	c2.send(clientMsg{Type: "create", SessionID: "SAME", PeerID: "host-2"})
 	c2.expectError("room_exists")
@@ -2183,7 +2348,7 @@ func TestCreateNegotiatesModernProtocolWithClientKnownToken(t *testing.T) {
 	}
 }
 
-func TestModernCreateRetryAfterLostSetupResponseIsIdempotent(t *testing.T) {
+func TestModernCreateLostSetupResponseResumesCommittedIdentity(t *testing.T) {
 	h := newRelayHarness(t)
 	hostToken, _ := mustReconnectToken(t)
 	create := clientMsg{
@@ -2208,8 +2373,10 @@ func TestModernCreateRetryAfterLostSetupResponseIsIdempotent(t *testing.T) {
 	}
 
 	retry := h.dial(t, "1.1.1.42")
-	retry.send(create)
-	created := retry.expectAuthority(relayTypeCreated, "H")
+	resume := create
+	resume.Type = relayTypeResume
+	retry.send(resume)
+	created := retry.expectAuthority(relayTypeResumed, "H")
 	if created.ReconnectToken != hostToken || created.ProtocolVersion != relayProtocolVersion {
 		t.Fatalf("retry authority changed: tokenMatch=%v protocol=%d", created.ReconnectToken == hostToken, created.ProtocolVersion)
 	}
@@ -2308,8 +2475,7 @@ func TestCreateReclaimsAbandonedEmptyRoom(t *testing.T) {
 		t.Fatal("abandoned room identity survived the reclaim")
 	}
 
-	// The previous owner's capability died with the room it belonged to, and
-	// the live replacement is not reclaimable by anyone, owner included.
+	// The former capability cannot reclaim the live replacement.
 	former := h.dial(t, "1.1.1.60")
 	former.send(clientMsg{
 		Type:            relayTypeCreate,
@@ -2321,9 +2487,7 @@ func TestCreateReclaimsAbandonedEmptyRoom(t *testing.T) {
 	former.expectError(relayErrorRoomExists)
 }
 
-// The recent-rooms flow: a host restarts its app, so it presents a fresh
-// reconnect capability for a code the relay still holds. The abandoned code
-// must come back as a hosted room instead of a ghost room with no host.
+// A restarted host presents a fresh capability for an abandoned room code.
 func TestAbandonedCodeIsRecreatableByARestartedHost(t *testing.T) {
 	h := newRelayHarness(t)
 	firstToken, _ := mustReconnectToken(t)
@@ -2339,8 +2503,7 @@ func TestAbandonedCodeIsRecreatableByARestartedHost(t *testing.T) {
 	host.conn.Close()
 	h.waitRoomPeers(t, "REUSE", 0)
 
-	// A restarted app mints a new capability, so it cannot prove the previous
-	// ownership even when it reuses its own peer ID.
+	// A fresh capability cannot prove previous ownership, even with the same peer ID.
 	restartToken, _ := mustReconnectToken(t)
 	restarted := h.dial(t, "6.4.0.2")
 	restarted.send(clientMsg{
@@ -2423,7 +2586,7 @@ func TestCreateHitsRoomsPerIPLimit(t *testing.T) {
 		c.send(clientMsg{Type: "create", SessionID: fmt.Sprintf("R%d", i), PeerID: "host"})
 		c.expect("created")
 	}
-	// 4th create from same IP exceeds the quota.
+	// The fourth room from this IP exceeds the quota.
 	c := h.dial(t, ip)
 	c.send(clientMsg{Type: "create", SessionID: "ROVERFLOW", PeerID: "host"})
 	c.expectError("rate_limited")
@@ -2782,10 +2945,6 @@ func TestConnectionCannotRetainMultipleRoomMemberships(t *testing.T) {
 	}
 }
 
-// ======================================================================
-// handleWS — join case
-// ======================================================================
-
 func TestJoinSucceedsAndBroadcastsPeerJoined(t *testing.T) {
 	h := newRelayHarness(t)
 	host := h.dial(t, "2.0.0.1")
@@ -3004,7 +3163,7 @@ func TestFullRoomAllowsOnlyAuthenticatedLiveReplacements(t *testing.T) {
 
 	unprovedHost := h.dial(t, "2.1.0.251")
 	unprovedHost.send(clientMsg{
-		Type:            relayTypeJoin,
+		Type:            relayTypeResume,
 		SessionID:       "FULL",
 		PeerID:          "H",
 		ProtocolVersion: relayProtocolVersion,
@@ -3012,7 +3171,7 @@ func TestFullRoomAllowsOnlyAuthenticatedLiveReplacements(t *testing.T) {
 	unprovedHost.expectError(relayErrorPeerIdUnavailable)
 	unprovedGuest := h.dial(t, "2.1.0.252")
 	unprovedGuest.send(clientMsg{
-		Type:            relayTypeJoin,
+		Type:            relayTypeResume,
 		SessionID:       "FULL",
 		PeerID:          "G1",
 		ProtocolVersion: relayProtocolVersion,
@@ -3020,7 +3179,7 @@ func TestFullRoomAllowsOnlyAuthenticatedLiveReplacements(t *testing.T) {
 	unprovedGuest.expectError(relayErrorPeerIdUnavailable)
 	wrongGuestToken, _ := mustReconnectToken(t)
 	unprovedGuest.send(clientMsg{
-		Type:            relayTypeJoin,
+		Type:            relayTypeResume,
 		SessionID:       "FULL",
 		PeerID:          "G1",
 		ReconnectToken:  wrongGuestToken,
@@ -3030,13 +3189,13 @@ func TestFullRoomAllowsOnlyAuthenticatedLiveReplacements(t *testing.T) {
 
 	newHost := h.dial(t, "2.1.0.253")
 	newHost.send(clientMsg{
-		Type:            relayTypeJoin,
+		Type:            relayTypeResume,
 		SessionID:       "FULL",
 		PeerID:          "H",
 		ReconnectToken:  created.ReconnectToken,
 		ProtocolVersion: relayProtocolVersion,
 	})
-	hostJoined := newHost.expectAuthority(relayTypeJoined, "H")
+	hostJoined := newHost.expectAuthority(relayTypeResumed, "H")
 	if len(hostJoined.Peers) != maxRoomSize-1 {
 		t.Fatalf("replacement host peers=%v, want %d peers", hostJoined.Peers, maxRoomSize-1)
 	}
@@ -3050,13 +3209,13 @@ func TestFullRoomAllowsOnlyAuthenticatedLiveReplacements(t *testing.T) {
 
 	newGuest := h.dial(t, "2.1.0.254")
 	newGuest.send(clientMsg{
-		Type:            relayTypeJoin,
+		Type:            relayTypeResume,
 		SessionID:       "FULL",
 		PeerID:          "G1",
 		ReconnectToken:  guestTokens["G1"],
 		ProtocolVersion: relayProtocolVersion,
 	})
-	newGuest.expectAuthority(relayTypeJoined, "H")
+	newGuest.expectAuthority(relayTypeResumed, "H")
 	if messages, err := guests["G1"].recvUntilClosed(2 * time.Second); err != nil {
 		t.Fatalf("displaced guest did not close: %v (frames=%v)", err, messages)
 	}
@@ -3203,15 +3362,17 @@ func TestLegacySameSourceHostReconnectAndModernTokenEnforcement(t *testing.T) {
 	})
 }
 
-func TestJoinAdmissionIsAtomicWithEmptyRoomCleanup(t *testing.T) {
+func TestResumeAdmissionIsAtomicWithEmptyRoomCleanup(t *testing.T) {
 	h := newRelayHarness(t)
 	_, hostVerifier := mustReconnectToken(t)
+	guestToken, guestVerifier := mustReconnectToken(t)
 	now := time.Now()
 	room := &Room{
 		SessionID:        "ATOMIC_CLEANUP",
 		HostPeerID:       "H",
 		hostVerifier:     hostVerifier,
-		peerReservations: make(map[string]peerReservation),
+		ProtocolVersion:  relayProtocolVersion,
+		peerReservations: map[string]peerReservation{"G1": {verifier: guestVerifier, absentSince: now}},
 		Peers:            make(map[string]*Client),
 		CreatedAt:        now.Add(-time.Hour),
 		LastActivityAt:   now.Add(-emptyRoomMaxAge - time.Second),
@@ -3231,7 +3392,10 @@ func TestJoinAdmissionIsAtomicWithEmptyRoomCleanup(t *testing.T) {
 	}
 
 	joiner := h.dial(t, "2.2.0.1")
-	joiner.send(clientMsg{Type: relayTypeJoin, SessionID: room.SessionID, PeerID: "G1"})
+	joiner.send(clientMsg{
+		Type: relayTypeResume, SessionID: room.SessionID, PeerID: "G1",
+		ReconnectToken: guestToken, ProtocolVersion: relayProtocolVersion,
+	})
 	<-reached
 
 	cleanupDone := make(chan struct{})
@@ -3246,7 +3410,7 @@ func TestJoinAdmissionIsAtomicWithEmptyRoomCleanup(t *testing.T) {
 	}
 
 	close(release)
-	joiner.expectAuthority(relayTypeJoined, "H")
+	joiner.expectAuthority(relayTypeResumed, "H")
 	<-cleanupDone
 
 	h.srv.mu.RLock()
@@ -3263,7 +3427,11 @@ func TestJoinAdmissionIsAtomicWithEmptyRoomCleanup(t *testing.T) {
 	}
 
 	second := h.dial(t, "2.2.0.2")
-	second.send(clientMsg{Type: relayTypeJoin, SessionID: room.SessionID, PeerID: "G2"})
+	secondToken, _ := mustReconnectToken(t)
+	second.send(clientMsg{
+		Type: relayTypeJoin, SessionID: room.SessionID, PeerID: "G2",
+		ReconnectToken: secondToken, ProtocolVersion: relayProtocolVersion,
+	})
 	second.expectAuthority(relayTypeJoined, "H")
 	joiner.expect(relayTypePeerJoined)
 	second.send(clientMsg{Type: relayTypeBroadcast, Payload: json.RawMessage(`{"atomic":true}`)})
@@ -3272,15 +3440,17 @@ func TestJoinAdmissionIsAtomicWithEmptyRoomCleanup(t *testing.T) {
 	}
 }
 
-func TestJoinAdmissionIsAtomicWithReservedRoomCreate(t *testing.T) {
+func TestResumeAdmissionIsAtomicWithReservedRoomCreate(t *testing.T) {
 	h := newRelayHarness(t)
 	_, hostVerifier := mustReconnectToken(t)
+	guestToken, guestVerifier := mustReconnectToken(t)
 	now := time.Now()
 	room := &Room{
 		SessionID:        "ATOMIC_CREATE",
 		HostPeerID:       "H",
 		hostVerifier:     hostVerifier,
-		peerReservations: make(map[string]peerReservation),
+		ProtocolVersion:  relayProtocolVersion,
+		peerReservations: map[string]peerReservation{"G": {verifier: guestVerifier, absentSince: now}},
 		Peers:            make(map[string]*Client),
 		CreatedAt:        now,
 		LastActivityAt:   now,
@@ -3300,11 +3470,18 @@ func TestJoinAdmissionIsAtomicWithReservedRoomCreate(t *testing.T) {
 	}
 
 	joiner := h.dial(t, "2.3.0.1")
-	joiner.send(clientMsg{Type: relayTypeJoin, SessionID: room.SessionID, PeerID: "G"})
+	joiner.send(clientMsg{
+		Type: relayTypeResume, SessionID: room.SessionID, PeerID: "G",
+		ReconnectToken: guestToken, ProtocolVersion: relayProtocolVersion,
+	})
 	<-reached
 
 	creator := h.dial(t, "2.3.0.2")
-	creator.send(clientMsg{Type: relayTypeCreate, SessionID: room.SessionID, PeerID: "OTHER"})
+	replacementToken, _ := mustReconnectToken(t)
+	creator.send(clientMsg{
+		Type: relayTypeCreate, SessionID: room.SessionID, PeerID: "OTHER",
+		ReconnectToken: replacementToken, ProtocolVersion: relayProtocolVersion,
+	})
 	type readResult struct {
 		message serverMsg
 		err     error
@@ -3329,7 +3506,7 @@ func TestJoinAdmissionIsAtomicWithReservedRoomCreate(t *testing.T) {
 	}
 
 	close(release)
-	joiner.expectAuthority(relayTypeJoined, "H")
+	joiner.expectAuthority(relayTypeResumed, "H")
 	result := <-createResult
 	if result.err != nil {
 		t.Fatalf("read create result: %v", result.err)
@@ -3344,10 +3521,6 @@ func TestJoinAdmissionIsAtomicWithReservedRoomCreate(t *testing.T) {
 		t.Fatal("reserved room was replaced during admission")
 	}
 }
-
-// ======================================================================
-// handleWS — broadcast / sendTo
-// ======================================================================
 
 func TestBroadcastDeliversToOthersNotSender(t *testing.T) {
 	h := newRelayHarness(t)
@@ -3381,7 +3554,7 @@ func TestBroadcastDeliversToOthersNotSender(t *testing.T) {
 		t.Errorf("g2 From=%q want G1", g2Msg.From)
 	}
 
-	// Sender should not receive its own broadcast.
+	// Broadcasts exclude the sender.
 	g1.recvNothing(200 * time.Millisecond)
 }
 
@@ -3490,10 +3663,6 @@ func TestSendToNotInRoomRejected(t *testing.T) {
 	c.expectError("not_in_room")
 }
 
-// ======================================================================
-// handleWS — ping / misc / rate limits
-// ======================================================================
-
 func TestPingReturnsPong(t *testing.T) {
 	h := newRelayHarness(t)
 	c := h.dial(t, "5.0.0.1")
@@ -3521,7 +3690,7 @@ func TestPerConnectionMessageRateLimit(t *testing.T) {
 	c.send(clientMsg{Type: "create", SessionID: "RL", PeerID: "H"})
 	c.expect("created")
 
-	// The per-connection bucket is rateBurst=30. After ~30 pings we start seeing rate_limited.
+	// Exceed the per-connection bucket and observe rate limiting.
 	sawRateLimit := false
 	for i := 0; i < rateBurst+10; i++ {
 		c.send(clientMsg{Type: "ping"})
@@ -3537,10 +3706,6 @@ func TestPerConnectionMessageRateLimit(t *testing.T) {
 		t.Fatal("expected to hit rate_limited within burst+10 messages")
 	}
 }
-
-// ======================================================================
-// handleWS — disconnect lifecycle
-// ======================================================================
 
 func TestDisconnectBroadcastsPeerLeft(t *testing.T) {
 	h := newRelayHarness(t)
@@ -3588,13 +3753,13 @@ func TestStalePeerSkipsCleanupBroadcast(t *testing.T) {
 
 	g2 := h.dial(t, "6.1.0.3")
 	g2.send(clientMsg{
-		Type:            relayTypeJoin,
+		Type:            relayTypeResume,
 		SessionID:       "D2",
 		PeerID:          "G",
 		ReconnectToken:  guestToken,
 		ProtocolVersion: relayProtocolVersion,
 	})
-	g2.expectAuthority(relayTypeJoined, "H")
+	g2.expectAuthority(relayTypeResumed, "H")
 	host.expect(relayTypePeerJoined)
 
 	if messages, err := g1.recvUntilClosed(2 * time.Second); err != nil {
@@ -3613,6 +3778,251 @@ func TestStalePeerSkipsCleanupBroadcast(t *testing.T) {
 	message := g2.expect(relayTypeMessage)
 	if message.From != "H" {
 		t.Fatalf("post-replacement sender=%q, want H", message.From)
+	}
+}
+
+func TestRoomLookupsAreThrottledPerSourceExceptProvenIdentities(t *testing.T) {
+	h := newRelayHarness(t)
+	_, _, _, guestToken := createModernRoomWithGuest(t, h, "REAL1", "6.10.0.1", "6.10.0.2")
+
+	probeIP := "6.10.0.3"
+	prober := h.dial(t, probeIP)
+	for i := range roomLookupRateBurst {
+		token, _ := mustReconnectToken(t)
+		prober.send(clientMsg{
+			Type:            relayTypeJoin,
+			SessionID:       fmt.Sprintf("NOPE%02d", i),
+			PeerID:          "P",
+			ReconnectToken:  token,
+			ProtocolVersion: relayProtocolVersion,
+		})
+		prober.expectError(relayErrorRoomNotFound)
+	}
+
+	// An exhausted source gets one answer whether or not a code is live, by
+	// join and by create alike.
+	for _, msg := range []clientMsg{
+		{Type: relayTypeJoin, SessionID: "REAL1"},
+		{Type: relayTypeJoin, SessionID: "NOPE99"},
+		{Type: relayTypeCreate, SessionID: "REAL1"},
+	} {
+		token, _ := mustReconnectToken(t)
+		msg.PeerID = "P"
+		msg.ReconnectToken = token
+		msg.ProtocolVersion = relayProtocolVersion
+		prober.send(msg)
+		prober.expectError(relayErrorRateLimited)
+	}
+
+	// A reconnect proving a held identity is not a guess.
+	resumed := h.dial(t, probeIP)
+	resumed.send(clientMsg{
+		Type:            relayTypeResume,
+		SessionID:       "REAL1",
+		PeerID:          "G",
+		ReconnectToken:  guestToken,
+		ProtocolVersion: relayProtocolVersion,
+	})
+	resumed.expectAuthority(relayTypeResumed, "H")
+
+	otherToken, _ := mustReconnectToken(t)
+	other := h.dial(t, "6.10.0.4")
+	other.send(clientMsg{
+		Type:            relayTypeJoin,
+		SessionID:       "REAL1",
+		PeerID:          "O",
+		ReconnectToken:  otherToken,
+		ProtocolVersion: relayProtocolVersion,
+	})
+	other.expectAuthority(relayTypeJoined, "H")
+}
+
+func TestResumeCannotEnterReplacementRoom(t *testing.T) {
+	for _, replacementHost := range []string{"NEW_HOST", "H"} {
+		t.Run(replacementHost, func(t *testing.T) {
+			h := newRelayHarness(t)
+			host, guest, hostToken, guestToken := createModernRoomWithGuest(t, h, "REUSED", "6.5.0.1", "6.5.0.2")
+			if err := guest.conn.Close(); err != nil {
+				t.Fatal(err)
+			}
+			host.expect(relayTypePeerLeft)
+			host.send(clientMsg{Type: relayTypeEndSession, ReconnectToken: hostToken, ProtocolVersion: relayProtocolVersion})
+			// The old client may lose this terminal ACK; the committed room is gone.
+			host.expect(relayTypeEnded)
+
+			replacementToken, _ := mustReconnectToken(t)
+			replacement := h.dial(t, "6.5.0.3")
+			replacement.send(clientMsg{
+				Type: relayTypeCreate, SessionID: "REUSED", PeerID: replacementHost,
+				ReconnectToken: replacementToken, ProtocolVersion: relayProtocolVersion,
+			})
+			replacement.expectAuthority(relayTypeCreated, replacementHost)
+			for index, identity := range []struct{ peerID, token string }{{"H", hostToken}, {"G", guestToken}} {
+				stale := h.dial(t, fmt.Sprintf("6.5.1.%d", index+1))
+				stale.send(clientMsg{
+					Type: relayTypeResume, SessionID: "REUSED", PeerID: identity.peerID,
+					ReconnectToken: identity.token, ProtocolVersion: relayProtocolVersion,
+				})
+				stale.expectError(relayErrorPeerIdUnavailable)
+				stale.send(clientMsg{Type: relayTypeBroadcast, Payload: json.RawMessage(`{"stale":true}`)})
+				stale.expectError(relayErrorNotInRoom)
+				stale.send(clientMsg{Type: relayTypeEndSession, ReconnectToken: identity.token, ProtocolVersion: relayProtocolVersion})
+				stale.expectError(relayErrorNotInRoom)
+			}
+			// No peerJoined or payload may precede this barrier on the replacement.
+			replacement.send(clientMsg{Type: relayTypePing})
+			replacement.expect(relayTypePong)
+			h.srv.mu.RLock()
+			room := h.srv.rooms["REUSED"]
+			room.mu.RLock()
+			reserved, connected := len(room.peerReservations), len(room.Peers)
+			room.mu.RUnlock()
+			h.srv.mu.RUnlock()
+			if reserved != 0 || connected != 1 {
+				t.Fatalf("rejected resumes allocated membership: reserved=%d connected=%d", reserved, connected)
+			}
+		})
+	}
+}
+
+func TestResumeLostJoinAndLeaveAcknowledgements(t *testing.T) {
+	h := newRelayHarness(t)
+	hostToken, _ := mustReconnectToken(t)
+	host := h.dial(t, "6.5.2.1")
+	host.send(clientMsg{
+		Type: relayTypeCreate, SessionID: "LOST_GUEST_ACK", PeerID: "H",
+		ReconnectToken: hostToken, ProtocolVersion: relayProtocolVersion,
+	})
+	host.expectAuthority(relayTypeCreated, "H")
+	guestToken, _ := mustReconnectToken(t)
+	admission := clientMsg{
+		Type: relayTypeJoin, SessionID: "LOST_GUEST_ACK", PeerID: "G",
+		ReconnectToken: guestToken, ProtocolVersion: relayProtocolVersion,
+	}
+	guest := h.dial(t, "6.5.2.2")
+	guest.send(admission)
+	host.expect(relayTypePeerJoined)
+	// Drop the first transport without reading its committed join ACK.
+	if err := guest.conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	host.expect(relayTypePeerLeft)
+	resumed := h.dial(t, "6.5.2.3")
+	admission.Type = relayTypeResume
+	resumed.send(admission)
+	ack := resumed.expectAuthority(relayTypeResumed, "H")
+	if !slices.Contains(ack.Features, relayFeatureAuthenticatedResume) {
+		t.Fatal("resume did not advertise authenticated admission")
+	}
+	host.expect(relayTypePeerJoined)
+	resumed.send(clientMsg{Type: relayTypeLeave, ReconnectToken: guestToken, ProtocolVersion: relayProtocolVersion})
+	host.expect(relayTypePeerLeft)
+	// The leave committed, but the departing peer never reads its ACK.
+	if err := resumed.conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cleanup := h.dial(t, "6.5.2.4")
+	cleanup.send(admission)
+	cleanup.expectError(relayErrorPeerIdUnavailable)
+	cleanup.send(clientMsg{Type: relayTypeLeave, ReconnectToken: guestToken, ProtocolVersion: relayProtocolVersion})
+	cleanup.expectError(relayErrorNotInRoom)
+	host.send(clientMsg{Type: relayTypePing})
+	host.expect(relayTypePong)
+}
+
+func TestResumeRequiresUnexpiredExistingMembership(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "rooms.json")
+	h := newRelayHarnessAt(t, t.TempDir(), stateFile)
+	host, guest, _, guestToken := createModernRoomWithGuest(t, h, "EXPIRING_RESUME", "6.5.3.1", "6.5.3.2")
+	if err := guest.conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	host.expect(relayTypePeerLeft)
+	h.srv.mu.RLock()
+	room := h.srv.rooms["EXPIRING_RESUME"]
+	h.srv.mu.RUnlock()
+	expireDisconnectedReservations(room, time.Now())
+
+	resume := clientMsg{
+		Type: relayTypeResume, SessionID: "EXPIRING_RESUME", PeerID: "G",
+		ReconnectToken: guestToken, ProtocolVersion: relayProtocolVersion,
+	}
+	probe := h.dial(t, "6.5.3.3")
+	probe.send(resume)
+	probe.expectError(relayErrorPeerIdUnavailable)
+	resume.PeerID = "NEVER_JOINED"
+	probe.send(resume)
+	probe.expectError(relayErrorPeerIdUnavailable)
+	resume.SessionID = "NEVER_CREATED"
+	probe.send(resume)
+	probe.expectError(relayErrorRoomNotFound)
+	resume.SessionID = "EXPIRING_RESUME"
+	resume.ProtocolVersion = legacyRelayProtocolVersion
+	probe.send(resume)
+	probe.expectError(relayErrorProtocolMismatch)
+	host.send(clientMsg{Type: relayTypePing})
+	host.expect(relayTypePong)
+
+	// Admission-time expiry is persisted; a restart cannot resurrect the guest.
+	if err := h.srv.snap.flushAndStop(2 * time.Second); err != nil {
+		t.Fatalf("flush reservation expiry: %v", err)
+	}
+	restarted := newRelayHarnessAt(t, t.TempDir(), copySnapshotForRestart(t, stateFile))
+	afterRestart := restarted.dial(t, "6.5.3.4")
+	resume.PeerID = "G"
+	resume.ProtocolVersion = relayProtocolVersion
+	afterRestart.send(resume)
+	afterRestart.expectError(relayErrorPeerIdUnavailable)
+
+	// An explicit new join is still allowed to claim the freed identity.
+	freshToken, _ := mustReconnectToken(t)
+	resume.Type = relayTypeJoin
+	resume.ReconnectToken = freshToken
+	probe.send(resume)
+	probe.expectAuthority(relayTypeJoined, "H")
+	host.expect(relayTypePeerJoined)
+}
+
+func TestOfflineGuestResumesAfterHostTransfer(t *testing.T) {
+	h := newRelayHarness(t)
+	host, promoted, _, _ := createTransferRoomWithGuest(t, h, "OFFLINE_TRANSFER", "6.5.4.1", "6.5.4.2")
+	token, _ := mustReconnectToken(t)
+	offline := h.dial(t, "6.5.4.3")
+	admission := currentAdmission(clientMsg{
+		Type: relayTypeJoin, SessionID: "OFFLINE_TRANSFER", PeerID: "OFFLINE",
+		ReconnectToken: token, ProtocolVersion: relayProtocolVersion,
+	})
+	offline.send(admission)
+	offline.expectAuthority(relayTypeJoined, "H")
+	offline.expectEligibility("OFFLINE_TRANSFER", "H", "G", "OFFLINE")
+	host.expect(relayTypePeerJoined)
+	host.expectEligibility("OFFLINE_TRANSFER", "H", "G", "OFFLINE")
+	promoted.expect(relayTypePeerJoined)
+	promoted.expectEligibility("OFFLINE_TRANSFER", "H", "G", "OFFLINE")
+	if err := offline.conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	host.expect(relayTypePeerLeft)
+	host.expectEligibility("OFFLINE_TRANSFER", "H", "G")
+	promoted.expect(relayTypePeerLeft)
+	promoted.expectEligibility("OFFLINE_TRANSFER", "H", "G")
+	host.send(clientMsg{Type: relayTypeTransferHost, To: "G", ProtocolVersion: relayProtocolVersion})
+	host.expect(relayTypeHostChanged)
+	host.expectEligibility("OFFLINE_TRANSFER", "G", "H")
+	promoted.expect(relayTypeHostChanged)
+	promoted.expectEligibility("OFFLINE_TRANSFER", "G", "H")
+	admission.Type = relayTypeResume
+	resumed := h.dial(t, "6.5.4.4")
+	resumed.send(admission)
+	resumed.expectAuthority(relayTypeResumed, "G")
+	resumed.expectEligibility("OFFLINE_TRANSFER", "G", "H", "OFFLINE")
+	host.expect(relayTypePeerJoined)
+	host.expectEligibility("OFFLINE_TRANSFER", "G", "H", "OFFLINE")
+	promoted.expect(relayTypePeerJoined)
+	promoted.expectEligibility("OFFLINE_TRANSFER", "G", "H", "OFFLINE")
+	resumed.send(clientMsg{Type: relayTypeSendTo, To: "G", Payload: json.RawMessage(`{"resumed":true}`)})
+	if received := promoted.expect(relayTypeMessage); received.From != "OFFLINE" {
+		t.Fatalf("resumed sender=%q, want OFFLINE", received.From)
 	}
 }
 
@@ -3664,7 +4074,7 @@ func TestDisconnectedModernGuestIdentityRejectsTheftAndAcceptsRightfulReconnect(
 	thiefToken, _ := mustReconnectToken(t)
 	thief := h.dial(t, "6.1.0.12")
 	thief.send(clientMsg{
-		Type:            relayTypeJoin,
+		Type:            relayTypeResume,
 		SessionID:       "GUEST_RECONNECT",
 		PeerID:          "G",
 		ReconnectToken:  thiefToken,
@@ -3676,13 +4086,13 @@ func TestDisconnectedModernGuestIdentityRejectsTheftAndAcceptsRightfulReconnect(
 
 	rightful := h.dial(t, "6.1.0.13")
 	rightful.send(clientMsg{
-		Type:            relayTypeJoin,
+		Type:            relayTypeResume,
 		SessionID:       "GUEST_RECONNECT",
 		PeerID:          "G",
 		ReconnectToken:  guestToken,
 		ProtocolVersion: relayProtocolVersion,
 	})
-	joined := rightful.expectAuthority(relayTypeJoined, "H")
+	joined := rightful.expectAuthority(relayTypeResumed, "H")
 	if joined.ReconnectToken != guestToken {
 		t.Fatal("rightful reconnect rotated the retained guest token")
 	}
@@ -3867,7 +4277,7 @@ func TestAdmissionPrunePersistsWhenJoinRejected(t *testing.T) {
 	wrongHostToken, _ := mustReconnectToken(t)
 	rejected := h.dial(t, "6.2.2.3")
 	rejected.send(clientMsg{
-		Type:            relayTypeJoin,
+		Type:            relayTypeResume,
 		SessionID:       "REJECTED_AFTER_PRUNE",
 		PeerID:          "H",
 		ReconnectToken:  wrongHostToken,
@@ -3932,7 +4342,7 @@ func TestGuestReservationSnapshotV4Migration(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "rooms.json")
 	now := time.Now().UTC()
 	_, hostVerifier := mustReconnectToken(t)
-	_, guestVerifier := mustReconnectToken(t)
+	guestToken, guestVerifier := mustReconnectToken(t)
 	legacy := stateSnapshot{
 		Version: 3,
 		SavedAt: now,
@@ -3985,6 +4395,12 @@ func TestGuestReservationSnapshotV4Migration(t *testing.T) {
 	if runtimeReservation.absentSince.IsZero() {
 		t.Fatal("legacy reservation was restored as connected")
 	}
+	guest := h.dial(t, "6.2.4.1")
+	guest.send(clientMsg{
+		Type: relayTypeResume, SessionID: "V3_MIGRATION", PeerID: "G",
+		ReconnectToken: guestToken, ProtocolVersion: relayProtocolVersion,
+	})
+	guest.expectAuthority(relayTypeResumed, "H")
 }
 
 func TestSnapshotV2LoadsAndRewritesV4(t *testing.T) {
@@ -4027,6 +4443,12 @@ func TestSnapshotV2LoadsAndRewritesV4(t *testing.T) {
 	if snapshot.Version != snapshotFormatVersion {
 		t.Fatalf("v2 rewrite version=%d, want %d", snapshot.Version, snapshotFormatVersion)
 	}
+	legacyHost := h.dial(t, "6.2.4.2")
+	legacyHost.send(clientMsg{
+		Type: relayTypeResume, SessionID: "V2_MIGRATION", PeerID: "H",
+		ProtocolVersion: legacyRelayProtocolVersion,
+	})
+	legacyHost.expectError(relayErrorProtocolMismatch)
 }
 
 func TestSnapshotV4RetainsGuestAbsenceAcrossRestart(t *testing.T) {
@@ -4316,8 +4738,8 @@ func TestTerminalPersistenceFailureSuppressesSuccess(t *testing.T) {
 			ProtocolVersion: relayProtocolVersion,
 		})
 		failure := guest.expectError(relayErrorInvalidMessage)
-		if !strings.Contains(failure.Message, "persist") {
-			t.Fatalf("leave persistence error message=%q", failure.Message)
+		if strings.Contains(failure.Message, injectedErr.Error()) {
+			t.Fatalf("leave failure disclosed the internal persistence error: %q", failure.Message)
 		}
 		h.srv.mu.RLock()
 		room := h.srv.rooms["FAILED_LEAVE"]
@@ -4368,8 +4790,8 @@ func TestTerminalPersistenceFailureSuppressesSuccess(t *testing.T) {
 			ProtocolVersion: relayProtocolVersion,
 		})
 		failure := host.expectError(relayErrorInvalidMessage)
-		if !strings.Contains(failure.Message, "persist") {
-			t.Fatalf("end persistence error message=%q", failure.Message)
+		if strings.Contains(failure.Message, injectedErr.Error()) {
+			t.Fatalf("end failure disclosed the internal persistence error: %q", failure.Message)
 		}
 		messages, err := guest.recvUntilClosed(2 * time.Second)
 		if err != nil {
@@ -4668,7 +5090,7 @@ func TestLeavePendingReservationRejectsReplacement(t *testing.T) {
 
 	matching := h.dial(t, "6.3.1.3")
 	matching.send(clientMsg{
-		Type:            relayTypeJoin,
+		Type:            relayTypeResume,
 		SessionID:       "PENDING_RELEASE",
 		PeerID:          "G",
 		ReconnectToken:  guestToken,
@@ -4678,7 +5100,7 @@ func TestLeavePendingReservationRejectsReplacement(t *testing.T) {
 	wrongToken, _ := mustReconnectToken(t)
 	wrong := h.dial(t, "6.3.1.4")
 	wrong.send(clientMsg{
-		Type:            relayTypeJoin,
+		Type:            relayTypeResume,
 		SessionID:       "PENDING_RELEASE",
 		PeerID:          "G",
 		ReconnectToken:  wrongToken,
@@ -5310,6 +5732,791 @@ func TestAuthenticatedModernHostEndDeletesRoomAndIsRetrySafe(t *testing.T) {
 	retry.expectError(relayErrorRoomNotFound)
 }
 
+func blockNextTransfer(t *testing.T, h *relayHarness) (<-chan struct{}, func()) {
+	t.Helper()
+	reached := make(chan struct{})
+	unblock := make(chan struct{})
+	var blockOnce, releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(unblock) }) }
+	h.srv.beforeTransferRoomLock = func() {
+		blockOnce.Do(func() {
+			close(reached)
+			<-unblock
+		})
+	}
+	t.Cleanup(release)
+	return reached, release
+}
+
+func TestTransferHostRejectsAdmittedUnknownOrUnsupportedBystander(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		syncVersion  int
+		capabilities []string
+	}{
+		{name: "published v2 without metadata"},
+		{name: "same sync version without capability", syncVersion: 3},
+		{name: "capability without sync version", capabilities: []string{relayCapabilityHostTransfer}},
+		{name: "negative sync version", syncVersion: -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRelayHarness(t)
+			host, guest, _, _ := createTransferRoomWithGuest(t, h, "XFER_UNKNOWN", "6.4.0.1", "6.4.0.2")
+			token, _ := mustReconnectToken(t)
+			bystander := h.dial(t, "6.4.0.3")
+			bystander.send(clientMsg{
+				Type: relayTypeJoin, SessionID: "XFER_UNKNOWN", PeerID: "B",
+				ReconnectToken: token, ProtocolVersion: relayProtocolVersion,
+				SyncProtocolVersion: tc.syncVersion, Capabilities: tc.capabilities,
+			})
+			bystander.expectAuthority(relayTypeJoined, "H")
+			if slices.Contains(tc.capabilities, relayCapabilityHostTransfer) {
+				bystander.expectEligibility("XFER_UNKNOWN", "H")
+			}
+			for _, peer := range []*testConn{host, guest} {
+				peer.expect(relayTypePeerJoined)
+				peer.expectEligibility("XFER_UNKNOWN", "H")
+			}
+			// No sync join is needed to establish this admitted peer's barrier.
+			host.send(clientMsg{Type: relayTypeTransferHost, To: "G", ProtocolVersion: relayProtocolVersion})
+			host.expectError(relayErrorHostTransferUnavailable)
+			host.send(clientMsg{Type: relayTypeBroadcast, Payload: json.RawMessage(`{"state":"still H"}`)})
+			for _, peer := range []*testConn{guest, bystander} {
+				message := peer.expect(relayTypeMessage)
+				if message.From != "H" || string(message.Payload) != `{"state":"still H"}` {
+					t.Fatalf("old authority no longer reaches admitted follower: %+v", message)
+				}
+			}
+		})
+	}
+}
+
+func TestTransferHostQueuedBeforeIncompatibleAdmissionCommitsAfterIt(t *testing.T) {
+	h := newRelayHarness(t)
+	host, guest, _, _ := createTransferRoomWithGuest(t, h, "XFER_QUEUED", "6.4.1.1", "6.4.1.2")
+	reached, release := blockNextTransfer(t, h)
+	host.send(clientMsg{Type: relayTypeTransferHost, To: "G", ProtocolVersion: relayProtocolVersion})
+	select {
+	case <-reached:
+	case <-time.After(2 * time.Second):
+		t.Fatal("transfer did not reach the pre-lock barrier")
+	}
+
+	token, _ := mustReconnectToken(t)
+	bystander := h.dial(t, "6.4.1.3")
+	bystander.send(clientMsg{
+		Type: relayTypeJoin, SessionID: "XFER_QUEUED", PeerID: "B",
+		ReconnectToken: token, ProtocolVersion: relayProtocolVersion,
+	})
+	bystander.expectAuthority(relayTypeJoined, "H")
+	for _, peer := range []*testConn{host, guest} {
+		peer.expect(relayTypePeerJoined)
+		peer.expectEligibility("XFER_QUEUED", "H")
+	}
+	release()
+	host.expectError(relayErrorHostTransferUnavailable)
+	host.send(clientMsg{Type: relayTypeBroadcast, Payload: json.RawMessage(`{"after":"rejection"}`)})
+	for _, peer := range []*testConn{guest, bystander} {
+		if message := peer.expect(relayTypeMessage); message.From != "H" {
+			t.Fatalf("queued transfer displaced the admitted host: %+v", message)
+		}
+	}
+}
+
+func TestTransferHostBeforeLegacyBystanderAdmissionUsesNewAuthority(t *testing.T) {
+	h := newRelayHarness(t)
+	host, guest, _, _ := createTransferRoomWithGuest(t, h, "XFER_FIRST", "6.4.2.1", "6.4.2.2")
+	reached := make(chan struct{})
+	unblock := make(chan struct{})
+	var blockOnce, releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(unblock) }) }
+	t.Cleanup(release)
+	h.srv.beforeJoinRoomLock = func() {
+		blockOnce.Do(func() {
+			close(reached)
+			<-unblock
+		})
+	}
+	token, _ := mustReconnectToken(t)
+	bystander := h.dial(t, "6.4.2.3")
+	bystander.send(clientMsg{
+		Type: relayTypeJoin, SessionID: "XFER_FIRST", PeerID: "B",
+		ReconnectToken: token, ProtocolVersion: relayProtocolVersion,
+	})
+	select {
+	case <-reached:
+	case <-time.After(2 * time.Second):
+		t.Fatal("join did not reach the pre-lock barrier")
+	}
+	host.send(clientMsg{Type: relayTypeTransferHost, To: "G", ProtocolVersion: relayProtocolVersion})
+	for _, peer := range []*testConn{host, guest} {
+		if message := peer.expect(relayTypeHostChanged); message.HostPeerID != "G" {
+			t.Fatalf("transfer did not commit before admission: %+v", message)
+		}
+		peer.expectEligibility("XFER_FIRST", "G", "H")
+	}
+	release()
+	bystander.expectAuthority(relayTypeJoined, "G")
+	for _, peer := range []*testConn{host, guest} {
+		peer.expect(relayTypePeerJoined)
+		peer.expectEligibility("XFER_FIRST", "G")
+	}
+	guest.send(clientMsg{Type: relayTypeBroadcast, Payload: json.RawMessage(`{"state":"from G"}`)})
+	if message := bystander.expect(relayTypeMessage); message.From != "G" {
+		t.Fatalf("new follower did not receive its admitted host: %+v", message)
+	}
+}
+
+func TestTransferHostExcludesPositivelyDifferentSyncVersion(t *testing.T) {
+	for _, hasCapability := range []bool{false, true} {
+		t.Run(fmt.Sprintf("capability=%v", hasCapability), func(t *testing.T) {
+			h := newRelayHarness(t)
+			host, guest, _, _ := createTransferRoomWithGuest(t, h, "XFER_DIFFERENT", "6.4.3.1", "6.4.3.2")
+			token, _ := mustReconnectToken(t)
+			bystander := h.dial(t, "6.4.3.3")
+			admission := clientMsg{
+				Type: relayTypeJoin, SessionID: "XFER_DIFFERENT", PeerID: "B",
+				ReconnectToken: token, ProtocolVersion: relayProtocolVersion, SyncProtocolVersion: 4,
+			}
+			if hasCapability {
+				admission.Capabilities = []string{relayCapabilityHostTransfer}
+			}
+			bystander.send(admission)
+			bystander.expectAuthority(relayTypeJoined, "H")
+			if hasCapability {
+				bystander.expectEligibility("XFER_DIFFERENT", "H", "G")
+			}
+			for _, peer := range []*testConn{host, guest} {
+				peer.expect(relayTypePeerJoined)
+				peer.expectEligibility("XFER_DIFFERENT", "H", "G")
+			}
+			host.send(clientMsg{Type: relayTypeTransferHost, To: "B", ProtocolVersion: relayProtocolVersion})
+			host.expectError(relayErrorHostTransferUnavailable)
+			host.send(clientMsg{Type: relayTypeTransferHost, To: "G", ProtocolVersion: relayProtocolVersion})
+			for _, peer := range []*testConn{host, guest, bystander} {
+				if message := peer.expect(relayTypeHostChanged); message.HostPeerID != "G" {
+					t.Fatalf("positively incompatible bystander blocked transfer: %+v", message)
+				}
+				if peer != bystander || hasCapability {
+					peer.expectEligibility("XFER_DIFFERENT", "G", "H")
+				}
+			}
+		})
+	}
+}
+
+func TestTransferHostBystanderLeaveOrDisconnectRemovesBarrier(t *testing.T) {
+	for _, explicitLeave := range []bool{true, false} {
+		t.Run(fmt.Sprintf("explicitLeave=%v", explicitLeave), func(t *testing.T) {
+			h := newRelayHarness(t)
+			host, guest, _, _ := createTransferRoomWithGuest(t, h, "XFER_REMOVE", "6.4.4.1", "6.4.4.2")
+			token, _ := mustReconnectToken(t)
+			bystander := h.dial(t, "6.4.4.3")
+			bystander.send(clientMsg{
+				Type: relayTypeJoin, SessionID: "XFER_REMOVE", PeerID: "B",
+				ReconnectToken: token, ProtocolVersion: relayProtocolVersion,
+			})
+			bystander.expectAuthority(relayTypeJoined, "H")
+			for _, peer := range []*testConn{host, guest} {
+				peer.expect(relayTypePeerJoined)
+				peer.expectEligibility("XFER_REMOVE", "H")
+			}
+			if explicitLeave {
+				bystander.send(clientMsg{Type: relayTypeLeave, ReconnectToken: token, ProtocolVersion: relayProtocolVersion})
+				for _, peer := range []*testConn{host, guest} {
+					// A releasing bystander is still live until persistence commits.
+					peer.expectEligibility("XFER_REMOVE", "H")
+				}
+				bystander.expect(relayTypeLeft)
+			} else if err := bystander.conn.Close(); err != nil {
+				t.Fatalf("disconnect bystander: %v", err)
+			}
+			for _, peer := range []*testConn{host, guest} {
+				if left := peer.expect(relayTypePeerLeft); left.PeerID != "B" {
+					t.Fatalf("wrong bystander left: %+v", left)
+				}
+				peer.expectEligibility("XFER_REMOVE", "H", "G")
+			}
+			host.send(clientMsg{Type: relayTypeTransferHost, To: "G", ProtocolVersion: relayProtocolVersion})
+			for _, peer := range []*testConn{host, guest} {
+				if changed := peer.expect(relayTypeHostChanged); changed.HostPeerID != "G" {
+					t.Fatalf("removed bystander still blocked transfer: %+v", changed)
+				}
+				peer.expectEligibility("XFER_REMOVE", "G", "H")
+			}
+		})
+	}
+}
+
+func TestTransferHostAdmissionDoesNotReuseConnectionCapability(t *testing.T) {
+	for _, admission := range []struct {
+		name   string
+		peerID string
+		typ    string
+	}{
+		{"host create retry", "H", relayTypeCreate},
+		{"host resume", "H", relayTypeResume},
+		{"target resume", "G", relayTypeResume},
+		{"bystander resume", "B", relayTypeResume},
+	} {
+		for _, disconnected := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/disconnected=%v", admission.name, disconnected), func(t *testing.T) {
+				h := newRelayHarness(t)
+				host, guest, hostToken, guestToken := createTransferRoomWithGuest(t, h, "XFER_REPLACE", "6.4.5.1", "6.4.5.2")
+				subject, token, subjectIP := guest, guestToken, "6.4.5.2"
+				observers := []*testConn{host}
+				if admission.peerID == "H" {
+					subject, token, subjectIP = host, hostToken, "6.4.5.1"
+					observers = []*testConn{guest}
+				} else if admission.peerID == "B" {
+					token, _ = mustReconnectToken(t)
+					subjectIP = "6.4.5.3"
+					subject = h.dial(t, subjectIP)
+					subject.send(currentAdmission(clientMsg{
+						Type: relayTypeJoin, SessionID: "XFER_REPLACE", PeerID: "B",
+						ReconnectToken: token, ProtocolVersion: relayProtocolVersion,
+					}))
+					subject.expectAuthority(relayTypeJoined, "H")
+					subject.expectEligibility("XFER_REPLACE", "H", "G", "B")
+					observers = []*testConn{host, guest}
+					for _, observer := range observers {
+						observer.expect(relayTypePeerJoined)
+						observer.expectEligibility("XFER_REPLACE", "H", "G", "B")
+					}
+				}
+				if disconnected {
+					if err := subject.conn.Close(); err != nil {
+						t.Fatalf("close subject: %v", err)
+					}
+					for _, observer := range observers {
+						if left := observer.expect(relayTypePeerLeft); left.PeerID != admission.peerID {
+							t.Fatalf("wrong disconnected identity: %+v", left)
+						}
+						if admission.peerID == "B" {
+							observer.expectEligibility("XFER_REPLACE", "H", "G")
+						} else {
+							observer.expectEligibility("XFER_REPLACE", "H")
+						}
+					}
+				}
+				replacement := h.dial(t, "6.4.5.4")
+				// Deliberately omit metadata while proving the same reconnect identity.
+				replacement.send(clientMsg{
+					Type: admission.typ, SessionID: "XFER_REPLACE", PeerID: admission.peerID,
+					ReconnectToken: token, ProtocolVersion: relayProtocolVersion,
+				})
+				ackType := relayTypeResumed
+				if admission.typ == relayTypeCreate {
+					ackType = relayTypeCreated
+				}
+				if ack := replacement.expectAuthority(ackType, "H"); ack.ReconnectToken != token {
+					t.Fatalf("replacement changed reconnect identity: %+v", ack)
+				}
+				for _, observer := range observers {
+					if admission.typ == relayTypeResume || disconnected {
+						if joined := observer.expect(relayTypePeerJoined); joined.PeerID != admission.peerID {
+							t.Fatalf("wrong replacement identity: %+v", joined)
+						}
+					}
+					observer.expectEligibility("XFER_REPLACE", "H")
+				}
+				if !disconnected {
+					if messages, err := subject.recvUntilClosed(2 * time.Second); err != nil || len(messages) != 0 {
+						t.Fatalf("displaced client received live roster traffic: frames=%+v err=%v", messages, err)
+					}
+				}
+				h.waitIPConnections(t, subjectIP, 0)
+				requester := host
+				if admission.peerID == "H" {
+					requester = replacement
+				}
+				requester.send(clientMsg{Type: relayTypeTransferHost, To: "G", ProtocolVersion: relayProtocolVersion})
+				requester.expectError(relayErrorHostTransferUnavailable)
+
+				// Stale disconnect cleanup must neither publish peerLeft nor evict
+				// the replacement. An unsupported replacement gets no eligibility.
+				replacement.send(clientMsg{Type: relayTypePing})
+				replacement.expect(relayTypePong)
+				replacement.send(clientMsg{Type: relayTypeBroadcast, Payload: json.RawMessage(`{"replacement":true}`)})
+				for _, observer := range observers {
+					if message := observer.expect(relayTypeMessage); message.From != admission.peerID {
+						t.Fatalf("stale connection displaced replacement: %+v", message)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestTransferHostLeaveAndRejoinOnSameSocketResetsMetadata(t *testing.T) {
+	h := newRelayHarness(t)
+	host, guest, _, token := createTransferRoomWithGuest(t, h, "XFER_REUSE", "6.4.6.1", "6.4.6.2")
+	guest.send(clientMsg{Type: relayTypeLeave, ReconnectToken: token, ProtocolVersion: relayProtocolVersion})
+	host.expectEligibility("XFER_REUSE", "H")
+	guest.expectEligibility("XFER_REUSE", "H")
+	guest.expect(relayTypeLeft)
+	host.expect(relayTypePeerLeft)
+	host.expectEligibility("XFER_REUSE", "H")
+	guest.send(clientMsg{
+		Type: relayTypeJoin, SessionID: "XFER_REUSE", PeerID: "G",
+		ReconnectToken: token, ProtocolVersion: relayProtocolVersion,
+	})
+	guest.expectAuthority(relayTypeJoined, "H")
+	host.expect(relayTypePeerJoined)
+	host.expectEligibility("XFER_REUSE", "H")
+	host.send(clientMsg{Type: relayTypeTransferHost, To: "G", ProtocolVersion: relayProtocolVersion})
+	host.expectError(relayErrorHostTransferUnavailable)
+	guest.send(clientMsg{Type: relayTypePing})
+	guest.expect(relayTypePong)
+}
+
+func TestTransferHostQueuedTargetDisappearsOrReleases(t *testing.T) {
+	for _, releaseTarget := range []bool{false, true} {
+		t.Run(fmt.Sprintf("releaseTarget=%v", releaseTarget), func(t *testing.T) {
+			h := newRelayHarness(t)
+			host, guest, _, token := createTransferRoomWithGuest(t, h, "XFER_GONE", "6.4.7.1", "6.4.7.2")
+			makeCurrentSnapshotDurable(t, h.srv.snap)
+			persistReached := make(chan struct{})
+			persistUnblock := make(chan struct{})
+			var persistOnce, releaseOnce sync.Once
+			releasePersist := func() { releaseOnce.Do(func() { close(persistUnblock) }) }
+			t.Cleanup(releasePersist)
+			if releaseTarget {
+				h.srv.snap.writeMu.Lock()
+				originalPersist := h.srv.snap.persist
+				h.srv.snap.persist = func(data []byte) error {
+					persistOnce.Do(func() {
+						close(persistReached)
+						<-persistUnblock
+					})
+					return originalPersist(data)
+				}
+				h.srv.snap.writeMu.Unlock()
+			}
+			reached, release := blockNextTransfer(t, h)
+			host.send(clientMsg{Type: relayTypeTransferHost, To: "G", ProtocolVersion: relayProtocolVersion})
+			select {
+			case <-reached:
+			case <-time.After(2 * time.Second):
+				t.Fatal("transfer did not reach barrier")
+			}
+			if releaseTarget {
+				guest.send(clientMsg{Type: relayTypeLeave, ReconnectToken: token, ProtocolVersion: relayProtocolVersion})
+				select {
+				case <-persistReached:
+				case <-time.After(2 * time.Second):
+					t.Fatal("target release did not reach persistence barrier")
+				}
+				host.expectEligibility("XFER_GONE", "H")
+				guest.expectEligibility("XFER_GONE", "H")
+			} else {
+				if err := guest.conn.Close(); err != nil {
+					t.Fatalf("disconnect target: %v", err)
+				}
+				host.expect(relayTypePeerLeft)
+				host.expectEligibility("XFER_GONE", "H")
+			}
+			release()
+			host.expectError(relayErrorPeerNotFound)
+			if releaseTarget {
+				releasePersist()
+				guest.expect(relayTypeLeft)
+				host.expect(relayTypePeerLeft)
+				host.expectEligibility("XFER_GONE", "H")
+			}
+			host.send(clientMsg{Type: relayTypePing})
+			host.expect(relayTypePong)
+		})
+	}
+}
+
+func TestTransferHostStaleQueuedConnectionCannotMutateAuthority(t *testing.T) {
+	h := newRelayHarness(t)
+	host, guest, token, _ := createTransferRoomWithGuest(t, h, "XFER_STALE", "6.4.8.1", "6.4.8.2")
+	reached, release := blockNextTransfer(t, h)
+	host.send(clientMsg{Type: relayTypeTransferHost, To: "G", ProtocolVersion: relayProtocolVersion})
+	select {
+	case <-reached:
+	case <-time.After(2 * time.Second):
+		t.Fatal("old host transfer did not reach barrier")
+	}
+	replacement := h.dial(t, "6.4.8.3")
+	replacement.send(currentAdmission(clientMsg{
+		Type: relayTypeCreate, SessionID: "XFER_STALE", PeerID: "H",
+		ReconnectToken: token, ProtocolVersion: relayProtocolVersion,
+	}))
+	replacement.expectAuthority(relayTypeCreated, "H")
+	replacement.expectEligibility("XFER_STALE", "H", "G")
+	guest.expectEligibility("XFER_STALE", "H", "G")
+	release()
+	h.waitIPConnections(t, "6.4.8.1", 0)
+	replacement.send(clientMsg{Type: relayTypeBroadcast, Payload: json.RawMessage(`{"host":"replacement"}`)})
+	if message := guest.expect(relayTypeMessage); message.From != "H" {
+		t.Fatalf("stale request or disconnect mutated replacement authority: %+v", message)
+	}
+	replacement.send(clientMsg{Type: relayTypeTransferHost, To: "G", ProtocolVersion: relayProtocolVersion})
+	for _, peer := range []*testConn{replacement, guest} {
+		if changed := peer.expect(relayTypeHostChanged); changed.HostPeerID != "G" || changed.From != "H" {
+			t.Fatalf("replacement lost transfer authority: %+v", changed)
+		}
+		peer.expectEligibility("XFER_STALE", "G", "H")
+	}
+}
+
+func TestTransferHostEligibilityRecoversAfterLeaveRollback(t *testing.T) {
+	h := newRelayHarness(t)
+	host, guest, _, token := createTransferRoomWithGuest(t, h, "XFER_ROLLBACK", "6.4.9.1", "6.4.9.2")
+	makeCurrentSnapshotDurable(t, h.srv.snap)
+	h.srv.snap.writeMu.Lock()
+	originalPersist := h.srv.snap.persist
+	var calls atomic.Int64
+	h.srv.snap.persist = func(data []byte) error {
+		if calls.Add(1) == 1 {
+			return errors.New("release persistence failed")
+		}
+		return originalPersist(data)
+	}
+	h.srv.snap.writeMu.Unlock()
+	guest.send(clientMsg{Type: relayTypeLeave, ReconnectToken: token, ProtocolVersion: relayProtocolVersion})
+	for _, peer := range []*testConn{host, guest} {
+		peer.expectEligibility("XFER_ROLLBACK", "H")
+		peer.expectEligibility("XFER_ROLLBACK", "H", "G")
+	}
+	guest.expectError(relayErrorInvalidMessage)
+	host.send(clientMsg{Type: relayTypeTransferHost, To: "G", ProtocolVersion: relayProtocolVersion})
+	for _, peer := range []*testConn{host, guest} {
+		if changed := peer.expect(relayTypeHostChanged); changed.HostPeerID != "G" {
+			t.Fatalf("failed leave permanently removed transfer target: %+v", changed)
+		}
+		peer.expectEligibility("XFER_ROLLBACK", "G", "H")
+	}
+}
+
+func TestTransferHostSwapsAuthorityAndBroadcastsHostChanged(t *testing.T) {
+	h := newRelayHarness(t)
+	host, guestA, hostToken, guestAToken := createTransferRoomWithGuest(t, h, "XFER_HAPPY", "6.3.0.1", "6.3.0.2")
+	guestBToken, _ := mustReconnectToken(t)
+	guestB := h.dial(t, "6.3.0.3")
+	guestB.send(currentAdmission(clientMsg{
+		Type: relayTypeJoin, SessionID: "XFER_HAPPY", PeerID: "B",
+		ReconnectToken: guestBToken, ProtocolVersion: relayProtocolVersion,
+	}))
+	guestB.expectAuthority(relayTypeJoined, "H")
+	guestB.expectEligibility("XFER_HAPPY", "H", "G", "B")
+	for _, peer := range []*testConn{host, guestA} {
+		peer.expect(relayTypePeerJoined)
+		peer.expectEligibility("XFER_HAPPY", "H", "G", "B")
+	}
+
+	for _, transfer := range []struct {
+		sender *testConn
+		from   string
+		to     string
+	}{
+		{host, "H", "G"},
+		{guestA, "G", "H"},
+		{host, "H", "G"},
+	} {
+		transfer.sender.send(clientMsg{Type: relayTypeTransferHost, To: transfer.to, ProtocolVersion: relayProtocolVersion})
+		for _, peer := range []*testConn{host, guestA, guestB} {
+			changed := peer.expect(relayTypeHostChanged)
+			if changed.SessionID != "XFER_HAPPY" || changed.HostPeerID != transfer.to || changed.From != transfer.from {
+				t.Fatalf("hostChanged=%+v, want session=XFER_HAPPY host=%s from=%s", changed, transfer.to, transfer.from)
+			}
+			peer.expectEligibility("XFER_HAPPY", transfer.to, transfer.from, "B")
+		}
+	}
+
+	// Both directions preserve tokens, and only the final host may end the room.
+	host.send(clientMsg{
+		Type: relayTypeEndSession, ReconnectToken: hostToken, ProtocolVersion: relayProtocolVersion,
+	})
+	host.expectError(relayErrorPeerIdUnavailable)
+	guestA.send(clientMsg{
+		Type: relayTypeEndSession, ReconnectToken: guestAToken, ProtocolVersion: relayProtocolVersion,
+	})
+	ended := guestA.expect(relayTypeEnded)
+	if ended.SessionID != "XFER_HAPPY" || ended.ProtocolVersion != relayProtocolVersion {
+		t.Fatalf("ended acknowledgement=%+v", ended)
+	}
+	for _, peer := range []*testConn{host, guestB} {
+		messages, err := peer.recvUntilClosed(2 * time.Second)
+		if err != nil {
+			t.Fatalf("peer stayed connected after transfer-then-end: %v (frames=%v)", err, messages)
+		}
+		if len(messages) != 1 ||
+			messages[0].Type != relayTypeEnded ||
+			messages[0].SessionID != "XFER_HAPPY" {
+			t.Fatalf("terminal frames=%+v, want one ended notification", messages)
+		}
+	}
+}
+
+// An admission and a host transfer both publish room authority, and a joining
+// client is a broadcast recipient — and a legal transfer target — from the
+// moment it is installed. So the admission must publish its authority while it
+// still holds room.mu: a transfer committing in the gap would enqueue the newer
+// authority first and let the stale joined frame re-pin the client to the
+// demoted host.
+func TestJoinPublishesHostAuthorityUnderRoomLock(t *testing.T) {
+	h := newRelayHarness(t)
+	host, _, _, _ := createTransferRoomWithGuest(t, h, "XFER_ORDER", "6.3.4.1", "6.3.4.2")
+
+	atAck := make(chan struct{})
+	releaseAck := make(chan struct{})
+	var once sync.Once
+	h.srv.beforeJoinRoomAck = func() {
+		once.Do(func() {
+			close(atAck)
+			<-releaseAck
+		})
+	}
+
+	newcomerToken, _ := mustReconnectToken(t)
+	newcomer := h.dial(t, "6.3.4.3")
+	newcomer.send(currentAdmission(clientMsg{
+		Type:            relayTypeJoin,
+		SessionID:       "XFER_ORDER",
+		PeerID:          "N",
+		ReconnectToken:  newcomerToken,
+		ProtocolVersion: relayProtocolVersion,
+	}))
+
+	select {
+	case <-atAck:
+	case <-time.After(2 * time.Second):
+		t.Fatal("admission never reached the authority-publication barrier")
+	}
+
+	h.srv.mu.RLock()
+	room := h.srv.rooms["XFER_ORDER"]
+	h.srv.mu.RUnlock()
+	if room == nil {
+		close(releaseAck)
+		t.Fatal("room XFER_ORDER disappeared")
+	}
+	unlocked := room.mu.TryLock()
+	if unlocked {
+		room.mu.Unlock()
+	}
+	close(releaseAck)
+	if unlocked {
+		t.Fatal("join published host authority without holding room.mu")
+	}
+
+	// End to end: the transfer lands strictly after the admission, so the
+	// newcomer's last authority frame is the room's real host.
+	host.send(clientMsg{Type: relayTypeTransferHost, To: "G", ProtocolVersion: relayProtocolVersion})
+	newcomer.expectAuthority(relayTypeJoined, "H")
+	newcomer.expectEligibility("XFER_ORDER", "H", "G", "N")
+	if changed := newcomer.expect(relayTypeHostChanged); changed.HostPeerID != "G" {
+		t.Fatalf("newcomer authority=%+v, want hostChanged{G}", changed)
+	}
+	newcomer.expectEligibility("XFER_ORDER", "G", "H", "N")
+}
+
+func TestTransferHostRejectsNonHostSender(t *testing.T) {
+	h := newRelayHarness(t)
+	host, guest, hostToken, _ := createModernRoomWithGuest(t, h, "XFER_NOT_HOST", "6.3.1.1", "6.3.1.2")
+	guest.send(clientMsg{Type: relayTypeTransferHost, To: "H", ProtocolVersion: relayProtocolVersion})
+	guest.expectError(relayErrorNotHost)
+	host.recvNothing(200 * time.Millisecond)
+
+	h.srv.mu.RLock()
+	room := h.srv.rooms["XFER_NOT_HOST"]
+	h.srv.mu.RUnlock()
+	if room == nil {
+		t.Fatal("room missing after rejected transfer")
+	}
+	presented, ok := reconnectVerifierFromToken(hostToken)
+	if !ok {
+		t.Fatal("host token has invalid shape")
+	}
+	room.mu.RLock()
+	hostPeerID := room.HostPeerID
+	hostAuthorityIntact := reconnectVerifierMatches(room.hostVerifier, presented)
+	_, guestReserved := room.peerReservations["G"]
+	room.mu.RUnlock()
+	if hostPeerID != "H" {
+		t.Fatalf("hostPeerId=%q after rejected transfer, want H", hostPeerID)
+	}
+	if !hostAuthorityIntact {
+		t.Fatal("host verifier changed after rejected transfer")
+	}
+	if !guestReserved {
+		t.Fatal("guest reservation lost after rejected transfer")
+	}
+}
+
+func TestTransferHostRejectsInvalidTargets(t *testing.T) {
+	h := newRelayHarness(t)
+	outsider := h.dial(t, "6.3.2.9")
+	outsider.send(clientMsg{Type: relayTypeTransferHost, To: "G", ProtocolVersion: relayProtocolVersion})
+	outsider.expectError(relayErrorNotInRoom)
+
+	host, guest, _, _ := createTransferRoomWithGuest(t, h, "XFER_TARGETS", "6.3.2.1", "6.3.2.2")
+	for _, target := range []string{"", "H", "UNKNOWN", "bad peer!"} {
+		host.send(clientMsg{Type: relayTypeTransferHost, To: target, ProtocolVersion: relayProtocolVersion})
+		host.expectError(relayErrorPeerNotFound)
+	}
+	guest.recvNothing(200 * time.Millisecond)
+
+	// A reserved-but-disconnected guest is not a valid transfer target.
+	if err := guest.conn.Close(); err != nil {
+		t.Fatalf("close guest: %v", err)
+	}
+	left := host.expect(relayTypePeerLeft)
+	if left.PeerID != "G" {
+		t.Fatalf("peerLeft peerId=%q, want G", left.PeerID)
+	}
+	host.expectEligibility("XFER_TARGETS", "H")
+	host.send(clientMsg{Type: relayTypeTransferHost, To: "G", ProtocolVersion: relayProtocolVersion})
+	host.expectError(relayErrorPeerNotFound)
+}
+
+func TestTransferHostRejectsLegacyRoom(t *testing.T) {
+	h := newRelayHarness(t)
+	host := h.dial(t, "6.3.3.1")
+	host.send(clientMsg{Type: relayTypeCreate, SessionID: "XFER_LEGACY", PeerID: "H"})
+	host.expect(relayTypeCreated)
+	guest := h.dial(t, "6.3.3.2")
+	guest.send(clientMsg{Type: relayTypeJoin, SessionID: "XFER_LEGACY", PeerID: "G"})
+	guest.expect(relayTypeJoined)
+	host.expect(relayTypePeerJoined)
+
+	host.send(clientMsg{Type: relayTypeTransferHost, To: "G"})
+	host.expectError(relayErrorInvalidMessage)
+	guest.recvNothing(200 * time.Millisecond)
+}
+
+func TestTransferHostPreservesReconnectAuthority(t *testing.T) {
+	h := newRelayHarness(t)
+	host, guest, hostToken, guestToken := createTransferRoomWithGuest(t, h, "XFER_RECONNECT", "6.3.4.1", "6.3.4.2")
+	host.send(clientMsg{Type: relayTypeTransferHost, To: "G", ProtocolVersion: relayProtocolVersion})
+	host.expect(relayTypeHostChanged)
+	host.expectEligibility("XFER_RECONNECT", "G", "H")
+	guest.expect(relayTypeHostChanged)
+	guest.expectEligibility("XFER_RECONNECT", "G", "H")
+
+	// The old host resumes with its original token as a guest.
+	if err := host.conn.Close(); err != nil {
+		t.Fatalf("close old host: %v", err)
+	}
+	left := guest.expect(relayTypePeerLeft)
+	if left.PeerID != "H" {
+		t.Fatalf("peerLeft peerId=%q, want H", left.PeerID)
+	}
+	guest.expectEligibility("XFER_RECONNECT", "G")
+	oldHost := h.dial(t, "6.3.4.3")
+	oldHost.send(currentAdmission(clientMsg{
+		Type:            relayTypeResume,
+		SessionID:       "XFER_RECONNECT",
+		PeerID:          "H",
+		ReconnectToken:  hostToken,
+		ProtocolVersion: relayProtocolVersion,
+	}))
+	rejoinedGuest := oldHost.expectAuthority(relayTypeResumed, "G")
+	if rejoinedGuest.ReconnectToken != hostToken {
+		t.Fatalf("old host reconnect token changed: %+v", rejoinedGuest)
+	}
+	oldHost.expectEligibility("XFER_RECONNECT", "G", "H")
+	guest.expect(relayTypePeerJoined)
+	guest.expectEligibility("XFER_RECONNECT", "G", "H")
+
+	// The new host resumes with its original token as the host.
+	if err := guest.conn.Close(); err != nil {
+		t.Fatalf("close new host: %v", err)
+	}
+	left = oldHost.expect(relayTypePeerLeft)
+	if left.PeerID != "G" {
+		t.Fatalf("peerLeft peerId=%q, want G", left.PeerID)
+	}
+	oldHost.expectEligibility("XFER_RECONNECT", "G")
+	newHost := h.dial(t, "6.3.4.4")
+	newHost.send(currentAdmission(clientMsg{
+		Type:            relayTypeResume,
+		SessionID:       "XFER_RECONNECT",
+		PeerID:          "G",
+		ReconnectToken:  guestToken,
+		ProtocolVersion: relayProtocolVersion,
+	}))
+	rejoinedHost := newHost.expectAuthority(relayTypeResumed, "G")
+	if rejoinedHost.ReconnectToken != guestToken {
+		t.Fatalf("new host reconnect token changed: %+v", rejoinedHost)
+	}
+	newHost.expectEligibility("XFER_RECONNECT", "G", "H")
+	oldHost.expect(relayTypePeerJoined)
+	oldHost.expectEligibility("XFER_RECONNECT", "G", "H")
+}
+
+func TestTransferHostSurvivesSnapshotRestart(t *testing.T) {
+	stateFile := filepath.Join(t.TempDir(), "rooms.json")
+	hA := newRelayHarnessAt(t, t.TempDir(), stateFile)
+	host, guest, hostToken, guestToken := createTransferRoomWithGuest(t, hA, "XFER_RESTART", "6.3.5.1", "6.3.5.2")
+	host.send(clientMsg{Type: relayTypeTransferHost, To: "G", ProtocolVersion: relayProtocolVersion})
+	host.expect(relayTypeHostChanged)
+	host.expectEligibility("XFER_RESTART", "G", "H")
+	guest.expect(relayTypeHostChanged)
+	guest.expectEligibility("XFER_RESTART", "G", "H")
+
+	if err := hA.srv.snap.flushAndStop(2 * time.Second); err != nil {
+		t.Fatalf("flush snapshot after transfer: %v", err)
+	}
+
+	hB := newRelayHarnessAt(t, t.TempDir(), stateFile)
+	hB.srv.mu.RLock()
+	room := hB.srv.rooms["XFER_RESTART"]
+	hB.srv.mu.RUnlock()
+	if room == nil {
+		t.Fatal("restored room missing")
+	}
+	newHostVerifier, ok := reconnectVerifierFromToken(guestToken)
+	if !ok {
+		t.Fatal("new host token has invalid shape")
+	}
+	room.mu.RLock()
+	hostPeerID := room.HostPeerID
+	hostAuthority := reconnectVerifierMatches(room.hostVerifier, newHostVerifier)
+	_, oldHostReserved := room.peerReservations["H"]
+	_, newHostReserved := room.peerReservations["G"]
+	room.mu.RUnlock()
+	if hostPeerID != "G" {
+		t.Fatalf("restored hostPeerId=%q, want G", hostPeerID)
+	}
+	if !hostAuthority {
+		t.Fatal("restored host verifier does not validate the new host's token")
+	}
+	if !oldHostReserved {
+		t.Fatal("restored room lost the old host's guest reservation")
+	}
+	if newHostReserved {
+		t.Fatal("restored room kept a guest reservation for the new host")
+	}
+
+	newHost := hB.dial(t, "6.3.5.3")
+	newHost.send(clientMsg{
+		Type:            relayTypeResume,
+		SessionID:       "XFER_RESTART",
+		PeerID:          "G",
+		ReconnectToken:  guestToken,
+		ProtocolVersion: relayProtocolVersion,
+	})
+	newHost.expectAuthority(relayTypeResumed, "G")
+	oldHost := hB.dial(t, "6.3.5.4")
+	oldHost.send(clientMsg{
+		Type:            relayTypeResume,
+		SessionID:       "XFER_RESTART",
+		PeerID:          "H",
+		ReconnectToken:  hostToken,
+		ProtocolVersion: relayProtocolVersion,
+	})
+	oldHost.expectAuthority(relayTypeResumed, "G")
+	newHost.expect(relayTypePeerJoined)
+	// Persisted identity does not imply capability on these fresh connections.
+	newHost.send(clientMsg{Type: relayTypeTransferHost, To: "H", ProtocolVersion: relayProtocolVersion})
+	newHost.expectError(relayErrorHostTransferUnavailable)
+}
+
 func TestHostEndDeliversEndedAfterConcurrentGuestTraffic(t *testing.T) {
 	h := newRelayHarness(t)
 	endDeliveryReady := make(chan struct{})
@@ -5364,9 +6571,7 @@ func TestHostEndDeliversEndedAfterConcurrentGuestTraffic(t *testing.T) {
 		t.Fatal("ending room remained discoverable before terminal delivery")
 	}
 
-	// WebSocket frames are processed in order. Receiving pong proves the
-	// preceding membership-sensitive traffic was handled while ended delivery
-	// was blocked, without closing the guest as a stale client.
+	// Ordered frames prove membership traffic completed while ended delivery waited.
 	guest.send(clientMsg{
 		Type:    relayTypeBroadcast,
 		Payload: json.RawMessage(`{"during":"end"}`),
@@ -5543,10 +6748,6 @@ func TestCleanupDisconnectsPeersBeforeRemovingExpiredOccupiedRoom(t *testing.T) 
 	}
 }
 
-// ======================================================================
-// Logs endpoints
-// ======================================================================
-
 func postLog(t *testing.T, baseURL, ip string, body []byte) *http.Response {
 	t.Helper()
 	req, err := http.NewRequest(http.MethodPost, baseURL+"/logs", bytes.NewReader(body))
@@ -5561,6 +6762,11 @@ func postLog(t *testing.T, baseURL, ip string, body []byte) *http.Response {
 		t.Fatalf("post: %v", err)
 	}
 	return resp
+}
+
+// filePath is where the store keeps the log stored under the canonical id.
+func (ls *logStore) filePath(id string) string {
+	return ls.artifactStore.filePath(id + logFileExt)
 }
 
 func getLog(t *testing.T, baseURL, ip, id string) *http.Response {
@@ -5579,8 +6785,6 @@ func getLog(t *testing.T, baseURL, ip, id string) *http.Response {
 	return resp
 }
 
-// postLogAndGetID uploads a log and returns the generated id, asserting the
-// POST succeeded.
 func postLogAndGetID(t *testing.T, baseURL, ip string, body []byte) string {
 	t.Helper()
 	resp := postLog(t, baseURL, ip, body)
@@ -5685,7 +6889,7 @@ func (w *blockingLogResponseWriter) SetWriteDeadline(deadline time.Time) error {
 
 func TestLogResponseTransmissionReleasesLookupSlotAndUsesDeadline(t *testing.T) {
 	logs := newLogStore(t.TempDir())
-	id, _, err := logs.store([]byte("diagnostic"), time.Now())
+	id, _, err := logs.store("", []byte("diagnostic"), time.Now())
 	if err != nil {
 		t.Fatalf("store log: %v", err)
 	}
@@ -5853,7 +7057,7 @@ func assertLogResponseDeadlineLifecycle(
 	id := strings.Repeat("a", logIDLength)
 	if present {
 		var err error
-		id, _, err = logs.store([]byte(wantBody), time.Now())
+		id, _, err = logs.store("", []byte(wantBody), time.Now())
 		if err != nil {
 			t.Fatalf("store log: %v", err)
 		}
@@ -6074,7 +7278,7 @@ func TestLogsUploadDoesNotWriteCapabilityToOperationalLog(t *testing.T) {
 	if strings.Contains(output.String(), id) {
 		t.Fatalf("operational log retained bearer capability %q", id)
 	}
-	if !strings.Contains(output.String(), "logs: stored 15 bytes from 203.0.113.40") {
+	if !strings.Contains(output.String(), "203.0.113.40") {
 		t.Fatalf("successful upload was not observable: %q", output.String())
 	}
 }
@@ -6082,7 +7286,7 @@ func TestLogsUploadDoesNotWriteCapabilityToOperationalLog(t *testing.T) {
 func TestLogStoreRetiresLegacyCapabilitiesOnStartup(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Now().Add(-time.Minute)
-	legacyID := strings.Repeat("a", 25) // capability shape used before ids went back to logIDLength
+	legacyID := strings.Repeat("a", 25) // legacy capability length
 	currentID := strings.Repeat("a", logIDLength)
 	legacyPath := filepath.Join(dir, legacyID+".log")
 	currentPath := filepath.Join(dir, currentID+".log")
@@ -6112,7 +7316,7 @@ func TestLogStoreRetiresLegacyCapabilitiesOnStartup(t *testing.T) {
 	}
 }
 
-func TestLogsFailedLookupsAreBoundedButValidCapabilitiesRemainAvailable(t *testing.T) {
+func TestLogLookupsAreThrottledPerSourceBeforeResolvingIDs(t *testing.T) {
 	h := newRelayHarness(t)
 	payload := []byte("retrievable")
 	validID := postLogAndGetID(t, h.baseURL, "203.0.113.1", payload)
@@ -6138,10 +7342,18 @@ func TestLogsFailedLookupsAreBoundedButValidCapabilitiesRemainAvailable(t *testi
 		t.Fatalf("throttled Cache-Control=%q", got)
 	}
 
-	success := getLog(t, h.baseURL, source, validID)
+	// An exhausted source must not learn which guesses hit: a valid ID is
+	// refused exactly like an unknown one.
+	exhaustedHit := getLog(t, h.baseURL, source, validID)
+	exhaustedHit.Body.Close()
+	if exhaustedHit.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("valid capability from exhausted source status=%d, want 429", exhaustedHit.StatusCode)
+	}
+
+	success := getLog(t, h.baseURL, "203.0.113.51", validID)
 	defer success.Body.Close()
 	if success.StatusCode != http.StatusOK {
-		t.Fatalf("valid capability after exhausted failures status=%d", success.StatusCode)
+		t.Fatalf("valid capability from independent source status=%d", success.StatusCode)
 	}
 	got, err := io.ReadAll(success.Body)
 	if err != nil || !bytes.Equal(got, payload) {
@@ -6151,34 +7363,104 @@ func TestLogsFailedLookupsAreBoundedButValidCapabilitiesRemainAvailable(t *testi
 		t.Fatalf("success Cache-Control=%q", cache)
 	}
 
-	independent := getLog(t, h.baseURL, "203.0.113.51", strings.Repeat("x", logIDLength))
-	independent.Body.Close()
-	if independent.StatusCode != http.StatusNotFound {
-		t.Fatalf("independent source status=%d, want 404", independent.StatusCode)
+	// Hits spend the same budget as misses.
+	hitter := "203.0.113.52"
+	for i := range logLookupRateBurst {
+		resp := getLog(t, h.baseURL, hitter, validID)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("hit %d status=%d, want 200", i, resp.StatusCode)
+		}
+	}
+	overBudget := getLog(t, h.baseURL, hitter, validID)
+	overBudget.Body.Close()
+	if overBudget.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("hit beyond budget status=%d, want 429", overBudget.StatusCode)
 	}
 }
 
-func TestLogFailedLookupCleanupIsDeterministic(t *testing.T) {
+func TestLogStoreKeepsServingLegacyLengthIDsUntilExpiry(t *testing.T) {
+	dir := t.TempDir()
+	// Legacy IDs predate logIDChars and may hold i, l, o, and u.
+	legacyIDs := []string{"legacyloiu", "qloiu"}
+	for _, legacyID := range legacyIDs {
+		if err := os.WriteFile(filepath.Join(dir, legacyID+logFileExt), []byte("legacy link"), 0o644); err != nil {
+			t.Fatalf("seed legacy log %q: %v", legacyID, err)
+		}
+	}
+	now := time.Now()
+	store := newLogStore(dir)
+	for _, legacyID := range legacyIDs {
+		if _, err := os.Stat(store.filePath(legacyID)); err != nil {
+			t.Fatalf("legacy log %q was retired on startup: %v", legacyID, err)
+		}
+		if _, ok, err := store.lookup(legacyID, now); err != nil || !ok {
+			t.Fatalf("legacy lookup %q=(ok=%v, err=%v), want indexed", legacyID, ok, err)
+		}
+		if _, ok, err := store.lookup(legacyID, now.Add(logMaxAge+time.Minute)); err != nil || ok {
+			t.Fatalf("expired legacy lookup %q=(ok=%v, err=%v), want absent", legacyID, ok, err)
+		}
+	}
+	id, _, err := store.store("", []byte("new"), now)
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	if len(id) != logIDLength {
+		t.Fatalf("new id=%q len=%d, want %d", id, len(id), logIDLength)
+	}
+}
+
+// Log IDs are copied by hand from TV screens: case and the look-alikes that
+// Crockford's alphabet leaves out must still reach the stored log.
+func TestLogsGetResolvesLookAlikeSpellings(t *testing.T) {
+	h := newRelayHarness(t)
+	h.srv.logs.mu.Lock()
+	h.srv.logs.generateID = func() string { return "01abcd" }
+	h.srv.logs.mu.Unlock()
+	id := postLogAndGetID(t, h.baseURL, "7.3.0.9", []byte("look-alike body"))
+	if id != "01abcd" {
+		t.Fatalf("stored id=%q, want 01abcd", id)
+	}
+
+	for _, typed := range []string{"01abcd", "01ABCD", "o1abcd", "OIabcd", "0labcd", "0Labcd"} {
+		resp := getLog(t, h.baseURL, "", typed)
+		body, err := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatalf("read %q: %v", typed, err)
+		}
+		if resp.StatusCode != http.StatusOK || string(body) != "look-alike body" {
+			t.Fatalf("typed %q: status=%d body=%q, want the stored log", typed, resp.StatusCode, body)
+		}
+	}
+	miss := getLog(t, h.baseURL, "", "u1abcd")
+	miss.Body.Close()
+	if miss.StatusCode != http.StatusNotFound {
+		t.Fatalf("u is outside the alphabet: status=%d, want 404", miss.StatusCode)
+	}
+}
+
+func TestLogLookupLimiterCleanupIsDeterministic(t *testing.T) {
 	store := newLogStore(t.TempDir())
 	now := time.Unix(1_700_000_000, 0)
-	id, _, err := store.store([]byte("keep"), now)
+	id, _, err := store.store("", []byte("keep"), now)
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}
 	for range logLookupRateBurst {
-		if !store.allowFailedLookup("203.0.113.1", now) {
+		if !store.allowLookup("203.0.113.1", now) {
 			t.Fatal("burst rejected early")
 		}
 	}
-	if store.allowFailedLookup("203.0.113.1", now) {
+	if store.allowLookup("203.0.113.1", now) {
 		t.Fatal("lookup beyond burst unexpectedly allowed")
 	}
 	store.cleanup(now)
-	if _, ok := store.failedLookupRate["203.0.113.1"]; !ok {
+	if _, ok := store.lookupRate["203.0.113.1"]; !ok {
 		t.Fatal("cleanup removed an effective limiter")
 	}
 	store.cleanup(now.Add(time.Duration(logLookupRateBurst) * time.Second))
-	if _, ok := store.failedLookupRate["203.0.113.1"]; ok {
+	if _, ok := store.lookupRate["203.0.113.1"]; ok {
 		t.Fatal("cleanup retained a fully refilled limiter")
 	}
 	if _, ok := store.entries[id]; !ok {
@@ -6191,7 +7473,7 @@ func TestLogStorePersistsAcrossRestartAndAvoidsIDCollisions(t *testing.T) {
 	now := time.Now().Add(-time.Second)
 	first := newLogStore(dir)
 	first.generateID = func() string { return strings.Repeat("a", logIDLength) }
-	firstID, _, err := first.store([]byte("original"), now)
+	firstID, _, err := first.store("", []byte("original"), now)
 	if err != nil {
 		t.Fatalf("store original: %v", err)
 	}
@@ -6208,7 +7490,7 @@ func TestLogStorePersistsAcrossRestartAndAvoidsIDCollisions(t *testing.T) {
 		ids = ids[1:]
 		return id
 	}
-	secondID, _, err := restarted.store([]byte("second"), time.Now())
+	secondID, _, err := restarted.store("", []byte("second"), time.Now())
 	if err != nil {
 		t.Fatalf("store after restart: %v", err)
 	}
@@ -6279,9 +7561,9 @@ func TestLogsUseTrustedCanonicalClientIdentity(t *testing.T) {
 		}
 		h.srv.logs.mu.RLock()
 		defer h.srv.logs.mu.RUnlock()
-		if len(h.srv.logs.entries) != 0 || len(h.srv.logs.rateLimit) != 0 || len(h.srv.logs.failedLookupRate) != 0 {
+		if len(h.srv.logs.entries) != 0 || len(h.srv.logs.rateLimit) != 0 || len(h.srv.logs.lookupRate) != 0 {
 			t.Fatalf("malformed chain mutated log state: entries=%d uploads=%d failures=%d",
-				len(h.srv.logs.entries), len(h.srv.logs.rateLimit), len(h.srv.logs.failedLookupRate))
+				len(h.srv.logs.entries), len(h.srv.logs.rateLimit), len(h.srv.logs.lookupRate))
 		}
 	})
 
@@ -6365,7 +7647,6 @@ func TestLogsGetExpiredIs404(t *testing.T) {
 	h := newRelayHarness(t)
 	id := postLogAndGetID(t, h.baseURL, "7.3.0.1", []byte("temp"))
 
-	// Poison the entry's ExpiresAt into the past.
 	h.srv.logs.mu.Lock()
 	entry := h.srv.logs.entries[id]
 	entry.ExpiresAt = time.Now().Add(-time.Minute)
@@ -6393,10 +7674,6 @@ func TestLogsMethodNotAllowed(t *testing.T) {
 		t.Errorf("GET /logs status=%d want 405", resp.StatusCode)
 	}
 }
-
-// ======================================================================
-// Poster endpoints
-// ======================================================================
 
 var minimalPNG = []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x01, 0x02, 0x03}
 
@@ -6498,7 +7775,7 @@ func snapshotPosterStore(t *testing.T, store *posterStore) (int, int64, []string
 func TestPosterHandlerRejectsRateLimitedRequestBeforeReadingOrStoring(t *testing.T) {
 	s := newTestServer(t, filepath.Join(t.TempDir(), "rooms.json"))
 	now := time.Now()
-	s.posterUploads = newPosterUploadLimiter(1, 0, 10, 0, 2, now)
+	s.posterUploads = newPosterUploadLimiter(1, 0, 10, 0, 2, 2, now)
 
 	first := servePosterUpload(s, io.NopCloser(bytes.NewReader(minimalPNG)), "203.0.113.1")
 	if first.Code != http.StatusOK {
@@ -6522,7 +7799,7 @@ func TestPosterHandlerRejectsRateLimitedRequestBeforeReadingOrStoring(t *testing
 
 func TestPosterHandlerConcurrencyRejectsBeforeReadAndRecovers(t *testing.T) {
 	s := newTestServer(t, filepath.Join(t.TempDir(), "rooms.json"))
-	s.posterUploads = newPosterUploadLimiter(20, 0, 20, 0, 2, time.Now())
+	s.posterUploads = newPosterUploadLimiter(20, 0, 20, 0, 2, 2, time.Now())
 	release := make(chan struct{})
 	recorders := make(chan *httptest.ResponseRecorder, 2)
 
@@ -6576,7 +7853,7 @@ func TestPosterHandlerConcurrencyRejectsBeforeReadAndRecovers(t *testing.T) {
 
 func TestPosterHandlerDeadlineReleasesStalledUploadSlot(t *testing.T) {
 	s := newTestServer(t, filepath.Join(t.TempDir(), "rooms.json"))
-	s.posterUploads = newPosterUploadLimiter(10, 0, 10, 0, 1, time.Now())
+	s.posterUploads = newPosterUploadLimiter(10, 0, 10, 0, 1, 1, time.Now())
 	s.posterBodyReadTimeout = 20 * time.Millisecond
 	stalled := newDeadlineBlockingReadCloser()
 	result := make(chan *httptest.ResponseRecorder, 1)
@@ -6614,7 +7891,7 @@ func TestPosterHandlerDeadlineReleasesStalledUploadSlot(t *testing.T) {
 
 func TestPosterHandlerSlowChunkedBodyDeadline(t *testing.T) {
 	s := newTestServer(t, filepath.Join(t.TempDir(), "rooms.json"))
-	s.posterUploads = newPosterUploadLimiter(10, 0, 10, 0, 1, time.Now())
+	s.posterUploads = newPosterUploadLimiter(10, 0, 10, 0, 1, 1, time.Now())
 	s.posterBodyReadTimeout = 30 * time.Millisecond
 	httpServer := httptest.NewServer(http.HandlerFunc(s.handlePostPosters))
 	t.Cleanup(httpServer.Close)
@@ -6680,7 +7957,7 @@ func TestPosterHandlerReleasesConcurrencyOnEveryExit(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := newTestServer(t, filepath.Join(t.TempDir(), "rooms.json"))
-			s.posterUploads = newPosterUploadLimiter(10, 0, 10, 0, 1, time.Now())
+			s.posterUploads = newPosterUploadLimiter(10, 0, 10, 0, 1, 1, time.Now())
 			originalDir := s.posters.dir
 			if tt.storeFailure {
 				s.posters.dir = filepath.Join(t.TempDir(), "missing", "posters")
@@ -6707,7 +7984,7 @@ func TestPosterHandlerReleasesConcurrencyOnEveryExit(t *testing.T) {
 func TestPosterHandlerUsesTrustedCanonicalIdentityAndGlobalBudget(t *testing.T) {
 	t.Run("untrusted XFF rotation cannot bypass per-IP limit", func(t *testing.T) {
 		h := newRelayHarnessNoTrust(t)
-		h.srv.posterUploads = newPosterUploadLimiter(3, 0, 20, 0, 4, time.Now())
+		h.srv.posterUploads = newPosterUploadLimiter(3, 0, 20, 0, 4, 4, time.Now())
 		for i := range 3 {
 			resp := postPoster(t, h.baseURL, fmt.Sprintf("203.0.113.%d", i+1), minimalPNG)
 			resp.Body.Close()
@@ -6729,7 +8006,7 @@ func TestPosterHandlerUsesTrustedCanonicalIdentityAndGlobalBudget(t *testing.T) 
 
 	t.Run("trusted clients are independent but share global budget", func(t *testing.T) {
 		h := newRelayHarness(t)
-		h.srv.posterUploads = newPosterUploadLimiter(3, 0, 8, 0, 4, time.Now())
+		h.srv.posterUploads = newPosterUploadLimiter(3, 0, 8, 0, 4, 4, time.Now())
 		for range 3 {
 			resp := postPoster(t, h.baseURL, "203.0.113.1", minimalPNG)
 			resp.Body.Close()
@@ -6834,6 +8111,133 @@ func TestPostersRoundTrip(t *testing.T) {
 	}
 }
 
+func servePosterGet(s *Server, path, remoteAddr string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.RemoteAddr = remoteAddr
+	recorder := httptest.NewRecorder()
+	s.handleGetPosters(recorder, req)
+	return recorder
+}
+
+func TestPosterGetRateLimitedPerIPWithBoundedConcurrency(t *testing.T) {
+	s := newTestServer(t, filepath.Join(t.TempDir(), "rooms.json"))
+	now := time.Now()
+	_, entry, err := s.posters.store("", minimalPNG, "image/png", now)
+	if err != nil {
+		t.Fatalf("store poster: %v", err)
+	}
+	path := "/posters/" + entry.Filename
+
+	t.Run("per-IP budget", func(t *testing.T) {
+		s.posterFetches = newPosterUploadLimiter(2, 0, 100, 0, 8, 4, now)
+		for i := range 2 {
+			if got := servePosterGet(s, path, "203.0.113.7:1234"); got.Code != http.StatusOK {
+				t.Fatalf("fetch %d status=%d want 200", i, got.Code)
+			}
+		}
+		limited := servePosterGet(s, path, "203.0.113.7:1234")
+		if limited.Code != http.StatusTooManyRequests {
+			t.Fatalf("status=%d want 429 once per-IP burst is exhausted", limited.Code)
+		}
+		other := servePosterGet(s, path, "203.0.113.8:1234")
+		if other.Code != http.StatusOK {
+			t.Fatalf("status=%d want 200 for an independent client", other.Code)
+		}
+	})
+
+	t.Run("concurrency guard shared with handler", func(t *testing.T) {
+		s.posterFetches = newPosterUploadLimiter(100, 0, 100, 0, 1, 1, now)
+		if !s.posterFetches.tryStart("in-flight", now) {
+			t.Fatal("could not occupy the single fetch slot")
+		}
+		blocked := servePosterGet(s, path, "203.0.113.9:1234")
+		if blocked.Code != http.StatusTooManyRequests {
+			t.Fatalf("status=%d want 429 while the slot is held", blocked.Code)
+		}
+		s.posterFetches.finish("in-flight")
+		if got := servePosterGet(s, path, "203.0.113.9:1234"); got.Code != http.StatusOK {
+			t.Fatalf("status=%d want 200 after the slot is released", got.Code)
+		}
+	})
+
+	t.Run("slot released on every handler exit", func(t *testing.T) {
+		s.posterFetches = newPosterUploadLimiter(100, 0, 100, 0, 1, 1, now)
+		missing := "/posters/" + strings.Repeat("z", posterIDLength) + ".png"
+		if got := servePosterGet(s, missing, "203.0.113.10:1234"); got.Code != http.StatusNotFound {
+			t.Fatalf("missing poster status=%d want 404", got.Code)
+		}
+		if got := servePosterGet(s, path, "203.0.113.10:1234"); got.Code != http.StatusOK {
+			t.Fatalf("status=%d want 200 after a 404 exit released the slot", got.Code)
+		}
+		if got := servePosterGet(s, path, "203.0.113.10:1234"); got.Code != http.StatusOK {
+			t.Fatalf("status=%d want 200 after a 200 exit released the slot", got.Code)
+		}
+	})
+}
+
+// Concurrent lookups must serve non-expired hits from the read lock and
+// delete an expired entry exactly once under the write lock.
+func TestPosterLookupConcurrentHitsAndExpiryAreRaceClean(t *testing.T) {
+	ps := newPosterStore(t.TempDir(), 1024, time.Hour)
+	now := time.Now()
+	liveID, liveEntry, err := ps.store("", []byte{1, 2, 3}, "image/png", now)
+	if err != nil {
+		t.Fatalf("store live poster: %v", err)
+	}
+	expiredID, expiredEntry, err := ps.store("", []byte{4, 5, 6, 7}, "image/png", now.Add(-2*time.Hour))
+	if err != nil {
+		t.Fatalf("store expired poster: %v", err)
+	}
+
+	var liveMisses, expiredHits, lookupErrs atomic.Int64
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 200 {
+				entry, ok, err := ps.lookupEntry(liveID, now, nil)
+				if err != nil {
+					lookupErrs.Add(1)
+				} else if !ok || entry.Filename != liveEntry.Filename {
+					liveMisses.Add(1)
+				}
+				if _, ok, err := ps.lookupEntry(expiredID, now, nil); err != nil {
+					lookupErrs.Add(1)
+				} else if ok {
+					expiredHits.Add(1)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	if n := lookupErrs.Load(); n != 0 {
+		t.Fatalf("%d lookups returned errors", n)
+	}
+	if n := liveMisses.Load(); n != 0 {
+		t.Fatalf("live entry missed %d times during concurrent lookups", n)
+	}
+	if n := expiredHits.Load(); n != 0 {
+		t.Fatalf("expired entry served %d times", n)
+	}
+
+	ps.mu.RLock()
+	used := ps.used
+	_, liveRetained := ps.entries[liveID]
+	_, expiredRetained := ps.entries[expiredID]
+	ps.mu.RUnlock()
+	if !liveRetained || expiredRetained {
+		t.Fatalf("entries after concurrent lookups: live=%v expired=%v", liveRetained, expiredRetained)
+	}
+	if used != int64(3) {
+		t.Fatalf("used=%d want 3: the expired entry must be deleted exactly once", used)
+	}
+	if _, err := os.Stat(ps.filePath(expiredEntry.Filename)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("expired poster file not removed: %v", err)
+	}
+}
+
 func TestPostersRejectInvalidAndOversizedUploads(t *testing.T) {
 	h := newRelayHarness(t)
 
@@ -6855,11 +8259,11 @@ func TestPosterStoreEvictsOldestOverQuota(t *testing.T) {
 	now := time.Now()
 	payload := []byte{1, 2, 3, 4, 5, 6, 7}
 
-	id1, entry1, err := ps.store(payload, "image/png", now)
+	id1, entry1, err := ps.store("", payload, "image/png", now)
 	if err != nil {
 		t.Fatalf("store first: %v", err)
 	}
-	id2, entry2, err := ps.store(payload, "image/png", now.Add(time.Minute))
+	id2, entry2, err := ps.store("", payload, "image/png", now.Add(time.Minute))
 	if err != nil {
 		t.Fatalf("store second: %v", err)
 	}
@@ -6887,10 +8291,88 @@ func TestPosterStoreEvictsOldestOverQuota(t *testing.T) {
 	}
 }
 
+func TestPosterStoreRecyclesOnlyTheUploadingSourcesShare(t *testing.T) {
+	ps := newPosterStore(t.TempDir(), 100, time.Hour)
+	ps.ownerLimit = 7
+	now := time.Now()
+	payload := []byte{1, 2, 3}
+
+	otherID, _, err := ps.store("198.51.100.2", payload, "image/png", now)
+	if err != nil {
+		t.Fatalf("store other source: %v", err)
+	}
+	var ids []string
+	for i := range 4 {
+		id, _, err := ps.store("198.51.100.1", payload, "image/png", now.Add(time.Duration(i+1)*time.Minute))
+		if err != nil {
+			t.Fatalf("store %d: %v", i, err)
+		}
+		ids = append(ids, id)
+	}
+
+	ps.mu.RLock()
+	defer ps.mu.RUnlock()
+	for i, id := range ids {
+		_, retained := ps.entries[id]
+		if want := i >= len(ids)-2; retained != want {
+			t.Fatalf("source poster %d retained=%v, want %v", i, retained, want)
+		}
+	}
+	if _, ok := ps.entries[otherID]; !ok {
+		t.Fatal("one source's uploads evicted another source's poster")
+	}
+	if got := ps.ownerUsed["198.51.100.1"]; got != 6 {
+		t.Fatalf("source usage=%d, want 6", got)
+	}
+	if got := ps.used; got != 9 {
+		t.Fatalf("store usage=%d, want 9", got)
+	}
+}
+
+func TestLogStoreCapsEachSourceShare(t *testing.T) {
+	h := newRelayHarness(t)
+	source := "198.51.100.10"
+	now := time.Now()
+	var firstID string
+	for i := range maxLogEntriesPerSource {
+		id, _, err := h.srv.logs.store(source, []byte("log"), now)
+		if err != nil {
+			t.Fatalf("store %d: %v", i, err)
+		}
+		if i == 0 {
+			firstID = id
+		}
+	}
+	if _, _, err := h.srv.logs.store(source, []byte("over"), now); !errors.Is(err, errLogSourceQuota) {
+		t.Fatalf("store beyond source share err=%v, want errLogSourceQuota", err)
+	}
+
+	refused := postLog(t, h.baseURL, source, []byte("over"))
+	refused.Body.Close()
+	if refused.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("upload beyond source share status=%d, want 429", refused.StatusCode)
+	}
+	other := postLog(t, h.baseURL, "198.51.100.11", []byte("other"))
+	other.Body.Close()
+	if other.StatusCode != http.StatusOK {
+		t.Fatalf("other source upload status=%d, want 200", other.StatusCode)
+	}
+
+	h.srv.logs.mu.Lock()
+	err := h.srv.logs.deleteEntryLocked(firstID)
+	h.srv.logs.mu.Unlock()
+	if err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, _, err := h.srv.logs.store(source, []byte("after expiry"), now); err != nil {
+		t.Fatalf("store after a slot was freed: %v", err)
+	}
+}
+
 func TestPosterStoreCleanupExpiresOldPosters(t *testing.T) {
 	ps := newPosterStore(t.TempDir(), 1024, time.Hour)
 	now := time.Now()
-	id, entry, err := ps.store([]byte{1, 2, 3}, "image/png", now.Add(-2*time.Hour))
+	id, entry, err := ps.store("", []byte{1, 2, 3}, "image/png", now.Add(-2*time.Hour))
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}
@@ -6939,7 +8421,7 @@ func TestLogStoreRemovalFailureRetainsEntryUntilRetry(t *testing.T) {
 	ls := newLogStoreWithRemover(dir, remover.remove)
 	ls.generateID = func() string { return strings.Repeat("a", logIDLength) }
 	now := time.Now()
-	id, _, err := ls.store([]byte("retained"), now)
+	id, _, err := ls.store("", []byte("retained"), now)
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}
@@ -6996,7 +8478,7 @@ func TestRemovalFailureDoesNotBlockUploadsWhileCapacityRemains(t *testing.T) {
 			return id
 		}
 		now := time.Now()
-		firstID, _, err := store.store([]byte("expired"), now)
+		firstID, _, err := store.store("", []byte("expired"), now)
 		if err != nil {
 			t.Fatalf("store expired log: %v", err)
 		}
@@ -7007,7 +8489,7 @@ func TestRemovalFailureDoesNotBlockUploadsWhileCapacityRemains(t *testing.T) {
 		store.mu.Unlock()
 		remover.fail(store.filePath(firstID), fs.ErrPermission)
 
-		secondID, _, err := store.store([]byte("new"), now)
+		secondID, _, err := store.store("", []byte("new"), now)
 		if err != nil {
 			t.Fatalf("unrelated removal failure blocked log upload: %v", err)
 		}
@@ -7025,13 +8507,13 @@ func TestRemovalFailureDoesNotBlockUploadsWhileCapacityRemains(t *testing.T) {
 		remover := newDeterministicRemover()
 		store := newPosterStoreWithRemover(dir, 1024, time.Hour, remover.remove)
 		now := time.Now()
-		firstID, first, err := store.store([]byte{1, 2, 3}, "image/png", now.Add(-2*time.Hour))
+		firstID, first, err := store.store("", []byte{1, 2, 3}, "image/png", now.Add(-2*time.Hour))
 		if err != nil {
 			t.Fatalf("store expired poster: %v", err)
 		}
 		remover.fail(store.filePath(first.Filename), fs.ErrPermission)
 
-		secondID, _, err := store.store([]byte{4, 5, 6}, "image/png", now)
+		secondID, _, err := store.store("", []byte{4, 5, 6}, "image/png", now)
 		if err != nil {
 			t.Fatalf("unrelated removal failure blocked poster upload: %v", err)
 		}
@@ -7050,7 +8532,7 @@ func TestLogStoreErrNotExistCommitsDeletionOnce(t *testing.T) {
 	ls := newLogStoreWithRemover(t.TempDir(), remover.remove)
 	ls.generateID = func() string { return strings.Repeat("a", logIDLength) }
 	now := time.Now()
-	id, _, err := ls.store([]byte("gone"), now)
+	id, _, err := ls.store("", []byte("gone"), now)
 	if err != nil {
 		t.Fatalf("store: %v", err)
 	}
@@ -7088,7 +8570,7 @@ func TestLogStoreTracksFailedTempCleanup(t *testing.T) {
 	cleanupErr := errors.New("synthetic temp removal failure")
 	remover.fail(tmpPath, cleanupErr)
 
-	if _, _, err := ls.store([]byte("payload"), time.Now()); err == nil {
+	if _, _, err := ls.store("", []byte("payload"), time.Now()); err == nil {
 		t.Fatal("store succeeded despite temp write failure")
 	}
 	ls.mu.RLock()
@@ -7145,7 +8627,7 @@ func TestLogStoreStartupReconcilesLiveAndPendingRemovals(t *testing.T) {
 	if !live || pending != 2 || artifacts != 3 {
 		t.Fatalf("startup accounting: live=%v pending=%d artifacts=%d", live, pending, artifacts)
 	}
-	newID, _, err := ls.store([]byte("new"), now)
+	newID, _, err := ls.store("", []byte("new"), now)
 	if err != nil {
 		t.Fatalf("startup cleanup failure blocked new log: %v", err)
 	}
@@ -7185,7 +8667,7 @@ func TestStoresReconcileConfinedNonEmptyStaleDirectories(t *testing.T) {
 			t.Fatalf("stale log directory remains: %v", err)
 		}
 		store.generateID = func() string { return strings.Repeat("a", logIDLength) }
-		if _, _, err := store.store([]byte("new log"), time.Now()); err != nil {
+		if _, _, err := store.store("", []byte("new log"), time.Now()); err != nil {
 			t.Fatalf("store after reconciliation: %v", err)
 		}
 	})
@@ -7207,7 +8689,7 @@ func TestStoresReconcileConfinedNonEmptyStaleDirectories(t *testing.T) {
 		if _, err := os.Stat(staleDir); !errors.Is(err, fs.ErrNotExist) {
 			t.Fatalf("stale poster directory remains: %v", err)
 		}
-		if _, _, err := store.store([]byte{1, 2, 3}, "image/png", time.Now()); err != nil {
+		if _, _, err := store.store("", []byte{1, 2, 3}, "image/png", time.Now()); err != nil {
 			t.Fatalf("store after reconciliation: %v", err)
 		}
 	})
@@ -7239,14 +8721,14 @@ func TestPosterQuotaRemovalFailureDoesNotReclaimAccounting(t *testing.T) {
 	ps := newPosterStoreWithRemover(dir, 12, time.Hour, remover.remove)
 	now := time.Now()
 	payload := []byte{1, 2, 3, 4, 5, 6, 7}
-	oldID, oldEntry, err := ps.store(payload, "image/png", now)
+	oldID, oldEntry, err := ps.store("", payload, "image/png", now)
 	if err != nil {
 		t.Fatalf("store oldest: %v", err)
 	}
 	oldPath := ps.filePath(oldEntry.Filename)
 	remover.fail(oldPath, fs.ErrPermission)
 
-	newID, newEntry, err := ps.store(payload, "image/png", now.Add(time.Minute))
+	newID, newEntry, err := ps.store("", payload, "image/png", now.Add(time.Minute))
 	if !errors.Is(err, fs.ErrPermission) {
 		t.Fatalf("quota store error=%v want permission error", err)
 	}
@@ -7267,7 +8749,7 @@ func TestPosterQuotaRemovalFailureDoesNotReclaimAccounting(t *testing.T) {
 	}
 
 	remover.recover(oldPath)
-	retryID, retryEntry, err := ps.store(payload, "image/png", now.Add(time.Minute))
+	retryID, retryEntry, err := ps.store("", payload, "image/png", now.Add(time.Minute))
 	if err != nil {
 		t.Fatalf("retry store: %v", err)
 	}
@@ -7291,7 +8773,7 @@ func TestPosterExpiredRemovalFailureAndErrNotExistAreExactOnce(t *testing.T) {
 		remover := newDeterministicRemover()
 		ps := newPosterStoreWithRemover(t.TempDir(), 1024, time.Hour, remover.remove)
 		now := time.Now()
-		id, entry, err := ps.store([]byte{1, 2, 3}, "image/png", now)
+		id, entry, err := ps.store("", []byte{1, 2, 3}, "image/png", now)
 		if err != nil {
 			t.Fatalf("store: %v", err)
 		}
@@ -7336,7 +8818,7 @@ func TestPosterExpiredRemovalFailureAndErrNotExistAreExactOnce(t *testing.T) {
 		remover := newDeterministicRemover()
 		ps := newPosterStoreWithRemover(t.TempDir(), 1024, time.Hour, remover.remove)
 		now := time.Now()
-		id, entry, err := ps.store([]byte{1, 2, 3}, "image/png", now)
+		id, entry, err := ps.store("", []byte{1, 2, 3}, "image/png", now)
 		if err != nil {
 			t.Fatalf("store: %v", err)
 		}
@@ -7381,7 +8863,7 @@ func TestPosterStoreKnownCleanupDebtConsumesCapacityAndRetries(t *testing.T) {
 	if ps.startupErr == nil {
 		t.Fatal("startup removal failure was not reported")
 	}
-	if _, _, err := ps.store([]byte{1, 2}, "image/png", time.Now()); err == nil {
+	if _, _, err := ps.store("", []byte{1, 2}, "image/png", time.Now()); err == nil {
 		t.Fatal("upload exceeded capacity after known stale bytes were accounted")
 	}
 	ps.mu.RLock()
@@ -7396,7 +8878,7 @@ func TestPosterStoreKnownCleanupDebtConsumesCapacityAndRetries(t *testing.T) {
 	}
 
 	remover.recover(stalePath)
-	if _, entry, err := ps.store([]byte{1, 2}, "image/png", time.Now()); err != nil {
+	if _, entry, err := ps.store("", []byte{1, 2}, "image/png", time.Now()); err != nil {
 		t.Fatalf("store after known debt recovery: %v", err)
 	} else if entry.Size != 2 {
 		t.Fatalf("stored entry size=%d, want 2", entry.Size)
@@ -7425,7 +8907,7 @@ func TestPosterStoreUnknownCleanupDebtDoesNotBlockUploadAndRecovers(t *testing.T
 	if calls := remover.callCount(unknownPath); calls != 1 {
 		t.Fatalf("startup remove calls=%d, want 1", calls)
 	}
-	if _, entry, err := ps.store([]byte{1, 2, 3}, "image/png", time.Now()); err != nil {
+	if _, entry, err := ps.store("", []byte{1, 2, 3}, "image/png", time.Now()); err != nil {
 		t.Fatalf("capacity-safe upload blocked by unknown artifact: %v", err)
 	} else if entry.Size != 3 {
 		t.Fatalf("stored entry size=%d, want 3", entry.Size)
@@ -7472,11 +8954,11 @@ func TestStorageHandlersReturnGenericErrorsForRemovalFailures(t *testing.T) {
 	h := newStorageHarness(t, logs, posters)
 	now := time.Now()
 
-	logID, _, err := logs.store([]byte("expired log"), now)
+	logID, _, err := logs.store("", []byte("expired log"), now)
 	if err != nil {
 		t.Fatalf("store log: %v", err)
 	}
-	posterID, poster, err := posters.store([]byte{1, 2, 3}, "image/png", now)
+	posterID, poster, err := posters.store("", []byte{1, 2, 3}, "image/png", now)
 	if err != nil {
 		t.Fatalf("store poster: %v", err)
 	}
@@ -7492,8 +8974,10 @@ func TestStorageHandlersReturnGenericErrorsForRemovalFailures(t *testing.T) {
 	posters.mu.Unlock()
 	logPath := logs.filePath(logID)
 	posterPath := posters.filePath(poster.Filename)
-	remover.fail(logPath, fs.ErrPermission)
-	remover.fail(posterPath, fs.ErrPermission)
+	privateDetail := "removal-detail-b7f1"
+	removalErr := fmt.Errorf("%s: %w", privateDetail, fs.ErrPermission)
+	remover.fail(logPath, removalErr)
+	remover.fail(posterPath, removalErr)
 
 	for name, target := range map[string]string{
 		"log":    h.baseURL + "/logs/" + logID,
@@ -7511,9 +8995,10 @@ func TestStorageHandlersReturnGenericErrorsForRemovalFailures(t *testing.T) {
 		if resp.StatusCode != http.StatusInternalServerError {
 			t.Fatalf("%s status=%d want 500", name, resp.StatusCode)
 		}
-		want := "Failed to retrieve " + name + "\n"
-		if string(body) != want {
-			t.Fatalf("%s response=%q want %q", name, body, want)
+		for _, secret := range []string{privateDetail, logID, logPath, posterPath} {
+			if strings.Contains(string(body), secret) {
+				t.Fatalf("%s response leaked %q: %q", name, secret, body)
+			}
 		}
 	}
 
@@ -7540,12 +9025,13 @@ func TestPosterHandlerRejectsUploadWhenQuotaRemovalFails(t *testing.T) {
 	payload := []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3}
 	posters := newPosterStoreWithRemover(t.TempDir(), int64(len(payload)+1), time.Hour, remover.remove)
 	now := time.Now()
-	oldID, oldEntry, err := posters.store(payload, "image/png", now)
+	oldID, oldEntry, err := posters.store("", payload, "image/png", now)
 	if err != nil {
 		t.Fatalf("store old poster: %v", err)
 	}
 	oldPath := posters.filePath(oldEntry.Filename)
-	remover.fail(oldPath, fs.ErrPermission)
+	privateDetail := "quota-removal-detail-4c2a"
+	remover.fail(oldPath, fmt.Errorf("%s: %w", privateDetail, fs.ErrPermission))
 	h := newStorageHarness(t, logs, posters)
 
 	resp := postPoster(t, h.baseURL, "9.9.9.9", payload)
@@ -7554,8 +9040,13 @@ func TestPosterHandlerRejectsUploadWhenQuotaRemovalFails(t *testing.T) {
 	if readErr != nil {
 		t.Fatalf("read failed upload response: %v", readErr)
 	}
-	if resp.StatusCode != http.StatusInternalServerError || string(body) != "Failed to store poster\n" {
-		t.Fatalf("failed upload status=%d body=%q", resp.StatusCode, body)
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("failed upload status=%d want 500", resp.StatusCode)
+	}
+	for _, secret := range []string{privateDetail, oldPath, oldEntry.Filename} {
+		if strings.Contains(string(body), secret) {
+			t.Fatalf("failed upload response leaked %q: %q", secret, body)
+		}
 	}
 	posters.mu.RLock()
 	_, retained := posters.entries[oldID]
@@ -7580,11 +9071,11 @@ func TestCleanupStepContinuesAfterRemovalFailureAndThrottlesLogging(t *testing.T
 	logs.generateID = func() string { return strings.Repeat("a", logIDLength) }
 	posters := newPosterStoreWithRemover(t.TempDir(), 1024, time.Hour, remover.remove)
 	now := time.Now()
-	logID, _, err := logs.store([]byte("expired"), now)
+	logID, _, err := logs.store("", []byte("expired"), now)
 	if err != nil {
 		t.Fatalf("store log: %v", err)
 	}
-	posterID, poster, err := posters.store([]byte{1, 2, 3}, "image/png", now)
+	posterID, poster, err := posters.store("", []byte{1, 2, 3}, "image/png", now)
 	if err != nil {
 		t.Fatalf("store poster: %v", err)
 	}
@@ -7605,7 +9096,8 @@ func TestCleanupStepContinuesAfterRemovalFailureAndThrottlesLogging(t *testing.T
 		rooms:         make(map[string]*Room),
 		logs:          logs,
 		posters:       posters,
-		posterUploads: newPosterUploadLimiter(posterPerIPRateBurst, posterPerIPRateSustained, posterGlobalRateBurst, posterGlobalRateSustained, maxConcurrentPosterUploads, now),
+		posterUploads: newPosterUploadLimiter(posterPerIPRateBurst, posterPerIPRateSustained, posterGlobalRateBurst, posterGlobalRateSustained, maxConcurrentPosterUploads, maxConcurrentPosterUploadsPerIP, now),
+		posterFetches: newPosterUploadLimiter(posterFetchPerIPRateBurst, posterFetchPerIPRateSustained, posterFetchGlobalRateBurst, posterFetchGlobalRateSustained, maxConcurrentPosterFetches, maxConcurrentPosterFetchesPerIP, now),
 		conns:         newConnTracker(),
 	}
 	srv.runCleanupStep(now)
@@ -7647,7 +9139,7 @@ func TestRemovalFailureLogDoesNotExposeCapabilityPath(t *testing.T) {
 	id := strings.Repeat("c", logIDLength)
 	store.generateID = func() string { return id }
 	now := time.Now()
-	if _, _, err := store.store([]byte("sensitive"), now); err != nil {
+	if _, _, err := store.store("", []byte("sensitive"), now); err != nil {
 		t.Fatalf("store: %v", err)
 	}
 	path := store.filePath(id)
@@ -7681,15 +9173,12 @@ func TestRemovalFailureLogDoesNotExposeCapabilityPath(t *testing.T) {
 	if strings.Contains(message, id) || strings.Contains(message, path) {
 		t.Fatalf("removal log exposed capability path: %q", message)
 	}
-	want := fmt.Sprintf("logs: cleanup removal failed: category=permission errno=%d", syscall.EACCES)
-	if !strings.Contains(message, want) {
-		t.Fatalf("removal log=%q, want sanitized context %q", message, want)
+	for _, field := range []string{"category=permission", fmt.Sprintf("errno=%d", syscall.EACCES)} {
+		if !strings.Contains(message, field) {
+			t.Fatalf("removal log=%q, want sanitized field %q", message, field)
+		}
 	}
 }
-
-// ======================================================================
-// End-to-end: rooms survive a process restart
-// ======================================================================
 
 func TestSnapshotSurvivesRestartWithHostAuthority(t *testing.T) {
 	stateFile := filepath.Join(t.TempDir(), "rooms.json")
@@ -7795,7 +9284,7 @@ func TestSnapshotV4RetainsModernHostAndGuestReservationsAcrossRestart(t *testing
 	wrongHostToken, _ := mustReconnectToken(t)
 	hostThief := hB.dial(t, "8.0.1.3")
 	hostThief.send(clientMsg{
-		Type:            relayTypeJoin,
+		Type:            relayTypeResume,
 		SessionID:       "V3_RESTART",
 		PeerID:          "H",
 		ReconnectToken:  wrongHostToken,
@@ -7805,13 +9294,13 @@ func TestSnapshotV4RetainsModernHostAndGuestReservationsAcrossRestart(t *testing
 
 	restartedHost := hB.dial(t, "8.0.1.4")
 	restartedHost.send(clientMsg{
-		Type:            relayTypeJoin,
+		Type:            relayTypeResume,
 		SessionID:       "V3_RESTART",
 		PeerID:          "H",
 		ReconnectToken:  hostToken,
 		ProtocolVersion: relayProtocolVersion,
 	})
-	hostJoined := restartedHost.expectAuthority(relayTypeJoined, "H")
+	hostJoined := restartedHost.expectAuthority(relayTypeResumed, "H")
 	if hostJoined.ReconnectToken != hostToken || hostJoined.ProtocolVersion != relayProtocolVersion {
 		t.Fatalf("restored host authority changed: %+v", hostJoined)
 	}
@@ -7819,7 +9308,7 @@ func TestSnapshotV4RetainsModernHostAndGuestReservationsAcrossRestart(t *testing
 	wrongGuestToken, _ := mustReconnectToken(t)
 	guestThief := hB.dial(t, "8.0.1.5")
 	guestThief.send(clientMsg{
-		Type:            relayTypeJoin,
+		Type:            relayTypeResume,
 		SessionID:       "V3_RESTART",
 		PeerID:          "G",
 		ReconnectToken:  wrongGuestToken,
@@ -7829,13 +9318,13 @@ func TestSnapshotV4RetainsModernHostAndGuestReservationsAcrossRestart(t *testing
 
 	restartedGuest := hB.dial(t, "8.0.1.6")
 	restartedGuest.send(clientMsg{
-		Type:            relayTypeJoin,
+		Type:            relayTypeResume,
 		SessionID:       "V3_RESTART",
 		PeerID:          "G",
 		ReconnectToken:  guestToken,
 		ProtocolVersion: relayProtocolVersion,
 	})
-	guestJoined := restartedGuest.expectAuthority(relayTypeJoined, "H")
+	guestJoined := restartedGuest.expectAuthority(relayTypeResumed, "H")
 	if guestJoined.ReconnectToken != guestToken || guestJoined.ProtocolVersion != relayProtocolVersion {
 		t.Fatalf("restored guest authority changed: %+v", guestJoined)
 	}

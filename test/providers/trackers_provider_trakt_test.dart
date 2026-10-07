@@ -17,7 +17,6 @@ TrackerSession _session({String? username, String accessToken = 'at', String ref
     accessToken: accessToken,
     refreshToken: refreshToken,
     expiresAt: DateTime.now().millisecondsSinceEpoch ~/ 1000 + 3600,
-    scope: 'public',
     createdAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
     username: username,
   );
@@ -242,7 +241,6 @@ void main() {
       final client = TraktTracker.instance.client!;
       final rotated = _session(username: 'alice', accessToken: 'rotated-at', refreshToken: 'rotated-rt');
 
-      client.updateSession(rotated);
       client.onSessionUpdated?.call(rotated);
       await Future<void>.delayed(Duration.zero);
 
@@ -261,10 +259,20 @@ void main() {
       p.dispose();
     });
 
-    test('onActiveProfileChanged after dispose is a no-op', () async {
+    test('onActiveProfileChanged after dispose binds nothing into the shared Trakt client', () async {
+      const uuid = 'profile-1';
+      await _store.save(uuid, _session(username: 'alice'));
+      BaseSharedPreferencesService.resetForTesting();
+
       final p = TrackersProvider();
       p.dispose();
-      await p.onActiveProfileChanged('any-uuid');
+      await _bindProfile(p, uuid);
+
+      // A disposed provider must not hand a stored account to the singleton
+      // tracker: nothing owns that binding anymore.
+      expect(p.isTraktConnected, isFalse);
+      expect(p.traktCatalogClient, isNull);
+      expect(TraktTracker.instance.client, isNull);
     });
   });
 }

@@ -37,15 +37,6 @@ enum OfflineActionType {
     OfflineActionType.watched => 'watched',
     OfflineActionType.unwatched => 'unwatched',
   };
-
-  /// Inverse of [id]. Throws on unknown so a typo in production doesn't
-  /// silently fall back to the wrong action.
-  static OfflineActionType fromId(String id) => switch (id) {
-    'progress' => OfflineActionType.progress,
-    'watched' => OfflineActionType.watched,
-    'unwatched' => OfflineActionType.unwatched,
-    _ => throw ArgumentError('Unknown OfflineActionType id: $id'),
-  };
 }
 
 final class AppDatabaseBootstrap {
@@ -64,9 +55,12 @@ final class AppDatabaseBootstrap {
     OfflineWatchProgress,
     SyncRules,
     SyncRuleDownloads,
+    DownloadCollections,
+    DownloadCollectionSyncs,
     Connections,
     Profiles,
     ProfileConnections,
+    MusicSessions,
   ],
 )
 class AppDatabase extends _$AppDatabase {
@@ -81,7 +75,6 @@ class AppDatabase extends _$AppDatabase {
   AppDatabase._withRecovery(super.e, this._recoveryStore);
 
   final TvosDatabaseRecoveryStore? _recoveryStore;
-  final SerialFutureQueue _durabilityQueue = SerialFutureQueue();
   static final Object _durabilityZoneKey = Object();
   static final SerialFutureQueue _tvosRecoveryQueue = SerialFutureQueue();
 
@@ -119,7 +112,6 @@ class AppDatabase extends _$AppDatabase {
         // migrations while failures are still covered by this close/rethrow
         // boundary and the caller's startup download-recovery decision.
         await database.customSelect('SELECT 1').get();
-        // It deliberately does not claim capacity for a later write.
       }
       final outcome = await _tvosRecoveryQueue.run(
         () => store.reconcile(
@@ -157,12 +149,10 @@ class AppDatabase extends _$AppDatabase {
     final store = _recoveryStore;
     if (store == null || !store.isTvos) return Future<void>.value();
 
-    return _durabilityQueue.run(
-      () => _tvosRecoveryQueue.run(
-        () => store.acknowledgeRecoveryRequired(
-          readIdentity: _readProtectedIdentityRecoveryRows,
-          readPending: _readPendingRecoveryRows,
-        ),
+    return _tvosRecoveryQueue.run(
+      () => store.acknowledgeRecoveryRequired(
+        readIdentity: _readProtectedIdentityRecoveryRows,
+        readPending: _readPendingRecoveryRows,
       ),
     );
   }
@@ -176,17 +166,15 @@ class AppDatabase extends _$AppDatabase {
     if (store == null || !store.isTvos) return mutation();
     if (Zone.current[_durabilityZoneKey] == this) return mutation();
 
-    return _durabilityQueue.run(
-      () => _tvosRecoveryQueue.run(
-        () => runZoned(
-          () => store.runDurableMutation(
-            group: group,
-            mutation: mutation,
-            readIdentity: _readProtectedIdentityRecoveryRows,
-            readPending: _readPendingRecoveryRows,
-          ),
-          zoneValues: {_durabilityZoneKey: this},
+    return _tvosRecoveryQueue.run(
+      () => runZoned(
+        () => store.runDurableMutation(
+          group: group,
+          mutation: mutation,
+          readIdentity: _readProtectedIdentityRecoveryRows,
+          readPending: _readPendingRecoveryRows,
         ),
+        zoneValues: {_durabilityZoneKey: this},
       ),
     );
   }
@@ -325,6 +313,14 @@ class AppDatabase extends _$AppDatabase {
     });
   }
 
+  /// Columns that once existed in a snapshotted table and may still appear in
+  /// committed recovery images written by older builds. They are stripped
+  /// before the strict round-trip check in [_decodeRecoveryRow] so retiring a
+  /// column does not brick restore on devices holding a pre-retirement image.
+  static const Map<String, Set<String>> _retiredRecoveryColumns = {
+    'connections': {'isDefault'},
+  };
+
   static List<T> _decodeRecoveryRows<T extends DataClass>(
     Map<String, Object?> group,
     String key,
@@ -332,9 +328,21 @@ class AppDatabase extends _$AppDatabase {
   ) {
     final value = group[key];
     if (value is! List) throw _invalidRecoveryImage;
+    final retired = _retiredRecoveryColumns[key];
     return [
       for (final row in value)
-        if (row is Map<String, dynamic>) _decodeRecoveryRow(row, fromJson) else throw _invalidRecoveryImage,
+        if (row is Map<String, dynamic>)
+          _decodeRecoveryRow(
+            retired == null
+                ? row
+                : {
+                    for (final entry in row.entries)
+                      if (!retired.contains(entry.key)) entry.key: entry.value,
+                  },
+            fromJson,
+          )
+        else
+          throw _invalidRecoveryImage,
     ];
   }
 
@@ -360,7 +368,7 @@ class AppDatabase extends _$AppDatabase {
   static const FormatException _invalidRecoveryImage = FormatException('Invalid tvOS database recovery image');
 
   @override
-  int get schemaVersion => 20;
+  int get schemaVersion => 25;
 
   @override
   MigrationStrategy get migration {
@@ -726,6 +734,37 @@ class AppDatabase extends _$AppDatabase {
             () => m.create(idxSyncRuleDownloadsProfileKey),
           );
         }
+        if (from < 21) {
+          appLogger.i('Dropping unused Connections.isDefault column (v21 migration)');
+          await m.alterTable(TableMigration(connections));
+        }
+        if (from < 22) {
+          appLogger.i('Adding MusicSessions table (v22 migration)');
+          await _ignoreAlreadyExists('MusicSessions table', () => m.createTable(musicSessions));
+        }
+        if (from < 23) {
+          appLogger.i('Adding library identity columns to DownloadedMedia (v23 migration)');
+          await _ignoreAlreadyExists(
+            'DownloadedMedia.libraryId column',
+            () => m.addColumn(downloadedMedia, downloadedMedia.libraryId),
+          );
+          await _ignoreAlreadyExists(
+            'DownloadedMedia.libraryTitle column',
+            () => m.addColumn(downloadedMedia, downloadedMedia.libraryTitle),
+          );
+        }
+        if (from < 24) {
+          appLogger.i('Adding additionalPartPaths column to DownloadedMedia (v24 migration)');
+          await _ignoreAlreadyExists(
+            'DownloadedMedia.additionalPartPaths column',
+            () => m.addColumn(downloadedMedia, downloadedMedia.additionalPartPaths),
+          );
+        }
+        if (from < 25) {
+          appLogger.i('Adding download collection membership tables (v25 migration)');
+          await _ignoreAlreadyExists('DownloadCollections table', () => m.createTable(downloadCollections));
+          await _ignoreAlreadyExists('DownloadCollectionSyncs table', () => m.createTable(downloadCollectionSyncs));
+        }
       },
     );
   }
@@ -747,7 +786,6 @@ class AppDatabase extends _$AppDatabase {
     return value == null ? column.isNull() : column.equals(value);
   }
 
-  /// Get all pending offline watch actions for sync
   Future<List<OfflineWatchProgressItem>> getPendingWatchActions({String? profileId}) {
     final query = select(offlineWatchProgress)..orderBy([(t) => OrderingTerm.asc(t.createdAt)]);
     if (profileId != null) {
@@ -882,7 +920,7 @@ class AppDatabase extends _$AppDatabase {
   }
 
   /// Insert or update a progress action (merges with existing).
-  Future<void> upsertProgressAction({
+  Future<({int rowId, int revision})> upsertProgressAction({
     String? profileId,
     required ServerId serverId,
     String? clientScopeId,
@@ -895,7 +933,7 @@ class AppDatabase extends _$AppDatabase {
       final globalKey = buildGlobalKey(ServerId(serverId), ratingKey);
       final now = DateTime.now().millisecondsSinceEpoch;
 
-      await transaction(() async {
+      return transaction(() async {
         final existing =
             await (select(offlineWatchProgress)
                   ..where(
@@ -910,6 +948,12 @@ class AppDatabase extends _$AppDatabase {
 
         final keep = existing.isEmpty ? null : existing.first;
         if (keep != null) {
+          // The row id survives a merge, so its timestamp must advance even
+          // when multiple playback updates land in one clock millisecond.
+          final nextRevision = keep.updatedAt + 1;
+          final revision = now > nextRevision ? now : nextRevision;
+          // A merge is a new logical action; retry history belongs only to
+          // the revision whose server write failed.
           await (update(offlineWatchProgress)..where((t) => t.id.equals(keep.id))).write(
             OfflineWatchProgressCompanion(
               viewOffset: Value(viewOffset),
@@ -917,37 +961,41 @@ class AppDatabase extends _$AppDatabase {
               shouldMarkWatched: Value(shouldMarkWatched),
               profileId: Value(profileId),
               clientScopeId: Value(clientScopeId),
-              updatedAt: Value(now),
+              updatedAt: Value(revision),
+              syncAttempts: const Value(0),
+              lastError: const Value<String?>(null),
             ),
           );
           final duplicateIds = existing.skip(1).map((row) => row.id).toList(growable: false);
           if (duplicateIds.isNotEmpty) {
             await (delete(offlineWatchProgress)..where((t) => t.id.isIn(duplicateIds))).go();
           }
-        } else {
-          await into(offlineWatchProgress).insert(
-            OfflineWatchProgressCompanion.insert(
-              serverId: serverId,
-              profileId: Value(profileId),
-              clientScopeId: Value(clientScopeId),
-              ratingKey: ratingKey,
-              globalKey: globalKey,
-              actionType: OfflineActionType.progress.id,
-              viewOffset: Value(viewOffset),
-              duration: Value(duration),
-              shouldMarkWatched: Value(shouldMarkWatched),
-              createdAt: now,
-              updatedAt: now,
-            ),
-          );
+          return (rowId: keep.id, revision: revision);
         }
+
+        final rowId = await into(offlineWatchProgress).insert(
+          OfflineWatchProgressCompanion.insert(
+            serverId: serverId,
+            profileId: Value(profileId),
+            clientScopeId: Value(clientScopeId),
+            ratingKey: ratingKey,
+            globalKey: globalKey,
+            actionType: OfflineActionType.progress.id,
+            viewOffset: Value(viewOffset),
+            duration: Value(duration),
+            shouldMarkWatched: Value(shouldMarkWatched),
+            createdAt: now,
+            updatedAt: now,
+          ),
+        );
+        return (rowId: rowId, revision: now);
       });
     });
   }
 
   /// Insert a manual watch action (watched or unwatched).
   /// Removes conflicting actions for the same item.
-  Future<void> insertWatchAction({
+  Future<({int rowId, int revision})> insertWatchAction({
     String? profileId,
     required ServerId serverId,
     String? clientScopeId,
@@ -958,7 +1006,7 @@ class AppDatabase extends _$AppDatabase {
       final globalKey = buildGlobalKey(ServerId(serverId), ratingKey);
       final now = DateTime.now().millisecondsSinceEpoch;
 
-      await transaction(() async {
+      return transaction(() async {
         // Remove conflicting actions (opposite action type and progress).
         await (delete(offlineWatchProgress)..where(
               (t) =>
@@ -968,7 +1016,7 @@ class AppDatabase extends _$AppDatabase {
             ))
             .go();
 
-        await into(offlineWatchProgress).insert(
+        final rowId = await into(offlineWatchProgress).insert(
           OfflineWatchProgressCompanion.insert(
             serverId: serverId,
             profileId: Value(profileId),
@@ -980,6 +1028,7 @@ class AppDatabase extends _$AppDatabase {
             updatedAt: now,
           ),
         );
+        return (rowId: rowId, revision: now);
       });
     });
   }
@@ -994,13 +1043,15 @@ class AppDatabase extends _$AppDatabase {
   /// orders by `createdAt` — and replaying it rewrites the resume position the
   /// mark just cleared, pinning the item to Continue Watching (#1812).
   ///
-  /// Progress queued *after* a mark is a genuine rewatch and is not affected:
-  /// this only runs at the moment the mark lands.
+  /// When [beforeRevision] is present, the notifier is settling a persisted
+  /// offline mark. Its listener is asynchronous, so only older revisions are
+  /// stale; an equal or newer progress revision is a genuine concurrent rewatch.
   Future<int> deleteQueuedProgressForItem({
     String? profileId,
     required ServerId serverId,
     String? clientScopeId,
     required String ratingKey,
+    int? beforeRevision,
   }) {
     return _runPendingMutation(() async {
       final globalKey = buildGlobalKey(ServerId(serverId), ratingKey);
@@ -1009,33 +1060,36 @@ class AppDatabase extends _$AppDatabase {
                 t.globalKey.equals(globalKey) &
                 _nullableTextPredicate(t.profileId, profileId) &
                 _nullableTextPredicate(t.clientScopeId, clientScopeId) &
-                t.actionType.equals(OfflineActionType.progress.id),
+                t.actionType.equals(OfflineActionType.progress.id) &
+                (beforeRevision == null ? const Constant(true) : t.updatedAt.isSmallerThanValue(beforeRevision)),
           ))
           .go();
     });
   }
 
-  /// Delete a specific watch action after successful sync
-  Future<void> deleteWatchAction(int id) {
+  /// Delete a watch action only if it is still the snapshotted revision.
+  Future<bool> deleteWatchActionIfUnchanged(int id, int revision) {
     return _runPendingMutation(() async {
-      await (delete(offlineWatchProgress)..where((t) => t.id.equals(id))).go();
+      final deleted = await (delete(
+        offlineWatchProgress,
+      )..where((t) => t.id.equals(id) & t.updatedAt.equals(revision))).go();
+      return deleted != 0;
     });
   }
 
-  /// Update sync attempt count and error message
-  Future<void> updateSyncAttempt(int id, String? errorMessage) async {
+  /// Update the retry state only if the action is still the snapshotted revision.
+  Future<bool> updateSyncAttemptIfUnchanged(int id, int revision, String? errorMessage) {
     return _runPendingMutation(() async {
-      final existing = await (select(offlineWatchProgress)..where((t) => t.id.equals(id))).getSingleOrNull();
-
-      if (existing != null) {
-        await (update(offlineWatchProgress)..where((t) => t.id.equals(id))).write(
-          OfflineWatchProgressCompanion(syncAttempts: Value(existing.syncAttempts + 1), lastError: Value(errorMessage)),
-        );
-      }
+      final updated = await customUpdate(
+        'UPDATE offline_watch_progress SET sync_attempts = sync_attempts + 1, last_error = ? '
+        'WHERE id = ? AND updated_at = ?',
+        variables: [Variable<String>(errorMessage), Variable<int>(id), Variable<int>(revision)],
+        updates: {offlineWatchProgress},
+      );
+      return updated != 0;
     });
   }
 
-  /// Get count of pending sync items
   Future<int> getPendingSyncCount({String? profileId, int? maxSyncAttempts}) async {
     final query = selectOnly(offlineWatchProgress)..addColumns([offlineWatchProgress.id.count()]);
     if (profileId != null) {
@@ -1060,6 +1114,38 @@ class AppDatabase extends _$AppDatabase {
     await _runPendingMutation(() async {
       await (delete(offlineWatchProgress)..where((t) => t.profileId.equals(profileId))).go();
     });
+  }
+
+  // ===========================================================================
+  // Music session persistence (#2148)
+  // ===========================================================================
+
+  /// Full snapshot write: replaces the profile's persisted music session.
+  Future<void> upsertMusicSession(MusicSessionRow row) {
+    return into(musicSessions).insertOnConflictUpdate(row);
+  }
+
+  /// Cheap write-through for playhead/cursor changes — leaves the (possibly
+  /// large) queue JSON untouched. No-op when no snapshot row exists.
+  Future<void> updateMusicSessionProgress({
+    required String profileId,
+    required int cursor,
+    required int positionMs,
+    required int updatedAt,
+  }) async {
+    await (update(musicSessions)..where((t) => t.profileId.equals(profileId))).write(
+      MusicSessionsCompanion(cursor: Value(cursor), positionMs: Value(positionMs), updatedAt: Value(updatedAt)),
+    );
+  }
+
+  Future<MusicSessionRow?> getMusicSession(String profileId) {
+    return (select(musicSessions)..where((t) => t.profileId.equals(profileId))).getSingleOrNull();
+  }
+
+  /// Drop a profile's persisted music session (user session end or profile
+  /// teardown).
+  Future<void> deleteMusicSessionForProfile(String profileId) async {
+    await (delete(musicSessions)..where((t) => t.profileId.equals(profileId))).go();
   }
 
   Future<List<SyncRuleItem>> getSyncRules({String? profileId}) {
@@ -1225,17 +1311,41 @@ class AppDatabase extends _$AppDatabase {
     await (update(syncRules)..where((t) => t.globalKey.equals(globalKey))).write(values);
   }
 
-  Future<void> updateSyncRuleCount(String globalKey, int episodeCount) =>
-      _writeSyncRule(globalKey, SyncRulesCompanion(episodeCount: Value(episodeCount)));
-
-  Future<void> updateSyncRuleFilter(String globalKey, String downloadFilter) =>
-      _writeSyncRule(globalKey, SyncRulesCompanion(downloadFilter: Value(downloadFilter)));
-
   Future<void> updateSyncRuleEnabled(String globalKey, bool enabled) =>
       _writeSyncRule(globalKey, SyncRulesCompanion(enabled: Value(enabled)));
 
-  Future<void> updateSyncRuleLastExecuted(String globalKey) =>
-      _writeSyncRule(globalKey, SyncRulesCompanion(lastExecutedAt: Value(DateTime.now().millisecondsSinceEpoch)));
+  /// Patch one existing rule without replacing concurrent execution metadata.
+  /// The id check rejects delete/recreate races for the same target.
+  Future<SyncRuleItem> updateSyncRuleOptions(
+    SyncRuleItem expected, {
+    int? episodeCount,
+    String? downloadFilter,
+    bool? enabled,
+    bool? includeSpecials,
+    int? mediaIndex,
+    required void Function() checkCurrent,
+  }) => transaction(() async {
+    checkCurrent();
+    final current = await getSyncRule(expected.globalKey);
+    checkCurrent();
+    if (current == null || current.id != expected.id || current.profileId != expected.profileId) {
+      throw StateError('Sync rule no longer exists');
+    }
+    await (update(syncRules)..where((t) => t.id.equals(expected.id) & t.profileId.equals(expected.profileId))).write(
+      SyncRulesCompanion(
+        episodeCount: episodeCount == null ? const Value.absent() : Value(episodeCount),
+        downloadFilter: downloadFilter == null ? const Value.absent() : Value(downloadFilter),
+        enabled: enabled == null ? const Value.absent() : Value(enabled),
+        includeSpecials: includeSpecials == null ? const Value.absent() : Value(includeSpecials),
+        mediaIndex: mediaIndex == null ? const Value.absent() : Value(mediaIndex),
+      ),
+    );
+    checkCurrent();
+    final updated = await getSyncRule(expected.globalKey);
+    checkCurrent();
+    if (updated == null) throw StateError('Sync rule no longer exists');
+    return updated;
+  });
 
   Future<void> completeSyncRuleExecution(String globalKey) {
     return (update(syncRules)..where((t) => t.globalKey.equals(globalKey))).write(

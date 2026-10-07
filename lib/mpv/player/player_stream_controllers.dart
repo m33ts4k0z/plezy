@@ -8,6 +8,7 @@ mixin PlayerStreamControllersMixin {
   final completedController = StreamController<bool>.broadcast();
   final bufferingController = StreamController<bool>.broadcast();
   final positionController = StreamController<Duration>.broadcast();
+  final playheadJumpController = StreamController<Duration?>.broadcast();
   final durationController = StreamController<Duration>.broadcast();
   final seekableController = StreamController<bool>.broadcast();
   final bufferController = StreamController<Duration>.broadcast();
@@ -24,7 +25,11 @@ mixin PlayerStreamControllersMixin {
   final fileLoadedController = StreamController<void>.broadcast();
   final fileStartedController = StreamController<void>.broadcast();
   final fileLoadFailedController = StreamController<void>.broadcast();
+  final sourceStartedController = StreamController<PlayerSourceStarted>.broadcast();
+  final sourceReadyController = StreamController<PlayerSourceReady>.broadcast();
+  final sourceFailedController = StreamController<PlayerSourceFailed>.broadcast();
   final primaryMediaReadyController = StreamController<void>.broadcast();
+  final hdrOutputChangedController = StreamController<void>.broadcast();
   final backendSwitchedController = StreamController<void>.broadcast();
   final trackTransitionController = StreamController<String>.broadcast();
 
@@ -34,6 +39,7 @@ mixin PlayerStreamControllersMixin {
       completed: completedController.stream,
       buffering: bufferingController.stream,
       position: positionController.stream,
+      playheadJump: playheadJumpController.stream,
       duration: durationController.stream,
       seekable: seekableController.stream,
       buffer: bufferController.stream,
@@ -50,8 +56,12 @@ mixin PlayerStreamControllersMixin {
       fileLoaded: fileLoadedController.stream,
       fileStarted: fileStartedController.stream,
       fileLoadFailed: fileLoadFailedController.stream,
+      sourceStarted: sourceStartedController.stream,
+      sourceReady: sourceReadyController.stream,
+      sourceFailed: sourceFailedController.stream,
       primaryMediaReady: primaryMediaReadyController.stream,
       backendSwitched: backendSwitchedController.stream,
+      hdrOutputChanged: hdrOutputChangedController.stream,
       trackTransition: trackTransitionController.stream,
     );
   }
@@ -61,6 +71,7 @@ mixin PlayerStreamControllersMixin {
     await completedController.close();
     await bufferingController.close();
     await positionController.close();
+    await playheadJumpController.close();
     await durationController.close();
     await seekableController.close();
     await bufferController.close();
@@ -77,8 +88,12 @@ mixin PlayerStreamControllersMixin {
     await fileLoadedController.close();
     await fileStartedController.close();
     await fileLoadFailedController.close();
+    await sourceStartedController.close();
+    await sourceReadyController.close();
+    await sourceFailedController.close();
     await primaryMediaReadyController.close();
     await backendSwitchedController.close();
+    await hdrOutputChangedController.close();
     await trackTransitionController.close();
   }
 }

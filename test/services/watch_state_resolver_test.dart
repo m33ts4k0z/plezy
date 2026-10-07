@@ -8,13 +8,7 @@ import 'package:plezy/services/watch_state_resolver.dart';
 import 'package:plezy/utils/watch_state_notifier.dart';
 import '../test_helpers/media_items.dart';
 
-OfflineWatchProgressItem _action({
-  required String actionType,
-  required int updatedAt,
-  int? viewOffset,
-  int? duration,
-  bool shouldMarkWatched = false,
-}) {
+OfflineWatchProgressItem _action({required String actionType, required int updatedAt, int? viewOffset, int? duration}) {
   return OfflineWatchProgressItem(
     id: updatedAt,
     serverId: 'srv',
@@ -23,7 +17,7 @@ OfflineWatchProgressItem _action({
     actionType: actionType,
     viewOffset: viewOffset,
     duration: duration,
-    shouldMarkWatched: shouldMarkWatched,
+    shouldMarkWatched: false,
     createdAt: updatedAt,
     updatedAt: updatedAt,
     syncAttempts: 0,
@@ -60,7 +54,6 @@ void main() {
         serverId: ServerId('srv'),
         changeType: WatchStateChangeType.progressUpdate,
         parentChain: const [],
-        mediaType: 'movie',
         viewOffset: 5000,
         isNowWatched: false,
       ),
@@ -78,7 +71,6 @@ void main() {
         serverId: ServerId('srv'),
         changeType: WatchStateChangeType.removedFromContinueWatching,
         parentChain: const [],
-        mediaType: 'movie',
       ),
     );
 

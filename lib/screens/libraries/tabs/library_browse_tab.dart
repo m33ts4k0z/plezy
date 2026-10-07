@@ -1,6 +1,7 @@
 import 'dart:async';
 import '../../../media/ids.dart';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:material_symbols_icons/symbols.dart';
 import 'package:provider/provider.dart';
@@ -30,13 +31,15 @@ import '../alpha_scroll_handle.dart';
 import '../library_browse_grouping.dart';
 import '../library_alpha_bar_strategy.dart';
 import '../library_alpha_scroll_metrics.dart';
-import '../library_filter_sort_loader.dart';
+import '../../../widgets/anchored_option_menus.dart';
 import '../../../widgets/focusable_media_card.dart';
-import '../../../widgets/focusable_filter_chip.dart';
+import '../../../widgets/options_chips_bar.dart';
 import '../../../widgets/listenable_selector.dart';
 import '../../../widgets/loading_indicator_box.dart';
 import '../../../widgets/media_card_sliver_layout.dart';
+import '../../../widgets/media_grid_delegate.dart';
 import '../../../widgets/media_card_list_layout.dart';
+import '../../../widgets/nested_tab_scrollbar.dart';
 import '../../../widgets/bottom_sheet_page_scaffold.dart';
 import '../../../widgets/overlay_sheet.dart';
 import '../../../mixins/library_tab_focus_mixin.dart';
@@ -99,8 +102,8 @@ class LibraryBrowseTab extends BaseLibraryTab<MediaItem> {
 class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrowseTab>
     with
         ItemUpdatable,
-        LibraryTabFocusMixin,
         GridFocusNodeMixin,
+        LibraryTabFocusMixin,
         WatchStateAware,
         DeletionAware,
         DeletionMirrorsWatchState,
@@ -159,6 +162,7 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
     if (matchEntry != null) {
       setState(() {
         removeLoadedItemAndShift(matchEntry.key);
+        reconcileGridFocusNodes({for (final entry in loadedItems.entries) entry.value.id: entry.key});
       });
       return;
     }
@@ -174,6 +178,7 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
         if (newLeafCount <= 0) {
           setState(() {
             removeLoadedItemAndShift(parentEntry.key);
+            reconcileGridFocusNodes({for (final entry in loadedItems.entries) entry.value.id: entry.key});
           });
         } else {
           setState(() {
@@ -197,10 +202,85 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
   @override
   int get itemCount => totalSize;
 
+  /// Live in-place repopulation while a scroll/jump is running would fight
+  /// the user; the blocked-retry timer picks it up once the grid is idle.
+  @override
+  bool get isLiveRefreshBlocked => _isJumpScrolling || (_innerPosition?.isScrollingNotifier.value ?? false);
+
+  /// Server push while this grid is visible: refetch the loaded span in
+  /// place (Plex Web's `repopulateRange`) so new items materialize at their
+  /// sorted positions and metadata updates land, then keep the first visible
+  /// item stationary by compensating the scroll offset for any index shift
+  /// the merge caused, and carry the D-pad highlight to wherever the focused
+  /// item moved. Folder grouping browses a tree, not the flat index
+  /// space — the activation staleness path owns it there. An error or empty
+  /// grid falls back to the clearing reload: nothing visible to preserve,
+  /// and it is the only way a first item can appear live.
+  @override
+  Future<void> performLiveLibraryRefresh() async {
+    if (!mounted || _selectedGrouping == 'folders' || isLoading) return;
+    if (!hasLoadedData || loadedItems.isEmpty || totalSize == 0) return loadItems();
+    final anchorIndex = _computeVisibleRange()?.firstIndex;
+    // The first visible slot may be an unloaded skeleton after a fast jump;
+    // anchor on it only when its item is known.
+    final anchorId = anchorIndex == null ? null : loadedItems[anchorIndex]?.id;
+    final epoch = snapshotLibraryContentEpoch();
+    // Bound the refetch: after an alpha jump the map holds disjoint clusters
+    // whose naive span is nearly the whole library. Keep per-index caches in
+    // lockstep with the dropped entries.
+    const maxSpan = 600;
+    if (anchorIndex != null) {
+      evictDistantFocusNodes(anchorIndex, keepCount: _focusNodeKeepCount);
+      _cardMemo.removeOutsideRange(anchorIndex, halfWindow: _focusNodeKeepCount ~/ 2);
+    }
+    final result = await repopulateLoadedRange(
+      idOf: (item) => item.id,
+      anchorId: anchorId,
+      maxSpan: maxSpan,
+      windowCenter: anchorIndex,
+    );
+    if (!mounted) return;
+    if (result == null) {
+      // Failed or superseded: nothing landed, so nothing is credited.
+      releaseLibraryContentEpoch();
+      return;
+    }
+    recordLibraryContentEpoch(epoch);
+    // Alpha-bar bucket counts shifted with the content; refresh is cheap and
+    // best-effort.
+    unawaited(_loadFirstCharacters());
+    reconcileGridFocusNodes({for (final entry in loadedItems.entries) entry.value.id: entry.key});
+
+    final oldIndex = result.anchorOldIndex;
+    final newIndex = result.anchorNewIndex;
+    final pos = _innerPosition;
+    if (oldIndex == null || newIndex == null || pos == null || !_scrollMetrics.isUsable) return;
+    // A drag or fling that began during the fetch owns the offset now; a
+    // jumpTo would kill its activity and yank the grid. Skip the correction
+    // and accept the one-time shift.
+    if (isLiveRefreshBlocked) return;
+    final rowDelta = (newIndex ~/ _scrollMetrics.columnCount) - (oldIndex ~/ _scrollMetrics.columnCount);
+    if (rowDelta == 0) return;
+    // Same frame as the merge's setState, so layout happens once at the
+    // corrected offset — the anchor item never visibly moves. Uniform grid
+    // extents make the arithmetic exact.
+    pos.jumpTo((pos.pixels + rowDelta * _scrollMetrics.rowHeight).clamp(0.0, pos.maxScrollExtent));
+  }
+
+  /// Index currently holding the item with [id], or null when [id] is null or
+  /// the item is no longer loaded.
+  int? _loadedIndexOfId(String? id) {
+    if (id == null) return null;
+    for (final entry in loadedItems.entries) {
+      if (entry.value.id == id) return entry.key;
+    }
+    return null;
+  }
+
   // Browse-specific state (not in base class)
   List<MediaFilter> _filters = [];
   List<MediaSort> _sortOptions = [];
-  Map<String, String> _selectedFilters = {};
+  List<LibraryFilter> _selectedFilters = const [];
   MediaSort? _selectedSort;
   bool _isSortDescending = false;
   String _selectedGrouping = 'all'; // all, seasons, episodes, folders
@@ -230,7 +310,6 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
   /// never outlive the focus nodes its cached cards capture.
   static const int _focusNodeKeepCount = 200;
   double _effectiveTopPadding = _gridTopPadding;
-  final GlobalKey _firstListItemKey = GlobalKey(debugLabel: 'first_library_list_item');
   double? _measuredListRowHeight;
   int? _listMetricsDensity;
   bool? _listMetricsUsesWideRatio;
@@ -287,6 +366,8 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
         oldWidget.library.serverId != widget.library.serverId ||
         oldWidget.library.isShared != widget.library.isShared) {
       _alphaStrategy = _createAlphaStrategy();
+      cleanupGridFocusNodes(0);
+      _cardMemo.clear();
     }
     super.didUpdateWidget(oldWidget);
     if (oldWidget.canGroupByFolders != widget.canGroupByFolders) {
@@ -311,6 +392,11 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
   final FocusNode _groupingChipFocusNode = FocusNode(debugLabel: 'grouping_chip');
   final FocusNode _filtersChipFocusNode = FocusNode(debugLabel: 'filters_chip');
   final FocusNode _sortChipFocusNode = FocusNode(debugLabel: 'sort_chip');
+
+  // Anchor keys for the desktop dropdown variants of the chip menus.
+  final GlobalKey _groupingChipKey = GlobalKey();
+  final GlobalKey _filtersChipKey = GlobalKey();
+  final GlobalKey _sortChipKey = GlobalKey();
 
   // The inner CustomScrollView attaches its position to NestedScrollView's
   // shared inner controller (via PrimaryScrollController), which has one
@@ -368,15 +454,7 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
     }
   }
 
-  // Override loadData to use our custom _loadContent
-  @override
-  Future<List<MediaItem>> loadData() async {
-    // This is called by base class loadItems(), but we override loadItems() entirely
-    // So this just returns empty - actual loading is done in _loadContent
-    return [];
-  }
-
-  // Override loadItems to use our custom loading with pagination
+  // Custom loading with pagination replaces the base runLoadTransaction path
   @override
   Future<void> loadItems() async {
     await _loadContent();
@@ -413,6 +491,7 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
         }
       }
 
+      revealFirstItem();
       request();
       WidgetsBinding.instance.addPostFrameCallback((_) => request());
       return;
@@ -429,6 +508,7 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
         }
       }
 
+      revealFirstItem();
       request();
       WidgetsBinding.instance.addPostFrameCallback((_) => request());
     }
@@ -446,8 +526,8 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
     }
   }
 
-  /// Height of the chips bar (padding + chip + padding)
-  static const double _chipsBarHeight = 32.0;
+  /// Height of the chips bar — see [optionsChipsBarHeight].
+  static const double _chipsBarHeight = optionsChipsBarHeight;
 
   /// Focus the chips bar (for navigating from tab bar to content).
   /// Called by libraries screen when pressing DOWN on tab bar.
@@ -461,11 +541,16 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
   }
 
   /// Show the mobile browse options sheet from the parent app bar.
+  ///
+  /// No drag handle: every page in this session — the options list and the
+  /// grouping, filter and sort pages pushed onto it — already carries the
+  /// header's close button, and two dismissal affordances on one sheet read
+  /// as two different controls.
   void showBrowseOptionsSheet() {
     if (!mounted) return;
     SelectKeyUpSuppressor.suppressSelectUntilKeyUp();
     final controller = OverlaySheetController.of(context);
-    controller.show(showDragHandle: true, builder: (sheetContext) => _buildBrowseOptionsSheet(sheetContext));
+    controller.show(builder: (sheetContext) => _buildBrowseOptionsSheet(sheetContext));
   }
 
   /// Reset transient browse state before loading a different library.
@@ -508,20 +593,19 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
     if (!mounted) return;
     final library = widget.library;
     final libraryGlobalKey = library.globalKey;
-    final generation = beginLibraryLoad();
+    final (:generation, :epoch) = beginLibraryLoad();
     final firstCharactersGeneration = ++_firstCharactersRequestId;
 
     _resetForFullReload();
     _resetTopOfPageState();
     _currentFirstVisibleIndex.value = 0;
 
-    // Plex returns categories from `/library/sections/{id}/filters` +
-    // `/sorts`; MediaBrowser clients map their filter endpoints into the same
+    // Plex returns categories from its published filter schema + `/sorts`;
+    // MediaBrowser clients map their filter endpoints into the same
     // shape with values pre-cached and a hardcoded client-side sort list. Both
     // flow through [MediaServerClient.fetchLibraryFiltersWithValues].
     try {
       final client = context.getMediaClientForLibrary(library);
-      final loader = LibraryFilterSortLoader(clientFor: (_) => client);
       final storage = await StorageService.getInstance();
       if (!isCurrentLibraryLoad(generation, libraryGlobalKey)) return;
 
@@ -544,7 +628,17 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
         // Plex filters+sorts must resolve before items so saved-sort restoration
         // can match a saved key against the just-loaded sort list, and so the
         // first item fetch already includes the restored sort param.
-        loaded = await loader.load(library, sortLibraryType: sortLibraryType);
+        final filtersFuture = client.fetchLibraryFiltersWithValues(library.id, libraryKind: library.kind);
+        final sortsFuture = client.fetchSortOptions(library.id, libraryType: sortLibraryType);
+        // Settle both before reading either so a dual failure can't leave an
+        // unhandled error; the first error propagates as-is.
+        await Future.wait([filtersFuture, sortsFuture]);
+        final filterResult = await filtersFuture;
+        loaded = LoadedFiltersAndSorts(
+          filters: filterResult.filters,
+          sorts: await sortsFuture,
+          cachedValues: filterResult.cachedValues,
+        );
       }
 
       if (!isCurrentLibraryLoad(generation, libraryGlobalKey)) return;
@@ -554,7 +648,7 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
         // Plex returns no cached values (filters fetched lazily per-category);
         // assigning the empty map is a no-op for Plex and a real payload for MediaBrowser libraries.
         _mediaBrowserFilterValues = loaded.cachedValues;
-        _selectedFilters = Map.from(savedFilters);
+        _selectedFilters = savedFilters;
         _selectedGrouping = restoredGrouping;
 
         // Restore sort
@@ -575,19 +669,79 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
         _loadMediaBrowserFiltersInBackground(generation, libraryGlobalKey, library);
       }
 
-      // Load items and first characters in parallel.
+      // Folder grouping renders the tree, not the flat page or the alpha
+      // bar: the tree is the sole owner of readiness, error and epoch credit
+      // there, so neither is fetched.
+      if (_selectedGrouping == 'folders') {
+        await _loadFolderTree(generation: generation, libraryGlobalKey: libraryGlobalKey, epoch: epoch);
+        return;
+      }
+
       await Future.wait([
-        _loadItems(loadGeneration: generation, libraryGlobalKey: libraryGlobalKey),
+        _loadItems(loadGeneration: generation, libraryGlobalKey: libraryGlobalKey, epoch: epoch),
         _loadFirstCharacters(requestId: firstCharactersGeneration),
       ]);
     } catch (e, stackTrace) {
       if (!isCurrentLibraryLoad(generation, libraryGlobalKey)) return;
+      releaseLibraryContentEpoch();
       final message = localizedLoadErrorMessage(e, stackTrace, context: t.libraries.content);
       if (!isCurrentLibraryLoad(generation, libraryGlobalKey)) return;
       setState(() {
         errorMessage = message;
         isLoading = false;
       });
+    }
+  }
+
+  /// Settle a full load whose surface is the folder tree: the tree owns its
+  /// own loading/error rendering and its root listing owns the epoch, while
+  /// this reports readiness and focus. The tree mounts on the frame that
+  /// commits the restored grouping, so let that frame land and then adopt the
+  /// load it started there — a first mount is credited like any reload.
+  Future<void> _loadFolderTree({required int generation, required String libraryGlobalKey, required int epoch}) async {
+    if (_folderTreeKey.currentState == null) await WidgetsBinding.instance.endOfFrame;
+    if (!isCurrentLibraryLoad(generation, libraryGlobalKey)) return;
+    final tree = _folderTreeKey.currentState;
+    // Nothing rendered the tree: nothing is credited, so the next activation
+    // still owes this library a reload.
+    final loaded = tree != null && await tree.ensureRootLoaded();
+    if (!isCurrentLibraryLoad(generation, libraryGlobalKey)) return;
+    if (loaded) {
+      recordLibraryContentEpoch(epoch);
+    } else {
+      releaseLibraryContentEpoch();
+    }
+    setState(() {
+      isLoading = false;
+    });
+    hasLoadedData = true;
+    // A failed root listing renders the tree's own retry action on
+    // [firstItemFocusNode], so focus is requested either way.
+    tryFocus();
+    final onDataLoaded = widget.onDataLoaded;
+    if (onDataLoaded != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (isCurrentLibraryLoad(generation, libraryGlobalKey)) onDataLoaded();
+      });
+    }
+  }
+
+  /// Reload the mounted [FolderTreeView] and credit the epoch only when its
+  /// root listing actually landed. A tree that is not mounted yet loads
+  /// itself on mount; nothing is credited then, so a push that predates the
+  /// mount is still owed to the next activation.
+  Future<void> _refreshFolderTree() async {
+    final tree = _folderTreeKey.currentState;
+    if (tree == null) return;
+    final generation = libraryLoadGeneration;
+    final libraryGlobalKey = widget.library.globalKey;
+    final epoch = snapshotLibraryContentEpoch();
+    final refreshed = await tree.refresh();
+    if (!isCurrentLibraryLoad(generation, libraryGlobalKey)) return;
+    if (refreshed) {
+      recordLibraryContentEpoch(epoch);
+    } else {
+      releaseLibraryContentEpoch();
     }
   }
 
@@ -641,7 +795,7 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
       _sortOptions = [];
       _mediaBrowserFilterValues = const {};
       _mediaBrowserAlphaPrefix = null;
-      _selectedFilters = {};
+      _selectedFilters = const [];
       _selectedSort = null;
       _isSortDescending = false;
       _selectedGrouping = _getDefaultGrouping();
@@ -653,43 +807,59 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
     _notifyFiltersActive();
   }
 
-  /// Build the filter params map for API calls
-  Map<String, String> _buildFilterParams() {
-    final filterParams = Map<String, String>.from(_selectedFilters);
-
-    // Add grouping type filter (but not for 'all' or 'folders')
+  /// Plex metadata type the active grouping browses, or null when the
+  /// grouping does not pin one.
+  String? _browseTypeParam() {
     if (_selectedGrouping != 'all' && _selectedGrouping != 'folders') {
       final typeId = _getGroupingTypeId();
-      if (typeId.isNotEmpty) {
-        filterParams['type'] = typeId;
-      }
-    } else if (_selectedGrouping == 'all' && widget.library.isShared) {
-      // Shared libraries: filter to video content only (exclude library section entries)
-      filterParams['type'] = PlexMetadataType.videoCsv;
+      return typeId.isEmpty ? null : typeId;
     }
-
-    // Add sort
-    if (_selectedSort != null) {
-      filterParams['sort'] = _selectedSort!.getSortKey(descending: _isSortDescending);
+    if (_selectedGrouping == 'all' && widget.library.isShared) {
+      // Shared libraries: video content only (exclude library section entries).
+      return PlexMetadataType.videoCsv;
     }
-
-    filterParams['includeCollections'] = '1';
-
-    // MediaBrowser alpha-bar filter — converted to NameStartsWith /
-    // NameLessThan on the wire.
-    if (_mediaBrowserAlphaPrefix != null) {
-      filterParams['alphaPrefix'] = _mediaBrowserAlphaPrefix!;
-    }
-
-    return filterParams;
+    return null;
   }
 
-  Future<void> _loadItems({bool preserveFocus = false, int? loadGeneration, String? libraryGlobalKey}) async {
+  /// The query the grid runs, for [clauses] rather than the committed
+  /// selection so the filter editor can count a pending edit.
+  LibraryQuery _buildQuery({required List<LibraryFilter> clauses, required int offset, required int limit}) {
+    final typeParam = _browseTypeParam();
+    final baseQuery = libraryQueryFromSelection(
+      clauses: clauses,
+      libraryKind: typeParam != null ? null : widget.library.kind,
+      typeParam: typeParam,
+      sortParam: _selectedSort?.getSortKey(descending: _isSortDescending),
+      alphaPrefix: _mediaBrowserAlphaPrefix,
+      offset: offset,
+      limit: limit,
+    );
+    return (baseQuery.kind == null || baseQuery.kind == MediaKind.folder) &&
+            baseQuery.includeKinds.isEmpty &&
+            _selectedGrouping == browseGroupingAll &&
+            widget.library.defaultBrowseKinds.isNotEmpty
+        ? baseQuery.copyWith(includeKinds: widget.library.defaultBrowseKinds)
+        : baseQuery;
+  }
+
+  /// Fetch the first flat page. [epoch] is the snapshot of the full load that
+  /// owns this fetch; self-started reloads (filter, sort, grouping, alpha
+  /// prefix) snapshot at their own start.
+  Future<void> _loadItems({
+    bool preserveFocus = false,
+    int? loadGeneration,
+    String? libraryGlobalKey,
+    int? epoch,
+  }) async {
     final generation = loadGeneration ?? libraryLoadGeneration;
     final acceptedLibraryGlobalKey = libraryGlobalKey ?? widget.library.globalKey;
     if (!isCurrentLibraryLoad(generation, acceptedLibraryGlobalKey)) return;
+    final contentEpoch = epoch ?? snapshotLibraryContentEpoch();
     setState(() {
       isLoading = true;
+      // A failed earlier load must not outlive this one: the state slivers
+      // rank the error above the empty state.
+      errorMessage = null;
       items = [];
       resetPaginationState();
       // Increment content version when loading fresh content
@@ -709,6 +879,15 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
       });
 
       hasLoadedData = true;
+      // Credit the operation's own snapshot (and the live pacer) so a fresh
+      // full load isn't re-marked stale on the next activation. Folder
+      // grouping doesn't render this page — [_refreshFolderTree] credits
+      // the tree's reload instead.
+      if (_selectedGrouping == 'folders') {
+        releaseLibraryContentEpoch();
+      } else {
+        recordLibraryContentEpoch(contentEpoch);
+      }
       if (!preserveFocus) {
         tryFocus();
       }
@@ -724,6 +903,7 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
       }
     } catch (e, stackTrace) {
       if (!isCurrentLibraryLoad(generation, acceptedLibraryGlobalKey)) return;
+      releaseLibraryContentEpoch();
       final message = localizedLoadErrorMessage(e, stackTrace, context: t.libraries.content);
       if (!isCurrentLibraryLoad(generation, acceptedLibraryGlobalKey)) return;
       setState(() {
@@ -736,23 +916,9 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
   @override
   Future<LibraryPage<MediaItem>> fetchPage(int start, int size, AbortController? abort) async {
     final client = context.getMediaClientForLibrary(widget.library);
-    final filterParams = _buildFilterParams();
-    final baseQuery = libraryQueryFromPlexMap(
-      map: filterParams,
-      libraryKind: filterParams.containsKey('type') ? null : widget.library.kind,
-      offset: start,
-      limit: size,
-    );
-    final query =
-        (baseQuery.kind == null || baseQuery.kind == MediaKind.folder) &&
-            baseQuery.includeKinds.isEmpty &&
-            _selectedGrouping == browseGroupingAll &&
-            widget.library.defaultBrowseKinds.isNotEmpty
-        ? baseQuery.copyWith(includeKinds: widget.library.defaultBrowseKinds)
-        : baseQuery;
     return client.fetchLibraryPagedContent(
       widget.library.id,
-      query: query,
+      query: _buildQuery(clauses: _selectedFilters, offset: start, limit: size),
       libraryKind: widget.library.kind,
       abort: abort,
     );
@@ -836,7 +1002,6 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
     return BottomSheetPageScaffold(
       title: t.libraries.libraryOptions,
       icon: Symbols.tune_rounded,
-      shrinkWrap: true,
       child: ListView(
         primary: false,
         shrinkWrap: true,
@@ -855,7 +1020,7 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
               title: Text(
                 _selectedFilters.isEmpty
                     ? t.libraries.filters
-                    : t.libraries.filtersWithCount(count: _selectedFilters.length),
+                    : t.libraries.filtersWithCount(count: _activeFilterFieldCount),
               ),
               trailing: const AppIcon(Symbols.chevron_right_rounded, fill: 1),
               onTap: () => _showFiltersOptionsPage(controller),
@@ -874,31 +1039,21 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
   }
 
   void _showGroupingBottomSheet() {
+    final anchorRect = useAnchoredChipMenus(context) ? chipAnchorRect(_groupingChipKey) : null;
+    if (anchorRect != null) {
+      showAnchoredSelectionMenu<String>(
+        context,
+        anchorRect: anchorRect,
+        options: _getGroupingOptions(),
+        labelOf: _getGroupingLabel,
+        selected: _selectedGrouping,
+      ).then(_handleGroupingSelection);
+      return;
+    }
     SelectKeyUpSuppressor.suppressSelectUntilKeyUp();
     final controller = OverlaySheetController.of(context);
     controller
-        .show<String>(
-          showDragHandle: true,
-          builder: (sheetContext) => Column(
-            mainAxisSize: .min,
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
-                child: Text(
-                  t.libraries.groupings.title,
-                  style: Theme.of(sheetContext).textTheme.titleMedium,
-                  maxLines: 1,
-                  overflow: .ellipsis,
-                ),
-              ),
-              Flexible(
-                child: SingleChildScrollView(
-                  child: Column(mainAxisSize: .min, children: _buildGroupingTiles((value) => controller.close(value))),
-                ),
-              ),
-            ],
-          ),
-        )
+        .show<String>(builder: (_) => _buildGroupingBottomSheet(onSelected: (value) => controller.close(value)))
         .then(_handleGroupingSelection);
   }
 
@@ -917,7 +1072,6 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
       title: t.libraries.groupings.title,
       icon: Symbols.category_rounded,
       onBack: onBack,
-      shrinkWrap: true,
       child: ListView(
         primary: false,
         shrinkWrap: true,
@@ -993,16 +1147,45 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
   }
 
   void _showFiltersBottomSheet() {
+    final anchorRect = useAnchoredChipMenus(context) ? chipAnchorRect(_filtersChipKey) : null;
+    if (anchorRect != null) {
+      unawaited(_showFiltersMenu(anchorRect));
+      return;
+    }
     SelectKeyUpSuppressor.suppressSelectUntilKeyUp();
-    OverlaySheetController.of(context).show(builder: (_) => _buildFiltersBottomSheet());
+    final controller = OverlaySheetController.of(context);
+    _openFiltersSheet((builder) => controller.show(builder: builder));
   }
 
   void _showFiltersOptionsPage(OverlaySheetController controller) {
     SelectKeyUpSuppressor.suppressSelectUntilKeyUp();
-    controller.push(builder: (_) => _buildFiltersBottomSheet(onBack: () => controller.pop()));
+    _openFiltersSheet((builder) => controller.push(builder: builder), onBack: () => controller.pop());
   }
 
-  Widget _buildFiltersBottomSheet({VoidCallback? onBack}) {
+  /// Open the filter editor and commit once, when it closes.
+  ///
+  /// A multi-select editor cannot apply per tap, and the sheet can be
+  /// dismissed through the barrier, a drag, D-pad back or system back, so the
+  /// commit hangs off the sheet's future rather than any one of those paths.
+  /// Committing post-frame keeps the reload from stealing focus while the
+  /// sheet is still tearing down, exactly as the sort sheet does.
+  void _openFiltersSheet(Future<dynamic> Function(WidgetBuilder builder) open, {VoidCallback? onBack}) {
+    var pending = _selectedFilters;
+    // The staged edits belong to the library that was open when the editor
+    // was: committing them after a library switch would write one library's
+    // clauses into another's storage key.
+    final owner = widget.library.globalKey;
+    open((_) => _buildFiltersBottomSheet(onChanged: (filters) => pending = filters, onBack: onBack)).then((_) {
+      if (!mounted) return;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || owner != widget.library.globalKey) return;
+        if (listEquals(pending, _selectedFilters)) return;
+        unawaited(_applyFilters(pending));
+      });
+    });
+  }
+
+  Widget _buildFiltersBottomSheet({required ValueChanged<List<LibraryFilter>> onChanged, VoidCallback? onBack}) {
     return FiltersBottomSheet(
       filters: _filters,
       selectedFilters: _selectedFilters,
@@ -1013,18 +1196,16 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
       // Pre-populated values arrive from MediaBrowser filter discovery. The
       // empty map for Plex libraries falls through to lazy `getFilterValues`.
       cachedValues: _mediaBrowserFilterValues.isEmpty ? null : _mediaBrowserFilterValues,
-      onFiltersChanged: _applyFilters,
+      onFiltersChanged: onChanged,
     );
   }
 
-  Future<void> _applyFilters(Map<String, String> filters) async {
+  Future<void> _applyFilters(List<LibraryFilter> filters) async {
     setState(() {
-      _selectedFilters.clear();
-      _selectedFilters.addAll(filters);
+      _selectedFilters = List<LibraryFilter>.unmodifiable(filters);
     });
     _notifyFiltersActive();
 
-    // Save filters to storage
     final storage = await StorageService.getInstance();
     await storage.saveLibraryFilters(filters, sectionId: widget.library.globalKey);
 
@@ -1032,7 +1213,11 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
     unawaited(_loadFirstCharacters());
   }
 
-  void _resetFilters() => unawaited(_applyFilters(const {}));
+  void _resetFilters() => unawaited(_applyFilters(const []));
+
+  /// Filter categories in use. A range is two clauses on one field, and the
+  /// chip counts what the viewer set, not how many clauses that took.
+  int get _activeFilterFieldCount => _selectedFilters.map((clause) => clause.field).toSet().length;
 
   Future<List<MediaFilterValue>> _loadFilterValues(MediaFilter filter) async {
     if (!mounted) return const [];
@@ -1046,7 +1231,32 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
     return const [];
   }
 
+  /// Desktop counterpart of the filter sheet: the same editor hosted in a
+  /// popup anchored to the chip. Edits stage into [pending] and commit once
+  /// the panel is dismissed, whichever way it was dismissed.
+  Future<void> _showFiltersMenu(Rect anchorRect) async {
+    var pending = _selectedFilters;
+    await showAnchoredFilterPanel(
+      context,
+      anchorRect: anchorRect,
+      filters: _filters,
+      selectedFilters: _selectedFilters,
+      onFiltersChanged: (filters) => pending = filters,
+      serverId: widget.library.serverId!,
+      libraryKey: widget.library.globalKey,
+      loadFilterValues: _loadFilterValues,
+      cachedValues: _mediaBrowserFilterValues,
+    );
+    if (!mounted || listEquals(pending, _selectedFilters)) return;
+    await _applyFilters(pending);
+  }
+
   void _showSortBottomSheet() {
+    final anchorRect = useAnchoredChipMenus(context) ? chipAnchorRect(_sortChipKey) : null;
+    if (anchorRect != null) {
+      unawaited(_showSortMenu(anchorRect));
+      return;
+    }
     final controller = OverlaySheetController.of(context);
     _openSortBottomSheet((builder) => controller.show(builder: builder));
   }
@@ -1083,27 +1293,53 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
       if (!mounted) return;
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (!mounted) return;
-        if (pendingCleared) {
-          setState(() {
-            _selectedSort = null;
-            _isSortDescending = false;
-          });
-          _loadItems();
-          _loadFirstCharacters();
-        } else if (pendingSort != null &&
-            (pendingSort!.key != _selectedSort?.key || pendingDescending != _isSortDescending)) {
-          setState(() {
-            _selectedSort = pendingSort;
-            _isSortDescending = pendingDescending;
-          });
-          StorageService.getInstance().then((storage) {
-            storage.saveLibrarySort(widget.library.globalKey, pendingSort!.key, descending: pendingDescending);
-          });
-          _loadItems();
-          _loadFirstCharacters();
-        }
+        _applySortSelection(sort: pendingSort, descending: pendingDescending, cleared: pendingCleared);
       });
     });
+  }
+
+  /// Desktop counterpart of [SortBottomSheet]: selecting the active field
+  /// toggles its direction (the popup has no segmented direction control);
+  /// selecting another field applies it with its default direction.
+  Future<void> _showSortMenu(Rect anchorRect) async {
+    final result = await showAnchoredSortMenu(
+      context,
+      anchorRect: anchorRect,
+      sortOptions: _sortOptions,
+      selectedSort: _selectedSort,
+      isSortDescending: _isSortDescending,
+      clearLabel: t.common.clear,
+    );
+    if (!mounted || result == null) return;
+    _applySortSelection(sort: result.sort, descending: result.descending, cleared: result.cleared);
+  }
+
+  /// Commits the outcome of a sort surface (sheet or popup). No-ops when the
+  /// selection didn't change, exactly like the sheet path always has.
+  void _applySortSelection({required MediaSort? sort, required bool descending, required bool cleared}) {
+    if (cleared) {
+      setState(() {
+        _selectedSort = null;
+        _isSortDescending = false;
+      });
+      _loadItems();
+      _loadFirstCharacters();
+      // Persist the clear — otherwise the stored sort resurrects on the
+      // next restore (tab switch, cold start).
+      StorageService.getInstance().then((storage) {
+        storage.clearLibrarySort(widget.library.globalKey);
+      });
+    } else if (sort != null && (sort.key != _selectedSort?.key || descending != _isSortDescending)) {
+      setState(() {
+        _selectedSort = sort;
+        _isSortDescending = descending;
+      });
+      StorageService.getInstance().then((storage) {
+        storage.saveLibrarySort(widget.library.globalKey, sort.key, descending: descending);
+      });
+      _loadItems();
+      _loadFirstCharacters();
+    }
   }
 
   /// Navigate focus from chips down to the grid item.
@@ -1137,15 +1373,8 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
         ? firstItemFocusNode
         : getGridItemFocusNode(targetIndex, prefix: 'browse_grid_item');
 
-    // Defer to a post-frame so the focus node has a chance to attach if the
-    // grid item is being built/rebuilt in the same frame.
-    if (target.context != null) {
-      target.requestFocus();
-    } else {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) target.requestFocus();
-      });
-    }
+    // Flutter retains preattachment requests until the target is reparented.
+    target.requestFocus();
   }
 
   /// Navigate from the alpha jump bar to the nearest visible grid item.
@@ -1159,25 +1388,22 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
     final row = _currentFirstVisibleIndex.value ~/ columnCount;
     var targetIndex = ((row + 1) * columnCount - 1).clamp(0, totalSize - 1);
 
-    // Find nearest loaded item — skeleton cards have no FocusNode
+    // Find nearest loaded item — skeleton cards have no FocusNode. The map is
+    // sparse, so scan the loaded keys instead of every absent index.
     if (!loadedItems.containsKey(targetIndex)) {
-      // Search backwards first (items above are more likely visible)
-      int? found;
-      for (var i = targetIndex - 1; i >= 0; i--) {
-        if (loadedItems.containsKey(i)) {
-          found = i;
-          break;
+      // Prefer the greatest loaded index below the target (items above are
+      // more likely visible), else the least above it.
+      int? below;
+      int? above;
+      for (final index in loadedItems.keys) {
+        if (index < 0 || index >= totalSize) continue;
+        if (index < targetIndex) {
+          if (below == null || index > below) below = index;
+        } else if (index > targetIndex && (above == null || index < above)) {
+          above = index;
         }
       }
-      // Then search forwards
-      if (found == null) {
-        for (var i = targetIndex + 1; i < totalSize; i++) {
-          if (loadedItems.containsKey(i)) {
-            found = i;
-            break;
-          }
-        }
-      }
+      final found = below ?? above;
       if (found == null) return;
       targetIndex = found;
     }
@@ -1198,12 +1424,10 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
     _groupingChipFocusNode.requestFocus();
   }
 
-  /// Navigate focus to the sidebar
   void _navigateToSidebar() {
     MainScreenFocusScope.focusSidebarOf(context);
   }
 
-  /// Navigate focus to the alpha jump bar
   void _navigateToAlphaJumpBar() {
     _alphaJumpBarFocusNode.requestFocus();
   }
@@ -1241,12 +1465,11 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
   /// Fetch first characters for the current library/filter state
   Future<void> _loadFirstCharacters({int? requestId}) async {
     final currentRequestId = requestId ?? ++_firstCharactersRequestId;
-    final filterParams = Map<String, String>.from(_selectedFilters);
     final typeId = _getGroupingTypeId();
 
     try {
       final result = await _alphaStrategy.loadCharacters(
-        filters: filterParams,
+        filters: plexFilterQueryParameters(_selectedFilters),
         typeId: typeId.isNotEmpty ? int.tryParse(typeId) : null,
         descending: _isTitleSortDescending,
       );
@@ -1445,39 +1668,47 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
         if (_shouldShowAlphaJumpBar)
           Positioned(
             top: overlayTopPadding,
-            right: 0,
+            right: _alphaJumpBarEdgeInset,
             bottom: 0,
             // Select the derived letter rather than listening to the raw
             // index: the index changes every scrolled row, but the bar only
             // needs a rebuild when the letter itself flips.
-            child: _isPhone(context)
-                ? ListenableSelector<String>(
-                    listenable: _currentFirstVisibleIndex,
-                    selector: () => _alphaLetterFor(_currentFirstVisibleIndex.value),
-                    builder: (context, currentLetter, _) => ValueListenableBuilder<bool>(
-                      valueListenable: _isScrollActive,
-                      builder: (context, scrolling, _) => AlphaScrollHandle(
+            // Horizontal-only SafeArea: on landscape phones the trailing
+            // inset (notch/rounded corner) is not consumed by the nav rail,
+            // so the handle must clear it itself. Vertical insets are
+            // already covered by overlayTopPadding and the parent scaffold.
+            child: SafeArea(
+              top: false,
+              bottom: false,
+              child: _isPhone(context)
+                  ? ListenableSelector<String>(
+                      listenable: _currentFirstVisibleIndex,
+                      selector: () => _alphaLetterFor(_currentFirstVisibleIndex.value),
+                      builder: (context, currentLetter, _) => ValueListenableBuilder<bool>(
+                        valueListenable: _isScrollActive,
+                        builder: (context, scrolling, _) => AlphaScrollHandle(
+                          firstCharacters: _firstCharacters,
+                          onJump: _jumpToIndex,
+                          currentLetter: currentLetter,
+                          descending: _isTitleSortDescending,
+                          isScrolling: scrolling,
+                        ),
+                      ),
+                    )
+                  : ListenableSelector<String>(
+                      listenable: _currentFirstVisibleIndex,
+                      selector: () => _alphaLetterFor(_currentFirstVisibleIndex.value),
+                      builder: (context, currentLetter, _) => AlphaJumpBar(
                         firstCharacters: _firstCharacters,
                         onJump: _jumpToIndex,
                         currentLetter: currentLetter,
                         descending: _isTitleSortDescending,
-                        isScrolling: scrolling,
+                        focusNode: _alphaJumpBarFocusNode,
+                        onNavigateLeft: _navigateToGridNearScroll,
+                        onBack: _navigateToGridNearScroll,
                       ),
                     ),
-                  )
-                : ListenableSelector<String>(
-                    listenable: _currentFirstVisibleIndex,
-                    selector: () => _alphaLetterFor(_currentFirstVisibleIndex.value),
-                    builder: (context, currentLetter, _) => AlphaJumpBar(
-                      firstCharacters: _firstCharacters,
-                      onJump: _jumpToIndex,
-                      currentLetter: currentLetter,
-                      descending: _isTitleSortDescending,
-                      focusNode: _alphaJumpBarFocusNode,
-                      onNavigateLeft: _navigateToGridNearScroll,
-                      onBack: _navigateToGridNearScroll,
-                    ),
-                  ),
+            ),
           ),
       ],
     );
@@ -1487,6 +1718,9 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
   Widget _buildScrollableContent() {
     final isFolders = _selectedGrouping == 'folders';
 
+    // Horizontal-only SafeArea at the region owner: the nav rail consumes the
+    // leading inset, but the trailing one (landscape notch/cutout) would
+    // otherwise sit under the rightmost grid column and the folder tree.
     Widget scrollView = NotificationListener<ScrollNotification>(
       onNotification: (notification) {
         // Track scroll activity for phone scroll handle and range-load gating
@@ -1532,7 +1766,7 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
               SliverPersistentHeader(
                 floating: true,
                 pinned: false,
-                delegate: _ChipsBarDelegate(builder: (_) => _buildChipsBar(), height: _chipsBarHeight),
+                delegate: OptionsChipsBarDelegate(builder: (_) => _buildChipsBar()),
               ),
             ..._buildContentSlivers(),
           ],
@@ -1540,15 +1774,19 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
       ),
     );
 
+    // Inset the scrollbar beside the alpha jump bar rather than beneath it.
+    // The wrapper stays mounted when the bar toggles so the scroll view, and
+    // its position, survive.
+    scrollView = NestedTabScrollbar(
+      rightInset: _shouldShowAlphaJumpBar && !_isPhone(context) ? _alphaJumpBarLaneWidth : 0,
+      child: scrollView,
+    );
+    scrollView = SafeArea(top: false, bottom: false, child: scrollView);
+
     // Folders mode previously had its own RefreshIndicator inside FolderTreeView;
     // it now lives at this level since FolderTreeView is a sliver.
     if (isFolders) {
-      scrollView = RefreshIndicator(
-        onRefresh: () async {
-          await _folderTreeKey.currentState?.refresh();
-        },
-        child: scrollView,
-      );
+      scrollView = RefreshIndicator(onRefresh: _refreshFolderTree, child: scrollView);
     }
 
     return scrollView;
@@ -1589,10 +1827,11 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
       final screenSize = MediaQuery.sizeOf(context);
       final density = context.settingsRead(SettingsService.libraryDensity);
       final maxExtent = GridSizeCalculator.getMaxCrossAxisExtent(context, density);
-      final columnCount = GridSizeCalculator.getColumnCount(screenSize.width, maxExtent);
-      final itemWidth = screenSize.width / columnCount;
+      final spacing = MediaGridDelegate.spacingFor(context: context);
+      final columnCount = GridSizeCalculator.getColumnCount(screenSize.width, maxExtent, crossAxisSpacing: spacing);
+      final itemWidth = (screenSize.width - spacing * (columnCount - 1)) / columnCount;
       final itemHeight = itemWidth / GridLayoutConstants.posterAspectRatio;
-      final rowHeight = itemHeight + GridLayoutConstants.mainAxisSpacing;
+      final rowHeight = itemHeight + spacing;
       if (rowHeight <= 0) return _activeFetchSize;
       final visibleRows = (screenSize.height / rowHeight).ceil() + 1;
       final visibleCount = visibleRows * columnCount;
@@ -1624,7 +1863,6 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
 
     final client = context.tryGetMediaClientForServer(serverIdOrNull(widget.library.serverId));
     if (client == null) return;
-    final devicePixelRatio = MediaImageHelper.effectiveDevicePixelRatio(context);
     final episodePosterMode = context.settingsRead(SettingsService.episodePosterMode);
 
     for (var i = 0; i < items.length; i++) {
@@ -1636,18 +1874,20 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
       if (thumb == null || thumb.isEmpty) continue;
       final imageType = MediaImageHelper.cardImageType(item, episodePosterMode);
 
+      // Density is type-dependent, so it can't be hoisted out of the loop.
+      final pixelRatio = MediaImageHelper.artworkPixelRatio(context, imageType: imageType);
       final imageUrl = MediaImageHelper.getOptimizedImageUrl(
         client: client,
         thumbPath: thumb,
         maxWidth: itemWidth,
         maxHeight: itemHeight,
-        devicePixelRatio: devicePixelRatio,
+        pixelRatio: pixelRatio,
         imageType: imageType,
       );
       if (imageUrl.isEmpty) continue;
 
-      final scaledWidth = itemWidth * devicePixelRatio;
-      final scaledHeight = itemHeight * devicePixelRatio;
+      final scaledWidth = itemWidth * pixelRatio;
+      final scaledHeight = itemHeight * pixelRatio;
       final (memWidth, memHeight) = MediaImageHelper.getMemCacheDimensions(
         displayWidth: scaledWidth.isFinite && scaledWidth > 0 ? scaledWidth.round() : 0,
         displayHeight: scaledHeight.isFinite && scaledHeight > 0 ? scaledHeight.round() : 0,
@@ -1661,74 +1901,45 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
     }
   }
 
-  /// Whether the filters chip is visible
   bool get _isFiltersChipVisible =>
       (_filters.isNotEmpty || _selectedFilters.isNotEmpty) && _selectedGrouping != 'folders';
 
-  /// Whether the sort chip is visible
   bool get _isSortChipVisible => _sortOptions.isNotEmpty && _selectedGrouping != 'folders';
 
   /// Builds the chips bar widget
   Widget _buildChipsBar() {
-    VoidCallback? groupingNavigateRight;
-    if (_isFiltersChipVisible) {
-      groupingNavigateRight = () => _filtersChipFocusNode.requestFocus();
-    } else if (_isSortChipVisible) {
-      groupingNavigateRight = () => _sortChipFocusNode.requestFocus();
-    }
-
-    return Container(
-      color: Theme.of(context).scaffoldBackgroundColor,
-      padding: const EdgeInsets.symmetric(horizontal: 16),
-      alignment: .centerLeft,
-      child: Row(
-        mainAxisSize: .min,
-        children: [
-          // Grouping chip
-          FocusableFilterChip(
-            focusNode: _groupingChipFocusNode,
-            icon: Symbols.category_rounded,
-            label: _getGroupingLabel(_selectedGrouping),
-            onPressed: _showGroupingBottomSheet,
-            onNavigateDown: _navigateToGrid,
-            onNavigateUp: widget.onBack,
-            onNavigateLeft: _navigateToSidebar,
-            onNavigateRight: groupingNavigateRight,
-            onBack: widget.onBack,
+    return OptionsChipsBar(
+      chips: [
+        OptionsChipDescriptor(
+          anchorKey: _groupingChipKey,
+          focusNode: _groupingChipFocusNode,
+          icon: Symbols.category_rounded,
+          label: _getGroupingLabel(_selectedGrouping),
+          onPressed: _showGroupingBottomSheet,
+        ),
+        if (_isFiltersChipVisible)
+          OptionsChipDescriptor(
+            anchorKey: _filtersChipKey,
+            focusNode: _filtersChipFocusNode,
+            icon: Symbols.filter_alt_rounded,
+            label: _selectedFilters.isEmpty
+                ? t.libraries.filters
+                : t.libraries.filtersWithCount(count: _activeFilterFieldCount),
+            onPressed: _showFiltersBottomSheet,
           ),
-          const SizedBox(width: 8),
-          // Filters chip
-          if (_isFiltersChipVisible)
-            FocusableFilterChip(
-              focusNode: _filtersChipFocusNode,
-              icon: Symbols.filter_alt_rounded,
-              label: _selectedFilters.isEmpty
-                  ? t.libraries.filters
-                  : t.libraries.filtersWithCount(count: _selectedFilters.length),
-              onPressed: _showFiltersBottomSheet,
-              onNavigateDown: _navigateToGrid,
-              onNavigateUp: widget.onBack,
-              onNavigateLeft: () => _groupingChipFocusNode.requestFocus(),
-              onNavigateRight: _isSortChipVisible ? () => _sortChipFocusNode.requestFocus() : null,
-              onBack: widget.onBack,
-            ),
-          if (_isFiltersChipVisible) const SizedBox(width: 8),
-          // Sort chip
-          if (_isSortChipVisible)
-            FocusableFilterChip(
-              focusNode: _sortChipFocusNode,
-              icon: Symbols.sort_rounded,
-              label: _selectedSort?.title ?? t.libraries.sort,
-              onPressed: _showSortBottomSheet,
-              onNavigateDown: _navigateToGrid,
-              onNavigateUp: widget.onBack,
-              onNavigateLeft: _isFiltersChipVisible
-                  ? () => _filtersChipFocusNode.requestFocus()
-                  : () => _groupingChipFocusNode.requestFocus(),
-              onBack: widget.onBack,
-            ),
-        ],
-      ),
+        if (_isSortChipVisible)
+          OptionsChipDescriptor(
+            anchorKey: _sortChipKey,
+            focusNode: _sortChipFocusNode,
+            icon: Symbols.sort_rounded,
+            label: _selectedSort?.title ?? t.libraries.sort,
+            onPressed: _showSortBottomSheet,
+          ),
+      ],
+      onNavigateDown: _navigateToGrid,
+      onNavigateUp: widget.onBack,
+      onNavigateLeftEdge: _navigateToSidebar,
+      onBack: widget.onBack,
     );
   }
 
@@ -1810,6 +2021,18 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
   /// Width of the alpha jump bar widget
   static const double _alphaJumpBarWidth = 20.0;
 
+  /// Room between the grid and the alpha jump bar for the focused card's scale
+  /// and outside border, which otherwise paint under the bar (#2218).
+  static const double _alphaJumpBarFocusGap = 8.0;
+
+  /// The alpha jump bar's distance from the right edge. TVs overscan the frame
+  /// edge and Android TV reports no inset for it, so a bar flush with the edge
+  /// loses half of every letter (#2053).
+  static double get _alphaJumpBarEdgeInset => PlatformDetector.isTV() ? 24.0 : 0.0;
+
+  /// Right-edge lane the alpha jump bar occupies, edge inset included.
+  static double get _alphaJumpBarLaneWidth => _alphaJumpBarEdgeInset + _alphaJumpBarWidth;
+
   void _setListScrollMetrics({required int density, required bool usesWideAspectRatio, CardShape? shape}) {
     if (_listMetricsDensity != density ||
         _listMetricsUsesWideRatio != usesWideAspectRatio ||
@@ -1845,15 +2068,10 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
     );
   }
 
-  Widget _buildMeasuredFirstListItem(Widget child) {
-    WidgetsBinding.instance.addPostFrameCallback((_) => _measureFirstListRowHeight());
-    return KeyedSubtree(key: _firstListItemKey, child: child);
-  }
-
   void _measureFirstListRowHeight() {
     if (!mounted) return;
     if (SettingsService.instanceOrNull?.read(SettingsService.viewMode) != ViewMode.list) return;
-    final height = (_firstListItemKey.currentContext?.findRenderObject() as RenderBox?)?.size.height;
+    final height = (gridItemFocusNodes[0]?.context?.findRenderObject() as RenderBox?)?.size.height;
     if (height == null || height <= 0) return;
     if ((_measuredListRowHeight ?? 0) == height) return;
     _measuredListRowHeight = height;
@@ -1872,7 +2090,7 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
     final isPhone = _isPhone(context);
     final topPadding = isPhone ? _gridTopPaddingPhone : _gridTopPadding;
     _effectiveTopPadding = topPadding;
-    final rightPadding = _shouldShowAlphaJumpBar && !isPhone ? _alphaJumpBarWidth : 8.0;
+    final rightPadding = _shouldShowAlphaJumpBar && !isPhone ? _alphaJumpBarLaneWidth + _alphaJumpBarFocusGap : 8.0;
 
     final useWideRatio = _selectedGrouping == 'episodes' && episodePosterMode == EpisodePosterMode.episodeThumbnail;
     // Music groupings are homogeneous, so the whole grid shares the square
@@ -1881,7 +2099,15 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
         _selectedGrouping == browseGroupingArtists ||
         _selectedGrouping == browseGroupingAlbums ||
         _selectedGrouping == browseGroupingTracks;
-    final browseShape = isMusicGrouping ? CardShape.square : null;
+    // Clip libraries (MediaBrowser home videos, Plex "Other Videos") hold
+    // homogeneous 16:9 items, so the flat grid uses wide cells; poster cells
+    // would letterbox every card (#2036).
+    final isClipLibrary = widget.library.kind == MediaKind.clip;
+    final browseShape = isMusicGrouping
+        ? CardShape.square
+        : isClipLibrary
+        ? CardShape.wide
+        : null;
     // Full-bleed TV cards intentionally hide captions. Music artwork alone
     // is not a reliable identity, so artist/album/track grids always keep the
     // standard captioned card while preserving their circular/square artwork.
@@ -1893,6 +2119,7 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
 
     final hasAlphaBarReservation = rightPadding > 8.0;
     return MediaCardSliverLayout(
+      findChildIndexCallback: (key) => _loadedIndexOfId((key as ValueKey<String>).value),
       viewMode: viewMode,
       itemCount: itemCount,
       density: libraryDensity,
@@ -1946,21 +2173,19 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
               itemCount: itemCount,
             ),
           );
-          return index == 0 ? _buildMeasuredFirstListItem(child) : child;
+          if (index == 0) {
+            WidgetsBinding.instance.addPostFrameCallback((_) => _measureFirstListRowHeight());
+          }
+          return child;
         }
 
-        final cached = _cardMemo.tryGet(index, item, epoch: position.layoutEpoch!);
-        if (cached != null) return cached;
-        if (CardInflationBudget.isScrollingContext(context) &&
-            !InputModeTracker.isKeyboardMode(context) &&
-            !CardInflationBudget.tryTake()) {
-          scheduleSkeletonUpgrade();
-          return const SkeletonMediaCard();
-        }
-        return _cardMemo.widgetFor(
+        return realizeBudgeted(
+          _cardMemo,
+          context,
           index,
           item,
           epoch: position.layoutEpoch!,
+          keyboardMode: InputModeTracker.isKeyboardMode(context, listen: false),
           build: () => _buildMediaCardItem(
             index,
             isFirstRow: position.isFirstRow,
@@ -1993,9 +2218,9 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
       return const SkeletonMediaCard();
     }
 
-    // Use firstItemFocusNode for index 0 to maintain compatibility with base class
-    // All other items get managed focus nodes for restoration
-    final focusNode = index == 0 ? firstItemFocusNode : getGridItemFocusNode(index, prefix: 'browse_grid_item');
+    // Index 0 routes through firstItemFocusNode for the base class; all other
+    // items get managed focus nodes for restoration.
+    final focusNode = _cardFocusNode(index);
 
     // Explicit row navigation. Default directional focus traversal becomes
     // unreliable while items are mounting/unmounting under fast scrolling and
@@ -2043,41 +2268,30 @@ class _LibraryBrowseTabState extends BaseLibraryTabState<MediaItem, LibraryBrows
     );
   }
 
+  FocusNode _cardFocusNode(int index) =>
+      focusNodeForIndex(index, firstItemFocusNode, prefix: 'browse_grid_item', itemIdentity: loadedItems[index]?.id);
+
   /// Move focus to the grid item at [targetIndex] (or its skeleton's row).
   /// Used by the explicit dpad navigation handlers.
   void _focusGridItem(int targetIndex) {
     if (targetIndex < 0 || targetIndex >= totalSize) return;
-    final node = targetIndex == 0 ? firstItemFocusNode : getGridItemFocusNode(targetIndex, prefix: 'browse_grid_item');
-    if (node.context != null) {
-      node.requestFocus();
-    } else {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted) node.requestFocus();
-      });
-    }
+    final node = _cardFocusNode(targetIndex);
+    node.requestFocus();
   }
 }
 
-/// SliverPersistentHeader delegate for the chips bar. Fixed-height floating
-/// header that snaps in on scroll direction reversal.
-class _ChipsBarDelegate extends SliverPersistentHeaderDelegate {
-  final WidgetBuilder builder;
-  final double height;
+/// Combined filter + sort listing loaded for a [MediaLibrary].
+///
+/// Plex returns categories from `/library/sections/{id}/filters` and sort
+/// options from `/library/sections/{id}/sorts` separately, with values
+/// fetched lazily per-category via `FiltersBottomSheet`. Jellyfin returns
+/// categories *and* values together via `/Items/Filters` (so [cachedValues]
+/// is populated up-front) and has no sort-listing endpoint, so its sorts
+/// come from a client-side hardcoded list.
+class LoadedFiltersAndSorts {
+  final List<MediaFilter> filters;
+  final List<MediaSort> sorts;
+  final Map<String, List<MediaFilterValue>> cachedValues;
 
-  const _ChipsBarDelegate({required this.builder, required this.height});
-
-  @override
-  double get minExtent => height;
-
-  @override
-  double get maxExtent => height;
-
-  @override
-  Widget build(BuildContext context, double shrinkOffset, bool overlapsContent) {
-    return SizedBox(height: height, child: builder(context));
-  }
-
-  @override
-  bool shouldRebuild(covariant _ChipsBarDelegate oldDelegate) =>
-      builder != oldDelegate.builder || height != oldDelegate.height;
+  const LoadedFiltersAndSorts({required this.filters, required this.sorts, this.cachedValues = const {}});
 }

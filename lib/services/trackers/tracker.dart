@@ -29,6 +29,12 @@ abstract class Tracker {
   /// 5.6 MB mapping download entirely.
   bool get needsFribb;
 
+  /// Identity of the account binding this tracker currently writes through,
+  /// compared only by [identical]. Deferred work captures it and re-checks
+  /// before writing or queueing, so a rebind — profile switch, disconnect,
+  /// reconnect — cannot redirect a write to whichever account replaced it.
+  Object? get accountBinding;
+
   Future<void> initialize();
   Future<void> setEnabled(bool enabled);
 
@@ -52,9 +58,16 @@ abstract interface class TrackerRatingSource {
   Future<void> clearRating(TrackerRatingContext ctx);
 }
 
+/// One item of a batched history write. [watchedAt] carries the moment the
+/// watch actually happened and is set only when replaying a queued watched
+/// write, exactly as for [Tracker.markWatched].
+typedef TrackerHistoryEntry = ({TrackerContext ctx, DateTime? watchedAt});
+
 /// A tracker whose history is a per-item record: every movie and episode is
-/// added or removed on its own (Simkl, Trakt). The coordinator can therefore
-/// hand it one item at a time, including a single episode of a container.
+/// added or removed on its own row (Simkl, Trakt, MDBList). Its history
+/// endpoint takes arrays, so a container's episodes go out together through
+/// [writeHistory] instead of one request each — Simkl and Trakt allow one write
+/// per second, and one request per episode of a long show is a request storm.
 abstract interface class EpisodeHistoryTracker implements Tracker {
   /// A stable identifier for the remote row this tracker's history writes target,
   /// or null when it cannot name one — in which case no write could apply either.
@@ -65,11 +78,16 @@ abstract interface class EpisodeHistoryTracker implements Tracker {
   /// id as soon as some other tracker's mapping is downloaded, leaving rows
   /// already queued unmatchable). Prefer [trackerExternalRowIdentity].
   String? historyRowIdentity(TrackerContext ctx);
+
+  /// Add ([watched]) or remove every entry in one request. Entries the service
+  /// cannot address are skipped; nothing is sent when none remain. Removal
+  /// ignores [TrackerHistoryEntry.watchedAt].
+  Future<void> writeHistory(List<TrackerHistoryEntry> entries, {required bool watched});
 }
 
 /// A tracker that keeps one progress counter per series instead of per-episode
 /// rows (MAL, AniList). The coordinator aggregates a container's episodes into
-/// a single entry update, and unwatching means dropping the whole entry.
+/// a single entry update, and unwatching a container resets that one counter.
 abstract interface class SeriesProgressTracker implements Tracker {
   /// Identity of the series entry this tracker would write for [ctx], or null
   /// when it cannot map the item. Episodes sharing an entry id collapse into
@@ -83,8 +101,6 @@ abstract interface class SeriesProgressTracker implements Tracker {
   /// coalesce to the higher, and a claim already covered by a completed write is
   /// dropped instead of walking the counter backwards.
   int? seriesProgress(TrackerContext ctx);
-
-  Future<void> removeFromList(TrackerContext ctx);
 }
 
 /// Playback state reported to trackers that accept real-time progress.
@@ -120,12 +136,6 @@ class ScrobblePolicy {
 /// Manual, container, offline-replay and external-player marks still go
 /// through [Tracker.markWatched].
 abstract interface class RealtimeScrobbleTracker implements Tracker {
-  /// Identity of the account binding this tracker currently writes through,
-  /// compared only by [identical]. Deferred work captures it and re-checks
-  /// before writing, so a rebind — profile switch, disconnect, reconnect —
-  /// cannot redirect a write to whichever account replaced it.
-  Object? get scrobbleBinding;
-
   /// True when a playback lifecycle report may go out right now.
   bool get canReportPlayback;
 
@@ -198,6 +208,11 @@ mixin ClientBackedTracker<TClient extends DisposableTrackerClient> on TrackerBas
 
   @override
   bool get hasActiveClient => _client != null;
+
+  /// The bound client is replaced on every session rebind (including
+  /// disconnect, which binds null), so its identity is the account identity.
+  @override
+  Object? get accountBinding => client;
 
   void rebindTrackerClient(
     TrackerSession? session, {

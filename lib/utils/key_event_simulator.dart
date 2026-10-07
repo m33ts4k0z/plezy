@@ -5,6 +5,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 
+import '../focus/dpad_navigator.dart';
 import 'text_input_diagnostics.dart';
 
 String _describeSimulatedKey(KeyEvent event) {
@@ -60,7 +61,9 @@ class KeyEventSimulatorController {
   /// Simulates a full key press (down and up) in one frame.
   void simulateKeyPress(LogicalKeyboardKey logicalKey) {
     if (_disposed) return;
-    _log('simulateKeyPress scheduled logical=${logicalKey.keyLabel}/${logicalKey.keyId}');
+    if (TextInputDiagnostics.enabled) {
+      _log('simulateKeyPress scheduled logical=${logicalKey.keyLabel}/${logicalKey.keyId}');
+    }
     _schedule((focusNode) {
       final physicalKey = _physicalKeyFor(logicalKey);
       _dispatchKeyEvent(focusNode, _keyDownEvent(logicalKey, physicalKey));
@@ -71,7 +74,9 @@ class KeyEventSimulatorController {
   /// Simulates key down and remembers its focus until key up.
   void simulateKeyDown(LogicalKeyboardKey logicalKey) {
     if (_disposed) return;
-    _log('simulateKeyDown scheduled logical=${logicalKey.keyLabel}/${logicalKey.keyId}');
+    if (TextInputDiagnostics.enabled) {
+      _log('simulateKeyDown scheduled logical=${logicalKey.keyLabel}/${logicalKey.keyId}');
+    }
     _schedule((focusNode) {
       _heldFocusNodes[logicalKey] = focusNode;
       _dispatchKeyEvent(focusNode, _keyDownEvent(logicalKey, _physicalKeyFor(logicalKey)));
@@ -81,7 +86,9 @@ class KeyEventSimulatorController {
   /// Simulates key up on the focus that received the matching key down.
   void simulateKeyUp(LogicalKeyboardKey logicalKey) {
     if (_disposed) return;
-    _log('simulateKeyUp scheduled logical=${logicalKey.keyLabel}/${logicalKey.keyId}');
+    if (TextInputDiagnostics.enabled) {
+      _log('simulateKeyUp scheduled logical=${logicalKey.keyLabel}/${logicalKey.keyId}');
+    }
     scheduleFrameIfIdle();
     SchedulerBinding.instance.addPostFrameCallback((_) {
       if (!_disposed) _dispatchKeyUp(logicalKey);
@@ -145,13 +152,17 @@ class KeyEventSimulatorController {
   void _dispatchKeyUp(LogicalKeyboardKey logicalKey) {
     final heldFocusNode = _heldFocusNodes.remove(logicalKey);
     final focusNode = heldFocusNode ?? FocusManager.instance.primaryFocus;
-    if (focusNode == null) return;
-    if (heldFocusNode != null && heldFocusNode.context == null) {
-      _log('simulateKeyUp dropped detached held focus logical=${logicalKey.keyLabel}/${logicalKey.keyId}');
+    final event = _keyUpEvent(logicalKey, _physicalKeyFor(logicalKey));
+    if (focusNode == null || (heldFocusNode != null && heldFocusNode.context == null)) {
+      if (heldFocusNode != null && TextInputDiagnostics.enabled) {
+        _log('simulateKeyUp dropped detached held focus logical=${logicalKey.keyLabel}/${logicalKey.keyId}');
+      }
+      // Undelivered, but the release still happened.
+      observeSimulatedKeyEvent(event);
       return;
     }
 
-    _dispatchKeyEvent(focusNode, _keyUpEvent(logicalKey, _physicalKeyFor(logicalKey)));
+    _dispatchKeyEvent(focusNode, event);
   }
 
   KeyDownEvent _keyDownEvent(LogicalKeyboardKey logicalKey, PhysicalKeyboardKey physicalKey) {
@@ -173,21 +184,30 @@ class KeyEventSimulatorController {
   }
 
   void _dispatchKeyEvent(FocusNode focusNode, KeyEvent event) {
-    _log('dispatch start focus=${focusNode.debugLabel} key=(${_describeSimulatedKey(event)})');
+    if (TextInputDiagnostics.enabled) {
+      _log('dispatch start focus=${focusNode.debugLabel} key=(${_describeSimulatedKey(event)})');
+    }
+    // The HardwareKeyboard phase this dispatch bypasses: suppressors end an
+    // armed press on its release there.
+    observeSimulatedKeyEvent(event);
     FocusNode? node = focusNode;
     while (node != null) {
       if (node.onKeyEvent != null) {
         final result = node.onKeyEvent!(node, event);
-        _log('dispatch node=${node.debugLabel} result=$result key=(${_describeSimulatedKey(event)})');
+        if (TextInputDiagnostics.enabled) {
+          _log('dispatch node=${node.debugLabel} result=$result key=(${_describeSimulatedKey(event)})');
+        }
         if (result != KeyEventResult.ignored) {
-          _log('dispatch stopped node=${node.debugLabel} result=$result');
+          if (TextInputDiagnostics.enabled) _log('dispatch stopped node=${node.debugLabel} result=$result');
           break;
         }
       }
       node = node.parent;
     }
     if (node == null) {
-      _log('dispatch reached root ignored key=(${_describeSimulatedKey(event)})');
+      if (TextInputDiagnostics.enabled) {
+        _log('dispatch reached root ignored key=(${_describeSimulatedKey(event)})');
+      }
     }
   }
 

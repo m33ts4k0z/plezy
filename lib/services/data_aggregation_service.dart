@@ -6,7 +6,9 @@ import '../media/media_item.dart';
 import '../media/media_item_merge.dart';
 import '../media/media_kind.dart';
 import '../media/media_library.dart';
+import '../media/media_person.dart';
 import '../media/media_server_client.dart';
+import '../media/search_hit.dart';
 import '../exceptions/media_server_exceptions.dart';
 import '../utils/app_logger.dart';
 import '../utils/external_ids.dart';
@@ -16,28 +18,73 @@ import '../utils/media_server_http_client.dart';
 import 'local_playback_history.dart';
 import 'multi_server_manager.dart';
 
+/// A row a successful response actually returned, paired with the immutable
+/// cache scope of the client that fetched it.
+///
+/// The scope cannot be recovered later: flattening and dedup lose which
+/// client produced a row, and a user-scoped backend's public server id is
+/// shared between users — so reconciling by public key could suppress a
+/// different user's watch state.
+typedef ObservedRow = ({MediaItem item, String? clientScope});
+
+/// [observedItems] are the rows the successful responses actually returned,
+/// *before* dedup or limiting. Continue Watching dedup can drop one server's
+/// copy in favour of another's, and a dropped copy would otherwise leave that
+/// key unreconciled even though its server did return it (#1829).
 typedef OnDeckAggregationResult = ({
   List<MediaItem> items,
+  List<ObservedRow> observedItems,
   Set<String> succeededServerIds,
   Set<String> cancelledServerIds,
+  Set<String> failedServerIds,
 });
-typedef HubAggregationResult = ({List<MediaHub> hubs, Set<String> succeededServerIds, Set<String> cancelledServerIds});
+typedef HubAggregationResult = ({
+  List<MediaHub> hubs,
+  List<ObservedRow> observedItems,
+  Set<String> succeededServerIds,
+  Set<String> cancelledServerIds,
+  Set<String> failedServerIds,
+});
 typedef LibraryAggregationResult = ({
   List<MediaLibrary> libraries,
   Set<String> succeededServerIds,
   Set<String> cancelledServerIds,
+  Set<String> failedServerIds,
 });
+
+/// `hits` is the ranked list of titles and people trimmed to the caller's
+/// limit; `candidates` (titles) and `people` are the full post-hidden-filter,
+/// pre-rank pools behind it, so a caller can re-rank a subset (one media kind,
+/// or only people) without a kind ranked out of `hits` disappearing from its
+/// own filter.
 typedef SearchAggregationResult = ({
+  List<SearchHit> hits,
+  List<MediaItem> candidates,
+  List<MediaPerson> people,
+  Set<String> succeededServerIds,
+  Set<String> cancelledServerIds,
+  Set<String> failedServerIds,
+});
+
+/// One reverse-lookup wave over the active profile's expected servers. `items`
+/// are the id-verified copies, deduped and ordered best-first; a server in
+/// `failedServerIds` or `cancelledServerIds` contributed nothing and says
+/// nothing about what it holds. `unqueriedServerIds` names expected servers
+/// that are offline, have no client, or cannot execute this query. None of
+/// these outcomes is evidence of absence.
+typedef LibraryLookupResult = ({
   List<MediaItem> items,
   Set<String> succeededServerIds,
   Set<String> cancelledServerIds,
   Set<String> failedServerIds,
+  Set<String> unqueriedServerIds,
 });
 typedef _FanOutResult<T> = ({
   List<T> items,
   Set<String> succeededServerIds,
   Set<String> cancelledServerIds,
   Set<String> failedServerIds,
+  Set<String> unqueriedServerIds,
 });
 
 /// Whether [error] is a client-side abort (client teardown mid-request)
@@ -92,11 +139,14 @@ class DataAggregationService {
 
   DataAggregationService(this._serverManager);
 
-  /// Online clients, optionally restricted to [serverIds] — delta refreshes
-  /// fan out to newly-online servers only.
+  /// Online clients visible to the active profile, or the online clients in
+  /// [serverIds]. A supplied set is already profile-scoped: delta refreshes
+  /// fan out to newly-online visible servers, and catalog lookups to the
+  /// profile's expected servers, which can come online a status emission
+  /// before the visibility filter promotes them.
   Map<String, MediaServerClient> _clientsFor(Set<String>? serverIds) {
+    if (serverIds == null) return _serverManager.visibleOnlineClients;
     final clients = _serverManager.onlineClients;
-    if (serverIds == null) return clients;
     return {
       for (final entry in clients.entries)
         if (serverIds.contains(entry.key)) entry.key: entry.value,
@@ -108,13 +158,13 @@ class DataAggregationService {
   /// [failureMessage] and contributing nothing — so one bad server cannot sink
   /// the pass; that server is simply absent from `succeededServerIds` and lands
   /// in `failedServerIds`. A client-side abort is *not* a failure: it lands in
-  /// `cancelledServerIds` and is logged at debug level, so callers can tell a
-  /// disrupted pass from a settled one and torn-down requests do not spam the
-  /// error log.
+  /// `cancelledServerIds` and is logged at debug level. A null return means
+  /// the backend could not execute this query and lands in `unqueriedServerIds`,
+  /// not in the successful empty answers.
   Future<_FanOutResult<T>> _fanOut<T>(
     Map<String, MediaServerClient> clients, {
     required String Function(String serverId) failureMessage,
-    required Future<List<T>> Function(String serverId, MediaServerClient client) fetch,
+    required Future<List<T>?> Function(String serverId, MediaServerClient client) fetch,
   }) async {
     final cancelledServerIds = <String>{};
     final failedServerIds = <String>{};
@@ -134,13 +184,17 @@ class DataAggregationService {
     });
     final results = await Future.wait(futures);
     return (
-      items: [for (final result in results) ...result.items],
+      items: [for (final result in results) ...?result.items],
       succeededServerIds: {
         for (final result in results)
-          if (result.serverId != null) result.serverId!,
+          if (result.serverId != null && result.items != null) result.serverId!,
       },
       cancelledServerIds: cancelledServerIds,
       failedServerIds: failedServerIds,
+      unqueriedServerIds: {
+        for (final result in results)
+          if (result.serverId != null && result.items == null) result.serverId!,
+      },
     );
   }
 
@@ -165,6 +219,7 @@ class DataAggregationService {
         libraries: const <MediaLibrary>[],
         succeededServerIds: const <String>{},
         cancelledServerIds: const <String>{},
+        failedServerIds: const <String>{},
       );
     }
     final fetched = await _fanOut<MediaLibrary>(
@@ -176,6 +231,7 @@ class DataAggregationService {
       libraries: fetched.items,
       succeededServerIds: fetched.succeededServerIds,
       cancelledServerIds: fetched.cancelledServerIds,
+      failedServerIds: fetched.failedServerIds,
     );
   }
 
@@ -190,14 +246,30 @@ class DataAggregationService {
   }) async {
     final clients = _clientsFor(serverIds);
     if (clients.isEmpty) {
-      appLogger.w('No online servers available for fetching on deck');
-      return (items: const <MediaItem>[], succeededServerIds: const <String>{}, cancelledServerIds: const <String>{});
+      return (
+        items: const <MediaItem>[],
+        observedItems: const <ObservedRow>[],
+        succeededServerIds: const <String>{},
+        cancelledServerIds: const <String>{},
+        failedServerIds: const <String>{},
+      );
     }
 
+    final observedRows = <ObservedRow>[];
     final fetched = await _fanOut<MediaItem>(
       clients,
       failureMessage: (serverId) => 'Failed on-deck fetch from $serverId',
-      fetch: (_, client) => client.fetchContinueWatching(count: limit),
+      fetch: (serverId, client) async {
+        final rows = await client.fetchContinueWatching(
+          count: limit,
+          excludedLibraryIds: _hiddenLibraryIdsOn(serverId, hiddenLibraryKeys),
+        );
+        // Capture the scope here: after the fan-out flattens and dedup runs,
+        // there is no way back to the client that produced a row.
+        final scope = client.cacheServerId;
+        observedRows.addAll([for (final row in rows) (item: row, clientScope: scope)]);
+        return rows;
+      },
     );
     // Filter out items from hidden libraries
     var filteredOnDeck = _withoutHiddenLibraries(fetched.items, hiddenLibraryKeys);
@@ -209,15 +281,18 @@ class DataAggregationService {
 
     filteredOnDeck = await _deduplicateContinueWatching(filteredOnDeck);
 
-    // Apply limit if specified
     final items = limit != null && limit < filteredOnDeck.length ? filteredOnDeck.sublist(0, limit) : filteredOnDeck;
 
     appLogger.i('Fetched ${items.length} on deck items from all servers');
 
     return (
       items: items,
+      // Pre-dedup, pre-limit: a copy dropped by dedup or trimmed by the limit
+      // was still authoritatively returned by its server.
+      observedItems: observedRows,
       succeededServerIds: fetched.succeededServerIds,
       cancelledServerIds: fetched.cancelledServerIds,
+      failedServerIds: fetched.failedServerIds,
     );
   }
 
@@ -436,7 +511,13 @@ class DataAggregationService {
     final clients = _clientsFor(serverIds);
     if (clients.isEmpty) {
       appLogger.w('No online servers available for fetching hubs');
-      return (hubs: const <MediaHub>[], succeededServerIds: const <String>{}, cancelledServerIds: const <String>{});
+      return (
+        hubs: const <MediaHub>[],
+        observedItems: const <ObservedRow>[],
+        succeededServerIds: const <String>{},
+        cancelledServerIds: const <String>{},
+        failedServerIds: const <String>{},
+      );
     }
 
     // Home layout needs the library list for every client: fallback backends
@@ -444,9 +525,13 @@ class DataAggregationService {
     // (Plex) need it to detect visible music libraries, whose hubs the
     // global-hub endpoint excludes. One `fetchLibraries` per server, served
     // from the per-backend API cache when warm.
-    final libraries = useGlobalHubs
-        ? _groupLibrariesByServer((await getMediaLibrariesFromAllServers(serverIds: serverIds)).libraries)
-        : null;
+    final libraryFetch = useGlobalHubs ? await getMediaLibrariesFromAllServers(serverIds: serverIds) : null;
+    final libraries = libraryFetch == null ? null : _groupLibrariesByServer(libraryFetch.libraries);
+    final legSucceededServerIds = <String>{};
+    final legFailedServerIds = <String>{if (libraryFetch != null) ...libraryFetch.failedServerIds};
+    final legCancelledServerIds = <String>{if (libraryFetch != null) ...libraryFetch.cancelledServerIds};
+    final globalDiagnosticsByServer = <String, HubFetchDiagnostics>{};
+    final observedRows = <ObservedRow>[];
 
     final fetched = await _fanOut<MediaHub>(
       clients,
@@ -454,6 +539,7 @@ class DataAggregationService {
       fetch: (serverId, client) async {
         final serverLibraries = libraries?[serverId];
         final shouldUseGlobalHubs = useGlobalHubs && client.capabilities.richHubs;
+        final prefetchDegraded = legFailedServerIds.contains(serverId) || legCancelledServerIds.contains(serverId);
         final hubItemLimit = limit ?? defaultHubPreviewLimit;
         List<MediaHub> hubs;
         if (shouldUseGlobalHubs) {
@@ -461,36 +547,97 @@ class DataAggregationService {
           // Spreading `...await a, ...await b` into one list literal evaluates
           // them in order, which serialised the music rows behind the global
           // hub round trip.
-          final globalFuture = client.fetchGlobalHubs(limit: hubItemLimit, includePlaybackHubs: includePlaybackHubs);
+          final globalDiagnostics = HubFetchDiagnostics();
+          globalDiagnosticsByServer[serverId] = globalDiagnostics;
+          final globalFuture = client.fetchGlobalHubs(
+            limit: hubItemLimit,
+            includePlaybackHubs: includePlaybackHubs,
+            diagnostics: globalDiagnostics,
+          );
           // Plex's promoted/global hub endpoint never includes music
           // libraries — append their per-library hubs so music rows
-          // reach home. No-op (zero extra calls) without a visible
-          // music library.
-          final musicFuture = _fetchLibraryHubsForClient(
-            client,
-            limit: hubItemLimit,
-            hiddenLibraryKeys: hiddenLibraryKeys,
-            includePlaybackHubs: includePlaybackHubs,
-            libraries: serverLibraries ?? const [],
-            kinds: const {MediaKind.artist},
-          );
-          hubs = [...await globalFuture, ...await musicFuture];
+          // reach home. A failed prefetch cannot establish that there
+          // are no visible music libraries, so it is not a successful no-op.
+          final musicFuture = prefetchDegraded
+              ? null
+              : _fetchLibraryHubsForClient(
+                  client,
+                  limit: hubItemLimit,
+                  hiddenLibraryKeys: hiddenLibraryKeys,
+                  includePlaybackHubs: includePlaybackHubs,
+                  libraries: serverLibraries ?? const [],
+                  kinds: const {MediaKind.artist},
+                );
+          Object? globalError;
+          StackTrace? globalStackTrace;
+          List<MediaHub> globalHubs = const [];
+          try {
+            globalHubs = await globalFuture;
+          } catch (error, stackTrace) {
+            globalDiagnostics.recordFailure(error);
+            globalError = error;
+            globalStackTrace = stackTrace;
+          }
+          final music = musicFuture == null ? null : await musicFuture;
+          if (globalHubs.isNotEmpty || (!globalDiagnostics.failed && !globalDiagnostics.cancelled)) {
+            legSucceededServerIds.add(serverId);
+          }
+          if (music != null) {
+            // The music append is optional: it must not vouch for the server
+            // when the global leg failed or was cancelled (Plex records that
+            // in diagnostics and returns [] instead of throwing), or a lone
+            // music row would replace every cached movie/TV home row.
+            if (music.succeeded && !globalDiagnostics.failed && !globalDiagnostics.cancelled) {
+              legSucceededServerIds.add(serverId);
+            }
+            if (music.failed) legFailedServerIds.add(serverId);
+            if (music.cancelled) legCancelledServerIds.add(serverId);
+          }
+          if (globalError != null) Error.throwWithStackTrace(globalError, globalStackTrace!);
+          hubs = [...globalHubs, if (music != null) ...music.hubs];
         } else {
-          hubs = await _fetchLibraryHubsForClient(
+          // A fallback backend cannot run a hub leg without the libraries its
+          // prefetch failed to discover.
+          if (useGlobalHubs && prefetchDegraded) return const <MediaHub>[];
+          final libraryHubs = await _fetchLibraryHubsForClient(
             client,
             limit: hubItemLimit,
             hiddenLibraryKeys: hiddenLibraryKeys,
             includePlaybackHubs: includePlaybackHubs,
             libraries: useGlobalHubs ? serverLibraries : null,
           );
+          if (libraryHubs.succeeded || (!libraryHubs.failed && !libraryHubs.cancelled)) {
+            legSucceededServerIds.add(serverId);
+          }
+          if (libraryHubs.failed) legFailedServerIds.add(serverId);
+          if (libraryHubs.cancelled) legCancelledServerIds.add(serverId);
+          hubs = libraryHubs.hubs;
         }
-        return _postProcessHubs(hubs, serverId: ServerId(serverId), hiddenLibraryKeys: hiddenLibraryKeys);
+        final processed = _postProcessHubs(hubs, serverId: ServerId(serverId), hiddenLibraryKeys: hiddenLibraryKeys);
+        final scope = client.cacheServerId;
+        observedRows.addAll([
+          for (final hub in processed)
+            for (final item in hub.items) (item: item, clientScope: scope),
+        ]);
+        return processed;
       },
     );
 
+    for (final entry in globalDiagnosticsByServer.entries) {
+      if (entry.value.failed) legFailedServerIds.add(entry.key);
+      if (entry.value.cancelled) legCancelledServerIds.add(entry.key);
+    }
+
     final all = fetched.items;
     final hubs = limit != null && limit < all.length ? all.sublist(0, limit) : all;
-    return (hubs: hubs, succeededServerIds: fetched.succeededServerIds, cancelledServerIds: fetched.cancelledServerIds);
+    return (
+      hubs: hubs,
+      // Pre-limit, so a row trimmed off the tail still counts as observed.
+      observedItems: observedRows,
+      succeededServerIds: legSucceededServerIds,
+      cancelledServerIds: {...fetched.cancelledServerIds, ...legCancelledServerIds},
+      failedServerIds: {...fetched.failedServerIds, ...legFailedServerIds},
+    );
   }
 
   /// Per-library hub fetch for a single client. Filters to visible libraries
@@ -498,7 +645,12 @@ class DataAggregationService {
   /// musicvideos/homevideos, #1476; artist brings music rows to home) and
   /// concatenates the results. The rich-hub music append passes
   /// `{MediaKind.artist}` to fetch only what the global endpoint misses.
-  Future<List<MediaHub>> _fetchLibraryHubsForClient(
+  ///
+  /// `succeeded` stays false when no library leg was attempted. This prevents
+  /// the optional rich-hub music append from masking a failed global leg; the
+  /// fallback caller separately recognizes a clean zero-library result as an
+  /// authoritative no-op.
+  Future<({List<MediaHub> hubs, bool succeeded, bool failed, bool cancelled})> _fetchLibraryHubsForClient(
     MediaServerClient client, {
     required int limit,
     Set<String>? hiddenLibraryKeys,
@@ -524,29 +676,44 @@ class DataAggregationService {
     const concurrency = 3;
     final results = List<List<MediaHub>>.filled(visible.length, const []);
     var next = 0;
+    var succeeded = false;
+    var failed = false;
+    var cancelled = false;
 
     Future<void> worker() async {
       while (true) {
         final index = next++;
         if (index >= visible.length) return;
         final library = visible[index];
+        final diagnostics = HubFetchDiagnostics();
         try {
-          results[index] = await client.fetchLibraryHubs(
+          final hubs = await client.fetchLibraryHubs(
             library.id,
             libraryName: library.title,
             limit: limit,
             includePlaybackHubs: includePlaybackHubs,
             libraryKind: library.kind,
+            diagnostics: diagnostics,
           );
+          results[index] = hubs;
+          if (hubs.isNotEmpty || (!diagnostics.failed && !diagnostics.cancelled)) succeeded = true;
         } catch (e, st) {
-          appLogger.e('Failed to fetch library hubs for ${library.globalKey}', error: e, stackTrace: st);
+          if (_isCancellation(e)) {
+            cancelled = true;
+            appLogger.d('Cancelled library hub fetch for ${library.globalKey}');
+          } else {
+            failed = true;
+            appLogger.e('Failed to fetch library hubs for ${library.globalKey}', error: e, stackTrace: st);
+          }
         }
+        if (diagnostics.failed) failed = true;
+        if (diagnostics.cancelled) cancelled = true;
       }
     }
 
     await Future.wait([for (var i = 0; i < concurrency && i < visible.length; i++) worker()]);
 
-    return [for (final list in results) ...list];
+    return (hubs: [for (final list in results) ...list], succeeded: succeeded, failed: failed, cancelled: cancelled);
   }
 
   /// Filter hidden-library items and drop empty hubs.
@@ -570,120 +737,181 @@ class DataAggregationService {
     return filtered;
   }
 
-  /// Search across all online servers (Plex + Jellyfin). Per-server outcomes
-  /// distinguish authoritative empty results from failed or cancelled legs.
+  /// Search across all online servers (Plex + Jellyfin) for titles and
+  /// people. Per-server outcomes distinguish authoritative empty results from
+  /// failed or cancelled legs; they describe the title search only. The
+  /// people search on each server is best-effort, like Plex's supplemental
+  /// category legs: a failure there costs that server's people, never its
+  /// titles or its place in `succeededServerIds`.
   ///
   /// [hiddenLibraryKeys] excludes results the user has hidden, matching every
   /// other aggregated surface. Backends whose search rows carry no library id
   /// cannot be filtered here; they must scope the search server-side instead.
+  /// People always span libraries, so each backend drops hidden-only people
+  /// itself.
   Future<SearchAggregationResult> searchAcrossServers(
     String query, {
     int? limit,
     Set<String>? hiddenLibraryKeys,
     AbortController? abort,
   }) async {
-    if (query.trim().isEmpty) {
-      return (
-        items: const <MediaItem>[],
-        succeededServerIds: const <String>{},
-        cancelledServerIds: const <String>{},
-        failedServerIds: const <String>{},
-      );
-    }
+    if (query.trim().isEmpty) return _emptySearchResult;
 
     abort?.throwIfAborted();
-    final clients = _serverManager.onlineClients;
-    if (clients.isEmpty) {
-      return (
-        items: const <MediaItem>[],
-        succeededServerIds: const <String>{},
-        cancelledServerIds: const <String>{},
-        failedServerIds: const <String>{},
-      );
-    }
+    final clients = _serverManager.visibleOnlineClients;
+    if (clients.isEmpty) return _emptySearchResult;
 
     final resultLimit = limit ?? defaultMediaSearchLimit;
     final fetchLimit = resultLimit < defaultMediaSearchLimit ? defaultMediaSearchLimit : resultLimit;
 
-    final fetched = await _fanOut<MediaItem>(
+    final fetched = await _fanOut<SearchHit>(
       clients,
       failureMessage: (serverId) => 'Search failed on $serverId',
       fetch: (serverId, client) async {
         final stopwatch = Stopwatch()..start();
+        final excludedLibraryIds = _hiddenLibraryIdsOn(serverId, hiddenLibraryKeys);
+        // Started first so both legs overlap. It never throws, so a failing
+        // title leg can leave it behind without an unhandled error.
+        final peopleFuture = _searchPeopleBestEffort(
+          serverId,
+          client,
+          query,
+          abort: abort,
+          excludedLibraryIds: excludedLibraryIds,
+        );
         final items = await client.searchItems(
           query,
           limit: fetchLimit,
           abort: abort,
-          excludedLibraryIds: _hiddenLibraryIdsOn(serverId, hiddenLibraryKeys),
+          excludedLibraryIds: excludedLibraryIds,
         );
+        final people = await peopleFuture;
         appLogger.i(
           'Search completed on $serverId in ${stopwatch.elapsedMilliseconds}ms: '
-          '${items.length} results ${_searchKindCounts(items)}',
+          '${items.length} results ${_searchKindCounts(items)}, ${people.length} people',
         );
-        return items;
+        return [for (final item in items) MediaSearchHit(item), for (final person in people) PersonSearchHit(person)];
       },
     );
     abort?.throwIfAborted();
+
+    final titles = <MediaItem>[];
+    final people = <MediaPerson>[];
+    for (final hit in fetched.items) {
+      switch (hit) {
+        case MediaSearchHit(:final item):
+          titles.add(item);
+        case PersonSearchHit(:final person):
+          people.add(person);
+      }
+    }
     // Before ranking, so hidden results cannot spend the `resultLimit` budget
     // and silently shrink what the user sees.
-    final visible = _withoutHiddenLibraries(fetched.items, hiddenLibraryKeys);
-    final items = rankMediaSearchResults(visible, query, limit: resultLimit);
+    final visible = _withoutHiddenLibraries(titles, hiddenLibraryKeys);
+    // Titles first: equal scores keep input order, so a tie goes to the title.
+    final hits = rankSearchHits(
+      [for (final item in visible) MediaSearchHit(item), for (final person in people) PersonSearchHit(person)],
+      query,
+      limit: resultLimit,
+    );
 
     appLogger.i(
-      'Search aggregation completed: ${items.length} results '
+      'Search aggregation completed: ${hits.length} results '
       '(${fetched.succeededServerIds.length} succeeded, ${fetched.cancelledServerIds.length} cancelled, '
-      '${fetched.failedServerIds.length} failed) ${_searchKindCounts(items)}',
+      '${fetched.failedServerIds.length} failed) ${_searchKindCounts(visible)}, ${people.length} people',
     );
 
     return (
-      items: items,
+      hits: hits,
+      candidates: visible,
+      people: people,
       succeededServerIds: fetched.succeededServerIds,
       cancelledServerIds: fetched.cancelledServerIds,
       failedServerIds: fetched.failedServerIds,
     );
   }
 
-  /// Reverse external-id lookup fanned out to every online server (see
-  /// [MediaServerClient.findByExternalIds]). One request wave per tap on an
-  /// Explore catalog item; per-server failures are logged and skipped.
+  static const SearchAggregationResult _emptySearchResult = (
+    hits: <SearchHit>[],
+    candidates: <MediaItem>[],
+    people: <MediaPerson>[],
+    succeededServerIds: <String>{},
+    cancelledServerIds: <String>{},
+    failedServerIds: <String>{},
+  );
+
+  /// One server's people for [query], or none when that request fails or is
+  /// cancelled. Never throws: the title leg alone decides the server's
+  /// outcome, and a user abort still surfaces through the caller's
+  /// `throwIfAborted`.
+  Future<List<MediaPerson>> _searchPeopleBestEffort(
+    String serverId,
+    MediaServerClient client,
+    String query, {
+    AbortController? abort,
+    required Set<String> excludedLibraryIds,
+  }) async {
+    try {
+      return await client.searchPeople(query, abort: abort, excludedLibraryIds: excludedLibraryIds);
+    } catch (e, stackTrace) {
+      if (_isCancellation(e)) {
+        appLogger.d('People search cancelled on $serverId');
+      } else {
+        appLogger.w('People search failed on $serverId; keeping title results', error: e, stackTrace: stackTrace);
+      }
+      return const [];
+    }
+  }
+
+  /// Reverse external-id lookup within the explicit active-profile [serverIds]
+  /// snapshot (see [MediaServerClient.findByExternalIds]). Expected offline or
+  /// clientless servers must be included, not just visible or online servers.
   ///
   /// Every server contributes every copy it holds, not one apiece: the same
   /// movie routinely sits in a 4K library and an HD library on one server
   /// (#1754). Results are deduped by global key and ordered best-first with
   /// [compareLibraryCopies] so the chooser is stable across repeated passes.
   ///
-  /// Because per-server failures are dropped here, a caller holding earlier
-  /// results must merge rather than replace (see [mergeLibraryCopies]) — a
-  /// degraded wave is not evidence that a copy went away.
-  Future<List<MediaItem>> findByExternalIdsAcrossServers(
+  /// A failed or cancelled request supplies no negative membership evidence.
+  /// Expected servers without an online client and backends that cannot
+  /// execute the supplied query land in `unqueriedServerIds`. Registrations
+  /// outside [serverIds] are neither queried nor included in any accounting set.
+  /// Callers retain earlier verified copies independently of wave completeness.
+  Future<LibraryLookupResult> findByExternalIdsAcrossServers(
     ExternalIds ids, {
     required MediaKind kind,
+    required Set<String> serverIds,
     List<String> titles = const [],
     int? year,
     String? plexGuid,
     ExternalSeasonRef? season,
   }) async {
-    if (!ids.hasAny && plexGuid == null) return [];
-    final clients = _serverManager.onlineClients;
-    if (clients.isEmpty) return [];
+    final clients = _clientsFor(serverIds);
+    final unqueriedServerIds = serverIds.difference(clients.keys.toSet());
+    if (clients.isEmpty) {
+      return (
+        items: const <MediaItem>[],
+        succeededServerIds: const <String>{},
+        cancelledServerIds: const <String>{},
+        failedServerIds: const <String>{},
+        unqueriedServerIds: unqueriedServerIds,
+      );
+    }
 
-    final futures = clients.entries.map((entry) async {
-      try {
-        return await entry.value.findByExternalIds(
-          ids,
-          kind: kind,
-          titles: titles,
-          year: year,
-          plexGuid: plexGuid,
-          season: season,
-        );
-      } catch (e, st) {
-        appLogger.w('External-id lookup failed on ${entry.key}', error: e, stackTrace: st);
-        return const <MediaItem>[];
-      }
-    });
-
-    return mergeLibraryCopies(const [], (await Future.wait(futures)).expand((items) => items));
+    final fetched = await _fanOut<MediaItem>(
+      clients,
+      failureMessage: (serverId) => 'External-id lookup failed on $serverId',
+      fetch: (_, client) =>
+          client.findByExternalIds(ids, kind: kind, titles: titles, year: year, plexGuid: plexGuid, season: season),
+    );
+    unqueriedServerIds.addAll(fetched.unqueriedServerIds);
+    return (
+      items: mergeLibraryCopies(const [], fetched.items),
+      succeededServerIds: fetched.succeededServerIds,
+      cancelledServerIds: fetched.cancelledServerIds,
+      failedServerIds: fetched.failedServerIds,
+      unqueriedServerIds: unqueriedServerIds,
+    );
   }
 
   /// Group libraries by server (internal aggregation helper).

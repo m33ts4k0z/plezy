@@ -498,62 +498,76 @@ int _compareEvidenceKeys(List<int> a, List<int> b) {
   return 0;
 }
 
+/// Scored-match loop shared by [findMpvTrackForPlexAudio] and
+/// [findPlexTrackForMpvAudio]. Ordinal identity is cross-side: the probe's
+/// index in its own list ([probeOrdinal], -1 when unknown) against the
+/// candidate's index in [candidates]. The score arguments stay MPV-first
+/// whichever side is being searched.
+T? _findBestScoredAudioMatch<T>(
+  List<T> candidates, {
+  required int probeOrdinal,
+  required int Function(T candidate, bool ordinalMatches) score,
+}) {
+  T? bestMatch;
+  int bestScore = 0;
+  for (var i = 0; i < candidates.length; i++) {
+    final candidateScore = score(candidates[i], i == probeOrdinal);
+    if (candidateScore > bestScore) {
+      bestScore = candidateScore;
+      bestMatch = candidates[i];
+    }
+  }
+  // Require at least language match for a valid match
+  return bestScore >= 10 ? bestMatch : null;
+}
+
 /// Find the MPV audio track that matches a Plex audio track
 AudioTrack? findMpvTrackForPlexAudio(
   MediaAudioTrack plexTrack,
   List<AudioTrack> mpvTracks, {
   List<MediaAudioTrack>? allPlexTracks,
-}) {
-  if (mpvTracks.isEmpty) return null;
-
-  AudioTrack? bestMatch;
-  int bestScore = 0;
-  // Ordinal identity is cross-side: the probe's index in the Plex list against
-  // the candidate's index in the MPV list.
-  final plexOrdinal = allPlexTracks?.indexOf(plexTrack) ?? -1;
-
-  for (final mpvTrack in mpvTracks) {
-    final ordinalMatches = plexOrdinal >= 0 && mpvTracks.indexOf(mpvTrack) == plexOrdinal;
-
-    final score = _scoreAudioMatch(mpvTrack, plexTrack, ordinalMatches: ordinalMatches);
-
-    if (score > bestScore) {
-      bestScore = score;
-      bestMatch = mpvTrack;
-    }
-  }
-
-  // Require at least language match for a valid match
-  return bestScore >= 10 ? bestMatch : null;
-}
+}) => _findBestScoredAudioMatch(
+  mpvTracks,
+  probeOrdinal: allPlexTracks?.indexOf(plexTrack) ?? -1,
+  score: (mpvTrack, ordinalMatches) => _scoreAudioMatch(mpvTrack, plexTrack, ordinalMatches: ordinalMatches),
+);
 
 /// Find the Plex audio track that matches an MPV audio track
 MediaAudioTrack? findPlexTrackForMpvAudio(
   AudioTrack mpvTrack,
   List<MediaAudioTrack> plexTracks, {
   List<AudioTrack>? allMpvTracks,
+}) => _findBestScoredAudioMatch(
+  plexTracks,
+  probeOrdinal: allMpvTracks?.indexOf(mpvTrack) ?? -1,
+  score: (plexTrack, ordinalMatches) => _scoreAudioMatch(mpvTrack, plexTrack, ordinalMatches: ordinalMatches),
+);
+
+/// The source audio row the engine is currently playing, or null when mpv's
+/// selection cannot be mapped onto [sourceTracks].
+///
+/// Three ladders, weakest evidence last: the selected track's ordinal in the
+/// real (non-`auto`/`no`) mpv list against the source list, then the scored
+/// [findPlexTrackForMpvAudio] match, then an mpv id that literally parses to a
+/// source stream id. [mpvTracks] is the raw engine list — the scored match
+/// needs it unfiltered for its cross-side ordinal rule.
+MediaAudioTrack? playingSourceAudioTrack({
+  required AudioTrack? selectedMpvTrack,
+  required List<AudioTrack> mpvTracks,
+  required List<MediaAudioTrack> sourceTracks,
 }) {
-  if (plexTracks.isEmpty) return null;
+  if (selectedMpvTrack == null || sourceTracks.isEmpty) return null;
 
-  MediaAudioTrack? bestMatch;
-  int bestScore = 0;
-  // Same cross-side ordinal rule as [findMpvTrackForPlexAudio] with the two
-  // lists swapped; the score arguments stay MPV-first either way.
-  final mpvOrdinal = allMpvTracks?.indexOf(mpvTrack) ?? -1;
+  final realMpvTracks = mpvTracks.where((t) => t.id != 'auto' && t.id != 'no').toList(growable: false);
+  final ordinal = realMpvTracks.indexOf(selectedMpvTrack);
+  if (ordinal >= 0 && ordinal < sourceTracks.length) return sourceTracks[ordinal];
 
-  for (final plexTrack in plexTracks) {
-    final ordinalMatches = mpvOrdinal >= 0 && plexTracks.indexOf(plexTrack) == mpvOrdinal;
+  final matched = findPlexTrackForMpvAudio(selectedMpvTrack, sourceTracks, allMpvTracks: mpvTracks);
+  if (matched != null) return matched;
 
-    final score = _scoreAudioMatch(mpvTrack, plexTrack, ordinalMatches: ordinalMatches);
-
-    if (score > bestScore) {
-      bestScore = score;
-      bestMatch = plexTrack;
-    }
-  }
-
-  // Require at least language match for a valid match
-  return bestScore >= 10 ? bestMatch : null;
+  final parsedId = int.tryParse(selectedMpvTrack.id);
+  if (parsedId == null) return null;
+  return sourceTracks.where((track) => track.id == parsedId).firstOrNull;
 }
 
 /// Check if two language codes match exactly (after normalizing case and stripping region suffixes)
@@ -577,64 +591,53 @@ bool _languagesMatch(String? mpvLang, String? plexLang) {
   return mpvVariations.contains(plexNormalized);
 }
 
-/// Check if two subtitle codec strings match
-/// Handles common aliases (e.g., subrip/srt, ass/ssa)
-bool _subtitleCodecsMatch(String? mpvCodec, String? plexCodec) {
+/// Common subtitle codec aliases (e.g., subrip/srt, ass/ssa)
+const Map<String, List<String>> _subtitleCodecAliases = {
+  'subrip': ['srt', 'subrip'],
+  'srt': ['srt', 'subrip'],
+  'ass': ['ass', 'ssa'],
+  'ssa': ['ass', 'ssa'],
+  'pgs': ['pgs', 'hdmv_pgs_subtitle'],
+  'hdmv_pgs_subtitle': ['pgs', 'hdmv_pgs_subtitle'],
+  'vobsub': ['vobsub', 'dvd_subtitle'],
+  'dvd_subtitle': ['vobsub', 'dvd_subtitle'],
+  'webvtt': ['webvtt', 'vtt'],
+  'vtt': ['webvtt', 'vtt'],
+};
+
+/// Common audio codec aliases (e.g., ac3/a52, dts variants)
+const Map<String, List<String>> _audioCodecAliases = {
+  'ac3': ['ac3', 'a52', 'eac3', 'dolby digital'],
+  'a52': ['ac3', 'a52'],
+  'eac3': ['eac3', 'e-ac-3', 'dolby digital plus', 'ac3'],
+  'dts': ['dts', 'dca'],
+  'dca': ['dts', 'dca'],
+  'aac': ['aac', 'mp4a'],
+  'mp4a': ['aac', 'mp4a'],
+  'truehd': ['truehd', 'mlp'],
+  'mlp': ['truehd', 'mlp'],
+  'flac': ['flac'],
+  'opus': ['opus'],
+  'vorbis': ['vorbis', 'ogg'],
+  'mp3': ['mp3', 'mp3float'],
+};
+
+/// Check if two codec strings match: case-insensitively equal, or the MPV
+/// codec's [aliases] row lists the Plex codec.
+bool _codecsMatch(String? mpvCodec, String? plexCodec, Map<String, List<String>> aliases) {
   if (mpvCodec == null || plexCodec == null) return false;
 
   final mpvNorm = mpvCodec.toLowerCase();
   final plexNorm = plexCodec.toLowerCase();
 
   if (mpvNorm == plexNorm) return true;
-
-  // Common subtitle codec aliases
-  const aliases = {
-    'subrip': ['srt', 'subrip'],
-    'srt': ['srt', 'subrip'],
-    'ass': ['ass', 'ssa'],
-    'ssa': ['ass', 'ssa'],
-    'pgs': ['pgs', 'hdmv_pgs_subtitle'],
-    'hdmv_pgs_subtitle': ['pgs', 'hdmv_pgs_subtitle'],
-    'vobsub': ['vobsub', 'dvd_subtitle'],
-    'dvd_subtitle': ['vobsub', 'dvd_subtitle'],
-    'webvtt': ['webvtt', 'vtt'],
-    'vtt': ['webvtt', 'vtt'],
-  };
-
-  final mpvAliases = aliases[mpvNorm] ?? [mpvNorm];
-  return mpvAliases.contains(plexNorm);
+  return aliases[mpvNorm]?.contains(plexNorm) ?? false;
 }
 
-/// Check if two audio codec strings match
-/// Handles common aliases (e.g., ac3/a52, dts variants)
-bool _audioCodecsMatch(String? mpvCodec, String? plexCodec) {
-  if (mpvCodec == null || plexCodec == null) return false;
+bool _subtitleCodecsMatch(String? mpvCodec, String? plexCodec) =>
+    _codecsMatch(mpvCodec, plexCodec, _subtitleCodecAliases);
 
-  final mpvNorm = mpvCodec.toLowerCase();
-  final plexNorm = plexCodec.toLowerCase();
-
-  if (mpvNorm == plexNorm) return true;
-
-  // Common audio codec aliases
-  const aliases = {
-    'ac3': ['ac3', 'a52', 'eac3', 'dolby digital'],
-    'a52': ['ac3', 'a52'],
-    'eac3': ['eac3', 'e-ac-3', 'dolby digital plus', 'ac3'],
-    'dts': ['dts', 'dca'],
-    'dca': ['dts', 'dca'],
-    'aac': ['aac', 'mp4a'],
-    'mp4a': ['aac', 'mp4a'],
-    'truehd': ['truehd', 'mlp'],
-    'mlp': ['truehd', 'mlp'],
-    'flac': ['flac'],
-    'opus': ['opus'],
-    'vorbis': ['vorbis', 'ogg'],
-    'mp3': ['mp3', 'mp3float'],
-  };
-
-  final mpvAliases = aliases[mpvNorm] ?? [mpvNorm];
-  return mpvAliases.contains(plexNorm);
-}
+bool _audioCodecsMatch(String? mpvCodec, String? plexCodec) => _codecsMatch(mpvCodec, plexCodec, _audioCodecAliases);
 
 /// Score how well titles match.
 /// Returns 3 for a real text match, 1 for null/empty (non-contradicting), 0 for mismatch.
@@ -661,14 +664,16 @@ bool _titlesMatch(String? mpvTitle, String? plexTitle, String? plexDisplayTitle)
 
 int _mediaTrackStreamIndex(int id, int? index) => index ?? id;
 
-/// Priority levels for track selection
+/// Priority levels for track selection. Per-item language overrides are not a
+/// level: every backend folds them into the source's selected/default stream,
+/// so an item-level language would only ever override the account preference
+/// with something the server had already rejected.
 enum TrackSelectionPriority {
   navigation, // Priority 1: User's manual selection from previous episode
   serverSelected, // Priority 2: server's pre-selected track
-  perMedia, // Priority 3: Per-media language preference
-  profile, // Priority 4: User profile preferences
-  defaultTrack, // Priority 5: Default or first track
-  off, // Priority 6: Subtitles off (subtitle only)
+  profile, // Priority 3: User profile preferences
+  defaultTrack, // Priority 4: Default or first track
+  off, // Priority 5: Subtitles off (subtitle only)
 }
 
 /// Result of track selection including the selected track and which priority was used
@@ -680,7 +685,7 @@ class TrackSelectionResult<T> {
 }
 
 /// Service for selecting and applying audio and subtitle tracks based on
-/// preferences, user profiles, and per-media settings.
+/// carried selections, server-selected streams, and account preferences.
 class TrackSelectionService {
   final Player? player;
   final MediaServerUserProfile? profileSettings;
@@ -689,46 +694,32 @@ class TrackSelectionService {
 
   TrackSelectionService({this.player, this.profileSettings, required this.metadata, this.plexMediaInfo});
 
-  /// Build list of preferred languages from a user profile
-  List<String> _buildPreferredLanguages(MediaServerUserProfile profile, {required bool isAudio}) {
+  /// The profile's preferred language for one track kind, or null when unset.
+  static String? _preferredLanguage(MediaServerUserProfile profile, {required bool isAudio}) {
     final primary = isAudio ? profile.defaultAudioLanguage : profile.defaultSubtitleLanguage;
-    final list = isAudio ? profile.defaultAudioLanguages : profile.defaultSubtitleLanguages;
-
-    final result = <String>[];
-    if (primary != null && primary.isNotEmpty) {
-      result.add(primary);
-    }
-    if (list != null) {
-      result.addAll(list);
-    }
-    return result;
+    return primary == null || primary.isEmpty ? null : primary;
   }
 
-  /// Find a track by preferred language with variation lookup and logging
-  T? _findTrackByPreferredLanguage<T>(
-    List<T> tracks,
-    String preferredLanguage,
-    String? Function(T) getLanguage,
-    String Function(T) getDescription,
-    String trackType,
-  ) {
-    final languageVariations = LanguageCodes.getVariations(preferredLanguage);
-    return _findTrackByLanguageVariations<T>(
-      tracks,
-      preferredLanguage,
-      languageVariations,
-      getLanguage,
-      getDescription,
-      trackType,
-    );
+  /// Find the first track whose language matches the preferred language.
+  ///
+  /// Matching goes through [languageMatches] (exact, region-code, and
+  /// ISO 639 variation parity) - never prefix comparison, which would let
+  /// e.g. an `est` (Estonian) track satisfy an `es` (Spanish) preference.
+  T? _findTrackByPreferredLanguage<T>(List<T> tracks, String preferredLanguage, String? Function(T) getLanguage) {
+    for (final track in tracks) {
+      if (languageMatches(getLanguage(track), preferredLanguage)) {
+        return track;
+      }
+    }
+    return null;
   }
 
-  /// Apply a filter to tracks, falling back to original if filter produces empty result
   /// Generic track matching for audio and subtitle tracks
   /// Returns the best matching track based on hierarchical criteria:
   /// 1. Exact match (id + title + language)
   /// 2. Partial match (title + language)
   /// 3. Language-only match
+  /// Ties within a tier resolve to the first track in list order.
   T? findBestTrackMatch<T>(
     List<T> availableTracks,
     T preferred,
@@ -736,58 +727,35 @@ class TrackSelectionService {
     String? Function(T) getTitle,
     String? Function(T) getLanguage,
   ) {
-    if (availableTracks.isEmpty) return null;
-
-    // Filter out auto and no tracks
-    final validTracks = availableTracks.where((t) => getId(t) != 'auto' && getId(t) != 'no').toList();
-    if (validTracks.isEmpty) return null;
-
     final preferredId = getId(preferred);
     final preferredTitle = getTitle(preferred);
     final preferredLanguage = getLanguage(preferred);
 
-    // Try to match: id, title, and language
-    for (final track in validTracks) {
-      if (getId(track) == preferredId && getTitle(track) == preferredTitle && getLanguage(track) == preferredLanguage) {
-        return track;
+    // One pass; only a strictly stronger tier replaces the running best, so
+    // the first track at the strongest tier reached wins.
+    T? best;
+    var bestTier = 0;
+    for (final track in availableTracks) {
+      final id = getId(track);
+      // Skip auto and no tracks
+      if (id == 'auto' || id == 'no') continue;
+      if (getLanguage(track) != preferredLanguage) continue;
+      var tier = 1;
+      if (getTitle(track) == preferredTitle) tier = id == preferredId ? 3 : 2;
+      if (tier == 3) return track;
+      if (tier > bestTier) {
+        bestTier = tier;
+        best = track;
       }
     }
-
-    // Try to match: title and language
-    for (final track in validTracks) {
-      if (getTitle(track) == preferredTitle && getLanguage(track) == preferredLanguage) {
-        return track;
-      }
-    }
-
-    // Try to match: language only
-    for (final track in validTracks) {
-      if (getLanguage(track) == preferredLanguage) {
-        return track;
-      }
-    }
-
-    return null;
+    return best;
   }
 
   AudioTrack? findAudioTrackByProfile(List<AudioTrack> availableTracks, MediaServerUserProfile profile) {
     if (availableTracks.isEmpty || !profile.autoSelectAudio) return null;
-
-    final preferredLanguages = _buildPreferredLanguages(profile, isAudio: true);
-    if (preferredLanguages.isEmpty) return null;
-
-    for (final preferredLanguage in preferredLanguages) {
-      final match = _findTrackByPreferredLanguage<AudioTrack>(
-        availableTracks,
-        preferredLanguage,
-        (t) => t.language,
-        (t) => t.title ?? 'Track ${t.id}',
-        'audio track',
-      );
-      if (match != null) return match;
-    }
-
-    return null;
+    final preferredLanguage = _preferredLanguage(profile, isAudio: true);
+    if (preferredLanguage == null) return null;
+    return _findTrackByPreferredLanguage<AudioTrack>(availableTracks, preferredLanguage, (t) => t.language);
   }
 
   SubtitleTrack? _findSubtitleTrackByProfile(
@@ -797,22 +765,9 @@ class TrackSelectionService {
   }) {
     final candidates = forcedOnly ? availableTracks.where((track) => track.effectiveForced).toList() : availableTracks;
     if (candidates.isEmpty) return null;
-
-    final preferredLanguages = _buildPreferredLanguages(profile, isAudio: false);
-    if (preferredLanguages.isEmpty) return null;
-
-    for (final preferredLanguage in preferredLanguages) {
-      final match = _findTrackByPreferredLanguage<SubtitleTrack>(
-        candidates,
-        preferredLanguage,
-        (track) => track.language,
-        (track) => track.title ?? 'Track ${track.id}',
-        'subtitle track',
-      );
-      if (match != null) return match;
-    }
-
-    return null;
+    final preferredLanguage = _preferredLanguage(profile, isAudio: false);
+    if (preferredLanguage == null) return null;
+    return _findTrackByPreferredLanguage<SubtitleTrack>(candidates, preferredLanguage, (track) => track.language);
   }
 
   SubtitleTrack? _findDefaultSubtitleTrack(List<SubtitleTrack> availableTracks) {
@@ -820,10 +775,6 @@ class TrackSelectionService {
       if (track.isDefault) return track;
     }
     return null;
-  }
-
-  SubtitleTrack? _findFirstSubtitleTrack(List<SubtitleTrack> availableTracks) {
-    return availableTracks.isEmpty ? null : availableTracks.first;
   }
 
   SubtitleTrack? _findForcedSubtitleTrack(List<SubtitleTrack> availableTracks) {
@@ -835,15 +786,19 @@ class TrackSelectionService {
 
   bool _audioMatchesProfile(AudioTrack? selectedAudioTrack, MediaServerUserProfile profile) {
     if (selectedAudioTrack == null) return false;
-    final preferredLanguages = _buildPreferredLanguages(profile, isAudio: true);
-    if (preferredLanguages.isEmpty) return false;
-    return preferredLanguages.any((language) => languageMatches(selectedAudioTrack.language, language));
+    final preferredLanguage = _preferredLanguage(profile, isAudio: true);
+    return preferredLanguage != null && languageMatches(selectedAudioTrack.language, preferredLanguage);
   }
 
   TrackSelectionResult<SubtitleTrack>? _selectSubtitleTrackByProfile(
     List<SubtitleTrack> availableTracks,
     AudioTrack? selectedAudioTrack,
   ) {
+    // PMS already applies the account's `autoSelectSubtitle` when it stamps
+    // `selected` on the item's streams (Plex Web reads nothing else), so
+    // re-applying the mode here would second-guess a decision the server has
+    // made — and Plex's 0 means "manually selected", not "off".
+    if (metadata.backend == MediaBackend.plex) return null;
     final profile = profileSettings;
     final mode = profile?.subtitleMode;
     if (profile == null || mode == null || mode == SubtitlePlaybackMode.defaultMode) return null;
@@ -863,7 +818,7 @@ class TrackSelectionService {
         selected =
             _findSubtitleTrackByProfile(availableTracks, profile) ??
             _findDefaultSubtitleTrack(availableTracks) ??
-            _findFirstSubtitleTrack(availableTracks) ??
+            availableTracks.firstOrNull ??
             SubtitleTrack.off;
         break;
       case SubtitlePlaybackMode.smart:
@@ -876,7 +831,7 @@ class TrackSelectionService {
           selected =
               _findSubtitleTrackByProfile(availableTracks, profile) ??
               _findDefaultSubtitleTrack(availableTracks) ??
-              _findFirstSubtitleTrack(availableTracks) ??
+              availableTracks.firstOrNull ??
               SubtitleTrack.off;
         }
         break;
@@ -916,6 +871,23 @@ class TrackSelectionService {
     }
 
     if (preferred.id.startsWith('source:')) {
+      // A source row delivered as its own *file* carries that file's URL on the preference, and the
+      // loaded track is external. `findMpvTrackForPlexSubtitle` pairs a source row with the
+      // container's own tracks by metadata, so it cannot see that external track at all - which
+      // left an extracted secondary waiting out the deadline and never appearing. The URL is both
+      // stronger and unambiguous, so it is tried first; a unique hit is the same file by
+      // definition, whatever id either side chose for it.
+      //
+      // Container tracks are excluded on purpose: several source rows share one container URL, so a
+      // URL hit there says nothing about *which* row it is, and the metadata matcher below is what
+      // waits for the intended one to be discovered.
+      final sidecarUri = preferred.uri;
+      if (sidecarUri != null && sidecarUri.isNotEmpty) {
+        final uriMatches = availableTracks
+            .where((track) => track.uri == sidecarUri && !track.isContainer)
+            .toList(growable: false);
+        if (uriMatches.length == 1) return uriMatches.single;
+      }
       final sourceTrack = _sourceSubtitleTrack(preferred.id);
       if (sourceTrack == null) return null;
       return findMpvTrackForPlexSubtitle(sourceTrack, availableTracks, allPlexTracks: plexMediaInfo?.subtitleTracks);
@@ -934,25 +906,6 @@ class TrackSelectionService {
       (t) => t.title,
       (t) => t.language,
     );
-  }
-
-  /// Find a track matching a preferred language from a list of tracks
-  /// Returns the first track whose language matches any variation of the preferred language
-  T? _findTrackByLanguageVariations<T>(
-    List<T> tracks,
-    String _,
-    List<String> languageVariations,
-    String? Function(T) getLanguage,
-    String Function(T) _,
-    String _,
-  ) {
-    for (final track in tracks) {
-      final trackLang = getLanguage(track)?.toLowerCase();
-      if (trackLang != null && languageVariations.any((lang) => trackLang.startsWith(lang))) {
-        return track;
-      }
-    }
-    return null;
   }
 
   /// Checks if a track language matches a preferred language
@@ -986,9 +939,8 @@ class TrackSelectionService {
   /// Select the best audio track based on priority:
   /// Priority 1: Preferred track from navigation
   /// Priority 2: Server-selected track from media info
-  /// Priority 3: Per-media language preference
-  /// Priority 4: User profile preferences
-  /// Priority 5: Default or first track
+  /// Priority 3: User profile preferences
+  /// Priority 4: Default or first track
   TrackSelectionResult<AudioTrack>? selectAudioTrack(
     List<AudioTrack> availableTracks,
     AudioTrack? preferredAudioTrack,
@@ -1059,18 +1011,7 @@ class TrackSelectionService {
       }
     }
 
-    // Priority 3: Try per-media language preference
-    if (metadata.audioLanguage != null) {
-      final matchedTrack = availableTracks.firstWhere(
-        (track) => languageMatches(track.language, metadata.audioLanguage),
-        orElse: () => availableTracks.first,
-      );
-      if (languageMatches(matchedTrack.language, metadata.audioLanguage)) {
-        return TrackSelectionResult(matchedTrack, TrackSelectionPriority.perMedia);
-      }
-    }
-
-    // Priority 4: Try user profile preferences
+    // Priority 3: Try user profile preferences
     if (profileSettings != null) {
       trackToSelect = findAudioTrackByProfile(availableTracks, profileSettings!);
       if (trackToSelect != null) {
@@ -1078,7 +1019,7 @@ class TrackSelectionService {
       }
     }
 
-    // Priority 5: Use default or first track
+    // Priority 4: Use default or first track
     trackToSelect = availableTracks.firstWhere((t) => t.isDefault, orElse: () => availableTracks.first);
     return TrackSelectionResult(trackToSelect, TrackSelectionPriority.defaultTrack);
   }
@@ -1208,8 +1149,9 @@ class TrackSelectionService {
       if (waitForPendingSource && availableTracks.isEmpty && info.subtitleTracks.isNotEmpty) return null;
     }
 
-    // Priority 3: Apply server profile subtitle mode when the backend exposes
-    // one (MediaBrowser). Plex keeps using the selected-stream path above.
+    // Priority 3: Apply the server profile's subtitle mode where the server
+    // does not pre-select for us (MediaBrowser). Plex never reaches this with
+    // a mode: PMS already folded it into `selected` above.
     final profileSelectedTrack = _selectSubtitleTrackByProfile(availableTracks, selectedAudioTrack);
     if (profileSelectedTrack != null) return profileSelectedTrack;
 
@@ -1234,6 +1176,11 @@ class TrackSelectionService {
     bool Function()? isActive,
     void Function(Future<void> mutation)? onPlayerMutationDispatched,
     bool waitForPendingSource = true,
+
+    /// The primary is painted into the picture, so no native subtitle track is
+    /// coming for it. With no secondary wanted either, a silent video legitimately
+    /// exposes no tracks at all and the wait below can only time out.
+    bool primarySubtitleIsServerRendered = false,
   }) async {
     final player = this.player;
     if (player == null) {
@@ -1243,8 +1190,14 @@ class TrackSelectionService {
 
     if (!canMutatePlayer()) return false;
 
-    // Wait for tracks to be loaded
-    if (player.state.tracks.audio.isEmpty && player.state.tracks.subtitle.isEmpty) {
+    // Wait for tracks to be loaded, unless nothing can arrive: a burned-in primary with no
+    // secondary wanted has a complete catalog at zero tracks, and waiting ten seconds for one
+    // held the saved playback rate back with it. An explicit off is as settled as an absent
+    // preference, which is how `TrackManager._secondaryPreferenceResolves` reads it too.
+    final nothingToWaitFor =
+        primarySubtitleIsServerRendered &&
+        (preferredSecondarySubtitleTrack == null || preferredSecondarySubtitleTrack is SubtitleOffPreference);
+    if (!nothingToWaitFor && player.state.tracks.audio.isEmpty && player.state.tracks.subtitle.isEmpty) {
       try {
         await player.streams.tracks
             .where((t) => t.audio.isNotEmpty || t.subtitle.isNotEmpty)
@@ -1333,8 +1286,11 @@ class TrackSelectionService {
       }
     }
 
-    // Apply default playback speed from settings
-    if (defaultPlaybackSpeed != null && defaultPlaybackSpeed != 1.0) {
+    // Apply the resolved playback speed. Compared with the live rate, not with
+    // 1.0: an in-place reload keeps the previous item's rate, so a resolved
+    // 1.0 (another show's scoped speed, or the global default) must still be
+    // applied over it.
+    if (defaultPlaybackSpeed != null && defaultPlaybackSpeed != player.state.rate) {
       if (!canMutatePlayer()) return false;
       final rateMutation = player.setRate(defaultPlaybackSpeed);
       onPlayerMutationDispatched?.call(rateMutation);

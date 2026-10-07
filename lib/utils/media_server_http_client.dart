@@ -8,7 +8,6 @@ import 'package:http/http.dart' as http;
 import 'app_logger.dart';
 import 'future_extensions.dart';
 import 'isolate_helper.dart';
-import 'log_redaction_manager.dart';
 import 'managed_http_client.dart';
 import 'url_utils.dart';
 import '../exceptions/media_server_exceptions.dart';
@@ -52,7 +51,7 @@ void throwIfHttpError(MediaServerResponse r) {
 /// Abort controller for cancelling in-flight HTTP requests.
 ///
 /// Uses the `package:http` [AbortableRequest] mechanism so the underlying
-/// transport (IOClient, CronetClient, CupertinoClient) actually cancels
+/// transport (IOClient, WinHttpClient) actually cancels
 /// the network operation.
 class AbortController {
   final _completer = Completer<void>();
@@ -97,10 +96,7 @@ class MediaServerHttpClient {
     Map<String, String> defaultHeaders = const {},
     this.connectTimeout = const Duration(seconds: 10),
     this.receiveTimeout = const Duration(seconds: 120),
-    // Plex home loads fan out many HTTP/1.1 calls on Linux. Keep that tuning
-    // opt-in so generic tracker/auth clients stay disposable and closeable.
-    bool usePlexApiClient = false,
-  }) : _client = client ?? (usePlexApiClient ? platform.createPlexApiClient() : platform.createPlatformClient()),
+  }) : _client = client ?? platform.createPlatformClient(),
        defaultHeaders = Map.of(defaultHeaders);
 
   /// The underlying [http.Client] for direct streaming / multipart requests.
@@ -237,8 +233,8 @@ class MediaServerHttpClient {
   Future<void> closeGracefully({Duration drainTimeout = const Duration(seconds: 2)}) async {
     _closing = true;
     _abortActiveRequests();
-    if (_client case final ManagedHttpClient managed) {
-      await managed.closeGracefully(drainTimeout: drainTimeout);
+    if (_client case final GracefulHttpClient graceful) {
+      await graceful.closeGracefully(drainTimeout: drainTimeout);
     } else {
       _client.close();
     }
@@ -334,8 +330,20 @@ class MediaServerHttpClient {
       );
       return await consume(streamed, scope);
     } catch (e) {
+      // Once this request's abort has fired, any secondary teardown error that
+      // surfaces first (a file sink failing after the stream died, a socket
+      // reset) is still a cancellation to the caller. Timeouts abort the
+      // request themselves before rethrowing and must keep their own type.
+      final wasAborted = requestAbort.isAborted || (abort?.isAborted ?? false);
       requestAbort.abort();
       await onError?.call();
+      if (wasAborted && e is! MediaServerHttpException && e is! TimeoutException) {
+        throw MediaServerHttpException(
+          type: MediaServerHttpErrorType.cancelled,
+          requestUri: uri,
+          message: 'Request aborted: $e',
+        );
+      }
       throw MediaServerHttpException.from(e, uri: uri);
     } finally {
       _activeAborts.remove(requestAbort);
@@ -391,7 +399,6 @@ class MediaServerHttpClient {
   Uri _resolveUri(String url, Map<String, dynamic>? queryParameters) =>
       _isAbsoluteUrl(url) ? _appendQuery(Uri.parse(url), queryParameters) : _buildUri(url, queryParameters);
 
-  /// Append query parameters to an already-parsed URI.
   Uri _appendQuery(Uri uri, Map<String, dynamic>? queryParameters) {
     if (queryParameters == null || queryParameters.isEmpty) return uri;
     final query = encodeQueryParameters(queryParameters);
@@ -417,10 +424,13 @@ class MediaServerHttpClient {
       return;
     }
 
-    // Content type comes from the caller's headers (Jellyfin/Plex put
-    // `application/json` in their defaults); `request.body` falls back to
-    // text/plain. Don't add one here — `request.headers` is case-insensitive,
-    // and the setter above has already filled the key in either way.
+    // Structured bodies are always JSON-encoded, so default the content type
+    // to match. `request.headers` is case-insensitive and already carries the
+    // caller/default headers, so an explicit content type wins (Jellyfin pins
+    // `application/json` in its defaults). Without this, `request.body` falls
+    // back to text/plain, which Plex's cloud endpoints reject — the favorites
+    // PUT to epg.provider.plex.tv answered 400 (#1878).
+    request.headers.putIfAbsent('content-type', () => 'application/json');
     request.body = jsonEncode(body);
   }
 
@@ -458,7 +468,12 @@ class MediaServerHttpClient {
   }
 
   void _logResponse(String method, Uri uri, int statusCode, int ms) {
-    appLogger.d('$method ${LogRedactionManager.redact(uri.toString())} → $statusCode (${ms}ms)');
+    // Dart builds this message before the level filter sees it, and it runs on
+    // every buffered response. `MemoryAwareLogPrinter` already redacts each
+    // emitted record, so the call site neither needs `redact()` nor should pay
+    // for the interpolation in release, where the line is dropped.
+    if (!debugLoggingEnabled) return;
+    appLogger.d('$method $uri → $statusCode (${ms}ms)');
   }
 }
 

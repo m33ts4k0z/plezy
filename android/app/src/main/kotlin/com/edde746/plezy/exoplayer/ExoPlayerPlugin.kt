@@ -1,8 +1,6 @@
 package com.edde746.plezy.exoplayer
 
 import android.app.Activity
-import android.app.ActivityManager
-import android.content.Context
 import android.util.Log
 import com.edde746.plezy.libass.media.AssHandler
 import com.edde746.plezy.mpv.MpvPlayerCore
@@ -10,6 +8,7 @@ import com.edde746.plezy.mpv.completeMpvPropertyNotInitialized
 import com.edde746.plezy.mpv.completeMpvPropertyResult
 import com.edde746.plezy.shared.MpvContentUriResolver
 import com.edde746.plezy.shared.PlayerChannelBinding
+import com.edde746.plezy.shared.PlayerDebugLog
 import com.edde746.plezy.shared.PlayerDelegate
 import com.edde746.plezy.shared.ResolvedMpvUri
 import com.edde746.plezy.shared.SurfacePlayerCore
@@ -40,6 +39,11 @@ class ExoPlayerPlugin :
   private val mainHandler get() = channels.mainHandler
   private fun runOnMain(block: () -> Unit) = channels.runOnMain(block)
   private var playerCore: ExoPlayerCore? = null
+
+  // The Dart instanceId that created the current core. A `dispose` carrying a
+  // different token lost the ownership race to a successor and must not tear
+  // down that successor's session; it is acknowledged without touching it.
+  private var coreInstanceId: Long? = null
   private var mpvCore: MpvPlayerCore? = null // MPV fallback player
   private var usingMpvFallback: Boolean = false
   private var fallbackInProgress: Boolean = false
@@ -108,8 +112,6 @@ class ExoPlayerPlugin :
 
   private val observedProperties = LinkedHashMap<String, ObservedProperty>()
 
-  private var configuredBufferSizeBytes: Int? = null
-
   private var sessionGeneration = 0
   private var mediaGeneration = 0
   private var fallbackMediaGeneration: Int? = null
@@ -119,7 +121,8 @@ class ExoPlayerPlugin :
   private var mpvForwardGeneration: Int? = null
   private var mpvSignalGate: MpvSignalGate? = null
   private var mpvCoreNeedsReplacement = false
-  internal var createMpvCore: (Activity) -> MpvPlayerCore = { MpvPlayerCore(it) }
+  internal var createMpvCore: (Activity) -> MpvPlayerCore =
+    { MpvPlayerCore(it, hardwareDecoding = fallbackHardwareDecoding()) }
   internal var initializeMpvCore: (MpvPlayerCore, (Boolean) -> Unit) -> Unit = { core, onInitialized ->
     core.initialize(onInitialized)
   }
@@ -139,6 +142,12 @@ class ExoPlayerPlugin :
   // every codec in audio-spdif with no decode fallback, so the fallback core's value is
   // derived from the audio route at the moment mpv actually starts (#1703).
   private var audioPassthroughRequested = false
+
+  // `dv-conversion-mode` is not an mpv property and never reaches
+  // pendingMpvProperties: Dart routes it through setDvConversionMode (see
+  // PlayerAndroid.setProperty), so the fallback core has to be seeded from the
+  // last configured value or it loses the fork's P7/P5 handling entirely.
+  private var dvConversionMode = "auto"
   private var currentExternalSubtitles: List<Map<String, Any?>>? = null
 
   // FlutterPlugin
@@ -158,6 +167,7 @@ class ExoPlayerPlugin :
     val exoCore = playerCore
     val fallbackCore = mpvCore
     playerCore = null
+    coreInstanceId = null
     mpvCore = null
     usingMpvFallback = false
     fallbackInProgress = false
@@ -174,12 +184,15 @@ class ExoPlayerPlugin :
     currentExternalSubtitles = null
     pendingMpvProperties.clear()
     audioPassthroughRequested = false
+    dvConversionMode = "auto"
     if (clearActivity) {
       activity = null
       activityBinding = null
     }
     exoCore?.dispose()
-    fallbackCore?.dispose()
+    // This backend's display-mode restore is Dart's clearVideoFrameRate
+    // (ExoPlayerCore.releasePending); the fallback core keeps the same contract.
+    fallbackCore?.dispose(preserveDisplayMode = true)
   }
 
   // ActivityAware
@@ -224,7 +237,7 @@ class ExoPlayerPlugin :
   override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
     when (call.method) {
       "initialize" -> handleInitialize(call, result)
-      "dispose" -> handleDispose(result)
+      "dispose" -> handleDispose(call, result)
       "open" -> handleOpen(call, result)
       "play" -> handlePlay(result)
       "pause" -> handlePause(result)
@@ -250,10 +263,6 @@ class ExoPlayerPlugin :
       )
       "getStats" -> handleGetStats(result)
       "getPlayerType" -> result.success(if (usingMpvFallback) "mpv" else "exoplayer")
-      "getHeapSize" -> {
-        val am = activity?.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
-        result.success(am?.largeMemoryClass ?: 0)
-      }
       "setSubtitleStyle" -> handleSetSubtitleStyle(call, result)
       "setBoxFitMode" -> handleSetBoxFitMode(call, result)
       "setVideoZoom" -> handleSetVideoZoom(call, result)
@@ -265,7 +274,9 @@ class ExoPlayerPlugin :
       "setMpvProperty" -> handleSetMpvProperty(call, result)
       "setLogLevel" -> {
         val level = call.argument<String>("level") ?: "warn"
-        debugLoggingEnabled = (level == "v" || level == "debug" || level == "trace")
+        debugLoggingEnabled = PlayerDebugLog.isVerbose(level)
+        // The shared player helpers this backend calls read the process-wide gate.
+        PlayerDebugLog.enabled = debugLoggingEnabled
         playerCore?.debugLoggingEnabled = debugLoggingEnabled
         result.success(null)
       }
@@ -291,17 +302,14 @@ class ExoPlayerPlugin :
       return
     }
 
-    val bufferSizeBytes = call.argument<Int>("bufferSizeBytes")
-    // Auto sizing is decided natively (LoadControlPolicy). `bufferSizeBytes` still arrives
-    // on Auto because Dart derives one for mpv's demuxer, which shares the property, and
-    // the fallback replay below needs it.
-    val bufferSizeAuto = call.argument<Boolean>("bufferSizeAuto") ?: false
-    val tunnelingEnabled = call.argument<Boolean>("tunnelingEnabled") ?: true
-    val dvConversionMode = call.argument<String>("dvConversionMode") ?: "auto"
+    val tunnelingEnabled = call.argument<Boolean>("tunnelingEnabled") ?: false
+    dvConversionMode = call.argument<String>("dvConversionMode") ?: "auto"
     val audioPassthroughEnabled = call.argument<Boolean>("audioPassthroughEnabled") ?: false
     val assVideoLatencyFrames = call.argument<Int>("assVideoLatencyFrames") ?: 0
     val subtitleRenderScale = call.argument<Double>("subtitleRenderScale")?.toFloat() ?: 1.0f
-    configuredBufferSizeBytes = bufferSizeBytes
+    // ExoPlayer-only: mpv's read-ahead is owned by the mpv.conf editor, so there is no
+    // fallback replay for this one. Resolved in the core; unrecognised means Auto (#1816).
+    val bufferTier = call.argument<String>("bufferTier") ?: "auto"
     // Seed the request here rather than waiting for Dart's separate setAudioPassthrough
     // call, so a fallback raised before that arrives still derives audio-spdif correctly.
     audioPassthroughRequested = audioPassthroughEnabled
@@ -320,7 +328,7 @@ class ExoPlayerPlugin :
       // fallback replay in setupMpvFallback needs them. Dispose/detach clear.
 
       if (mpvCore != null || fallbackInProgress) {
-        mpvCore?.dispose()
+        mpvCore?.dispose(preserveDisplayMode = true)
         mpvCore = null
         usingMpvFallback = false
         fallbackInProgress = false
@@ -340,11 +348,11 @@ class ExoPlayerPlugin :
           this.debugLoggingEnabled = this@ExoPlayerPlugin.debugLoggingEnabled
         }
         playerCore = core
+        coreInstanceId = call.argument<Number>("instanceId")?.toLong()
         val success = core.initialize(
-          bufferSizeBytes = bufferSizeBytes,
-          bufferSizeAuto = bufferSizeAuto,
           tunnelingEnabled = tunnelingEnabled,
-          audioPassthroughEnabled = audioPassthroughEnabled
+          audioPassthroughEnabled = audioPassthroughEnabled,
+          bufferTier = bufferTier
         )
         if (!success) {
           if (playerCore === core) playerCore = null
@@ -369,8 +377,15 @@ class ExoPlayerPlugin :
     }
   }
 
-  private fun handleDispose(result: MethodChannel.Result) {
+  private fun handleDispose(call: MethodCall, result: MethodChannel.Result) {
+    val token = call.argument<Number>("instanceId")?.toLong()
     runOnMain {
+      val owner = coreInstanceId
+      if ((playerCore != null || mpvCore != null) && token != null && owner != null && token != owner) {
+        Log.d(TAG, "Ignoring stale dispose (token=$token, core owner=$owner)")
+        result.success(null)
+        return@runOnMain
+      }
       teardownSession(clearActivity = false)
       Log.d(TAG, "Disposed")
       result.success(null)
@@ -573,7 +588,7 @@ class ExoPlayerPlugin :
     mpvForwardGeneration = null
     mpvSignalGate = null
     if (mpvCore === oldCore) mpvCore = null
-    oldCore.dispose()
+    oldCore.dispose(preserveDisplayMode = true)
 
     val replacementCore = try {
       createMpvCore(act)
@@ -611,7 +626,7 @@ class ExoPlayerPlugin :
             !usingMpvFallback ||
             mpvCore !== replacementCore
           ) {
-            replacementCore.dispose()
+            replacementCore.dispose(preserveDisplayMode = true)
             return@runOnMain
           }
           if (!success) {
@@ -666,7 +681,7 @@ class ExoPlayerPlugin :
     mpvForwardGeneration = null
     mpvSignalGate = null
     mpvCore = null
-    core?.dispose()
+    core?.dispose(preserveDisplayMode = true)
     val failed = pendingOpen
     pendingOpen = null
     failed?.error("FALLBACK_FAILED", "Compatible player failed to initialize")
@@ -1011,14 +1026,19 @@ class ExoPlayerPlugin :
     val extraDelayMs = call.argument<Number>("extraDelayMs")?.toLong() ?: 0L
     val videoWidth = call.argument<Number>("videoWidth")?.toInt() ?: 0
     val videoHeight = call.argument<Number>("videoHeight")?.toInt() ?: 0
+    val matchResolution = call.argument<Boolean>("matchResolution") ?: false
 
-    Log.d(TAG, "setVideoFrameRate: fps=$fps, duration=$duration, extraDelayMs=$extraDelayMs, video=${videoWidth}x$videoHeight")
+    Log.d(
+      TAG,
+      "setVideoFrameRate: fps=$fps, duration=$duration, extraDelayMs=$extraDelayMs, " +
+        "video=${videoWidth}x$videoHeight, matchResolution=$matchResolution"
+    )
     val core = activeSurfaceCore
     if (core == null) {
       result.success(false)
       return
     }
-    core.setVideoFrameRate(fps, duration, extraDelayMs, videoWidth, videoHeight) { switched ->
+    core.setVideoFrameRate(fps, duration, extraDelayMs, videoWidth, videoHeight, matchResolution) { switched ->
       result.success(switched)
     }
   }
@@ -1065,6 +1085,7 @@ class ExoPlayerPlugin :
     val subtitlePosition = call.argument<Number>("subtitlePosition")?.toInt() ?: 100
     val bold = call.argument<Boolean>("bold") ?: false
     val italic = call.argument<Boolean>("italic") ?: false
+    val anchorToScreen = call.argument<Boolean>("anchorToScreen") ?: false
 
     if (usingMpvFallback) {
       // MPV fallback handles styling via setProperty, no-op here
@@ -1072,7 +1093,7 @@ class ExoPlayerPlugin :
       return
     }
 
-    playerCore?.setSubtitleStyle(fontSize, textColor, borderSize, borderColor, bgColor, bgOpacity, subtitlePosition, bold, italic)
+    playerCore?.setSubtitleStyle(fontSize, textColor, borderSize, borderColor, bgColor, bgOpacity, subtitlePosition, bold, italic, anchorToScreen)
     result.success(null)
   }
 
@@ -1118,12 +1139,24 @@ class ExoPlayerPlugin :
       return
     }
     if (usingMpvFallback) {
-      result.success(false)
+      // The fallback core owns the property now; dropping the write would
+      // strand it on the mode ExoPlayer started with.
+      val core = mpvCore
+      if (core == null) {
+        result.success(false)
+        return
+      }
+      dvConversionMode = mode
+      core.setProperty("dv-conversion-mode", mode) { outcome ->
+        completeMpvPropertyResult(result, outcome, successValue = true)
+      }
       return
     }
     activity?.runOnUiThread {
       val handled = playerCore?.setDebugDvConversionMode(mode) == true
       if (handled) {
+        // Keep the fallback seed on the value ExoPlayer is actually running.
+        dvConversionMode = mode
         result.success(true)
       } else {
         result.error("INVALID_ARGS", "Invalid DV conversion mode: $mode", null)
@@ -1297,6 +1330,16 @@ class ExoPlayerPlugin :
   }
 
   /**
+   * Decode intent for a fallback mpv core, read from the `hwdec` value Dart
+   * already wrote for this session. It picks the core's initial vo chain
+   * ([MpvPlayerCore.initialVideoOutput]), so a software-decoding session must
+   * not inherit the hardware default: only gpu-next applies Dolby Vision RPU
+   * reshaping, and a session that asked for software decode is usually the
+   * one that needs it.
+   */
+  private fun fallbackHardwareDecoding(): Boolean = pendingMpvProperties["hwdec"]?.let { it != "no" } ?: true
+
+  /**
    * Configure a freshly initialized MPV fallback core: replay the properties
    * and observers Dart registered against the ExoPlayer session, then resume
    * the media at the handoff position. Runs in MpvPlayerCore.initialize's
@@ -1305,15 +1348,13 @@ class ExoPlayerPlugin :
   private fun prepareMpvFallback(core: MpvPlayerCore) {
     val pendingProps = pendingMpvProperties.filterKeys { it != "audio-spdif" }.toList()
     val observedProps = observedProperties.toList()
-    val bufferSize = configuredBufferSizeBytes
 
-    core.setProperty("hwdec", "mediacodec,mediacodec-copy")
-    core.setProperty("vo", "gpu")
+    // hwdec is not seeded here — Dart's write in pendingMpvProperties is the
+    // single source of the fallback core's chain.
     core.setProperty("ao", "audiotrack")
-
-    if (bufferSize != null && bufferSize > 0) {
-      core.setProperty("demuxer-max-bytes", bufferSize.toString())
-    }
+    // Dart routes dv-conversion-mode through setDvConversionMode, so unlike
+    // hwdec it never reaches pendingMpvProperties.
+    core.setProperty("dv-conversion-mode", dvConversionMode)
 
     for ((propName, propValue) in pendingProps) {
       core.setProperty(propName, propValue) { outcome ->
@@ -1334,7 +1375,9 @@ class ExoPlayerPlugin :
     core.setProperty("audio-spdif", audioSpdif)
 
     for ((propName, observed) in observedProps) {
-      core.observeProperty(propName, observed.format)
+      core.observeProperty(propName, observed.format) { outcome ->
+        if (outcome.isFailure) Log.w(TAG, "Failed to observe MPV fallback property", outcome.exceptionOrNull())
+      }
     }
 
     core.setVisible(true)
@@ -1366,7 +1409,7 @@ class ExoPlayerPlugin :
     }
     val core = mpvCore
     mpvCore = null
-    core?.dispose()
+    core?.dispose(preserveDisplayMode = true)
     usingMpvFallback = false
     fallbackInProgress = false
     backendSwitchPending = false
@@ -1438,7 +1481,7 @@ class ExoPlayerPlugin :
       try {
         playerCore?.dispose()
         playerCore = null
-        mpvCore?.dispose()
+        mpvCore?.dispose(preserveDisplayMode = true)
         mpvCore = null
         usingMpvFallback = false
 
@@ -1457,7 +1500,7 @@ class ExoPlayerPlugin :
               if (!initializationSettled.compareAndSet(false, true)) return@Runnable
               if (generation != sessionGeneration || mpvCore !== core) {
                 if (mpvCore === core) mpvCore = null
-                core.dispose()
+                core.dispose(preserveDisplayMode = true)
                 return@Runnable
               }
               failActiveFallback(mediaGeneration, "Timed out initializing MPV fallback")
@@ -1470,7 +1513,7 @@ class ExoPlayerPlugin :
                 mainHandler.removeCallbacks(timeout)
                 if (generation != sessionGeneration || mpvCore !== core) {
                   if (mpvCore === core) mpvCore = null
-                  core.dispose()
+                  core.dispose(preserveDisplayMode = true)
                   return@onInitialized
                 }
                 if (!success) {

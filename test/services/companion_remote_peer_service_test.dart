@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:plezy/i18n/strings.g.dart';
 import 'package:plezy/models/companion_remote/remote_command.dart';
+import 'package:plezy/models/companion_remote/remote_session.dart';
 import 'package:plezy/services/companion_remote/companion_remote_peer_service.dart';
 import 'package:plezy/services/companion_remote/remote_auth_context.dart';
 import 'package:plezy/services/companion_remote/remote_auth_service.dart';
@@ -446,6 +447,97 @@ void main() {
     expect(managedJoinStarted.isCompleted, isTrue);
   });
 
+  test('race cleanup does not hang behind a candidate that never finishes connecting', () async {
+    final host = CompanionRemotePeerService();
+    final remote = CompanionRemotePeerService();
+    // Accepts the TCP connection but never answers the WebSocket upgrade,
+    // like a beacon-advertised virtual-adapter address that black-holes.
+    final blackHole = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    final stalledSockets = <Socket>[];
+    final blackHoleSubscription = blackHole.listen(stalledSockets.add);
+    addTearDown(() async {
+      await remote.dispose();
+      await host.dispose();
+      await blackHoleSubscription.cancel();
+      for (final socket in stalledSockets) {
+        socket.destroy();
+      }
+      await blackHole.close();
+    });
+
+    final session = await host.createSessionForContexts('Test Host', 'macos', [_authContext]);
+    final hostAddress = '127.0.0.1:${session.port}';
+
+    // Pre-fix, probe cleanup awaited a `sink.close()` that never completes
+    // for a still-connecting candidate, so the managed join after a won race
+    // never started; the deadline is what distinguishes pass from hang.
+    final winner = await remote
+        .joinSessionRacingWithContexts(
+          'Test Remote',
+          'ios',
+          ['127.0.0.1:${blackHole.port}', hostAddress],
+          [_authContext],
+          authContextId: _authContext.id,
+          expectedHostClientId: _authContext.clientIdentifier,
+        )
+        .timeout(_ioTimeout);
+
+    expect(winner, hostAddress);
+    // The losing candidate's transport is released, not left to the deadline.
+    await _waitFor(() => stalledSockets.isNotEmpty);
+    await stalledSockets.single.drain<void>().timeout(_ioTimeout);
+    final command = host.onCommandReceived.firstWhere((event) => event.type == RemoteCommandType.play);
+    remote.sendCommand(const RemoteCommand(type: RemoteCommandType.play));
+    expect((await command.timeout(_ioTimeout)).type, RemoteCommandType.play);
+  });
+
+  test('manual join to an endpoint that never completes the handshake fails with a timeout', () async {
+    final remote = CompanionRemotePeerService.forTesting(remoteConnectTimeout: const Duration(milliseconds: 400));
+    final blackHole = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    final stalledSockets = <Socket>[];
+    final blackHoleSubscription = blackHole.listen(stalledSockets.add);
+    addTearDown(() async {
+      await remote.dispose();
+      await blackHoleSubscription.cancel();
+      for (final socket in stalledSockets) {
+        socket.destroy();
+      }
+      await blackHole.close();
+    });
+
+    await expectLater(
+      remote
+          .joinSessionWithContexts('Test Remote', 'ios', '127.0.0.1:${blackHole.port}', [_authContext])
+          .timeout(_ioTimeout),
+      throwsA(isA<PeerError>().having((error) => error.type, 'type', PeerErrorType.timeout)),
+    );
+    await _waitFor(() => stalledSockets.isNotEmpty);
+    await stalledSockets.single.drain<void>().timeout(_ioTimeout);
+  });
+
+  test('disconnect does not hang while the managed connect is still pending', () async {
+    final remote = CompanionRemotePeerService.forTesting(remoteConnectTimeout: const Duration(seconds: 30));
+    final blackHole = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    final stalledSockets = <Socket>[];
+    final blackHoleSubscription = blackHole.listen(stalledSockets.add);
+    addTearDown(() async {
+      await remote.dispose();
+      await blackHoleSubscription.cancel();
+      for (final socket in stalledSockets) {
+        socket.destroy();
+      }
+      await blackHole.close();
+    });
+
+    final join = remote.joinSessionWithContexts('Test Remote', 'ios', '127.0.0.1:${blackHole.port}', [_authContext]);
+    // Settles with an error once disconnect cancels the pending connect.
+    unawaited(join.catchError((_) {}));
+    await _waitFor(() => stalledSockets.isNotEmpty);
+
+    await remote.disconnect().timeout(_ioTimeout);
+    await stalledSockets.single.drain<void>().timeout(_ioTimeout);
+  });
+
   test('host and remote dispatch encrypted commands through the same contract', () async {
     final host = CompanionRemotePeerService();
     final remote = CompanionRemotePeerService();
@@ -478,6 +570,116 @@ void main() {
       const RemoteCommand(type: RemoteCommandType.pause, data: {'source': 'host'}),
     );
   });
+
+  test('abrupt connection loss surfaces as a disconnect, not a terminal error', () async {
+    final host = CompanionRemotePeerService();
+    final remote = CompanionRemotePeerService();
+    _TcpProxy? proxy;
+    addTearDown(() async {
+      await remote.dispose();
+      await host.dispose();
+      await proxy?.dispose();
+    });
+
+    final session = await host.createSessionForContexts('Test Host', 'macos', [_authContext]);
+    final activeProxy = proxy = await _TcpProxy.start(session.port);
+
+    await remote.joinSessionWithContexts(
+      'Test Remote',
+      'ios',
+      '127.0.0.1:${activeProxy.port}',
+      [_authContext],
+      authContextId: _authContext.id,
+      expectedHostClientId: _authContext.clientIdentifier,
+    );
+
+    final errors = <RemotePeerError>[];
+    final statuses = <RemoteSessionStatus>[];
+    final errorSubscription = remote.onError.listen(errors.add);
+    final statusSubscription = remote.onConnectionStateChanged.listen(statuses.add);
+    addTearDown(() async {
+      await errorSubscription.cancel();
+      await statusSubscription.cancel();
+    });
+    final disconnected = remote.onDeviceDisconnected.first;
+
+    // Kill the TCP connection without a WebSocket close handshake — the
+    // signal a resumed Android app sees after backgrounding killed the
+    // socket. It must feed the disconnect/reconnect path, never a terminal
+    // error (dart:io normalizes even read-side socket errors to onDone, and
+    // the peer's onError branch mirrors this contract for transports that do
+    // surface errors).
+    activeProxy.abortSockets();
+
+    await disconnected.timeout(_ioTimeout);
+    await _flushEventQueue();
+    expect(errors, isEmpty);
+    expect(statuses, [RemoteSessionStatus.disconnected]);
+  });
+
+  group('advertised host addresses', () {
+    CompanionRemotePeerService hostWith(List<NetworkInterface> interfaces) {
+      final host = CompanionRemotePeerService.forTesting(listNetworkInterfaces: () async => interfaces);
+      addTearDown(host.dispose);
+      return host;
+    }
+
+    test('keep every interface whose name contains the loopback name (#2390)', () async {
+      // `NetworkInterface.list` already withholds loopback addresses, so the
+      // host must not second-guess it by name: systemd onboard Wi-Fi (`wlo1`)
+      // and Windows' "Local Area Connection" both contain "lo".
+      final host = hostWith([
+        _FakeNetworkInterface('wlo1', ['192.168.1.20']),
+        _FakeNetworkInterface('Local Area Connection', ['10.0.0.5']),
+      ]);
+
+      final session = await host.createSessionForContexts('Test Host', 'linux', [_authContext]);
+
+      // Wi-Fi/Ethernet addresses lead, so `hostAddress` is the LAN address a
+      // remote should try first.
+      expect(session.addresses, ['192.168.1.20:${session.port}', '10.0.0.5:${session.port}']);
+      expect(host.hostAddress, '192.168.1.20:${session.port}');
+    });
+
+    test('fail with noNetworkInterface when no interface carries a routable address', () async {
+      final host = hostWith(const []);
+
+      await expectLater(
+        host.createSessionForContexts('Test Host', 'linux', [_authContext]),
+        throwsA(
+          isA<PeerError>()
+              .having((error) => error.type, 'type', PeerErrorType.networkError)
+              .having((error) => error.message, 'message', t.companionRemote.errors.noNetworkInterface),
+        ),
+      );
+    });
+  });
+}
+
+class _FakeNetworkInterface extends Fake implements NetworkInterface {
+  _FakeNetworkInterface(this.name, List<String> addresses)
+    : addresses = [for (final address in addresses) _FakeInterfaceAddress(InternetAddress(address))];
+
+  @override
+  final String name;
+
+  @override
+  final List<InterfaceAddress> addresses;
+}
+
+class _FakeInterfaceAddress extends Fake implements InterfaceAddress {
+  _FakeInterfaceAddress(this._address);
+
+  final InternetAddress _address;
+
+  @override
+  String get address => _address.address;
+
+  @override
+  InternetAddressType get type => _address.type;
+
+  @override
+  bool get isLoopback => _address.isLoopback;
 }
 
 typedef _TestRaceProbeConnection = ({Future<void> Function() close, Future<void> ready, Stream<dynamic> stream});
@@ -555,6 +757,51 @@ class _CancelTrackingSubscription<T> implements StreamSubscription<T> {
 
   @override
   Future<E> asFuture<E>([E? futureValue]) => _delegate.asFuture(futureValue);
+}
+
+/// Byte-level TCP relay between the remote client and a real host, so a test
+/// can destroy the transport under the client without the WebSocket close
+/// handshake a clean [CompanionRemotePeerService.disconnect] would perform.
+class _TcpProxy {
+  _TcpProxy._(this._server, this._targetPort);
+
+  final ServerSocket _server;
+  final int _targetPort;
+  final List<Socket> _sockets = [];
+  bool _serverClosed = false;
+
+  int get port => _server.port;
+
+  static Future<_TcpProxy> start(int targetPort) async {
+    final server = await ServerSocket.bind(InternetAddress.loopbackIPv4, 0);
+    final proxy = _TcpProxy._(server, targetPort);
+    server.listen((socket) => unawaited(proxy._pipe(socket)));
+    return proxy;
+  }
+
+  Future<void> _pipe(Socket remoteSide) async {
+    final hostSide = await Socket.connect(InternetAddress.loopbackIPv4, _targetPort);
+    _sockets
+      ..add(remoteSide)
+      ..add(hostSide);
+    remoteSide.listen(hostSide.add, onDone: hostSide.destroy, onError: (Object _) => hostSide.destroy());
+    hostSide.listen(remoteSide.add, onDone: remoteSide.destroy, onError: (Object _) => remoteSide.destroy());
+  }
+
+  /// Destroy both pipe ends immediately, with no WebSocket close frame.
+  void abortSockets() {
+    for (final socket in _sockets) {
+      socket.destroy();
+    }
+  }
+
+  Future<void> dispose() async {
+    if (!_serverClosed) {
+      _serverClosed = true;
+      await _server.close();
+    }
+    abortSockets();
+  }
 }
 
 final _authContext = RemoteAuthContext(
@@ -639,6 +886,14 @@ String _validAuthMessage(
 Future<void> _flushEventQueue() async {
   await Future<void>.delayed(Duration.zero);
   await Future<void>.delayed(Duration.zero);
+}
+
+Future<void> _waitFor(bool Function() condition) async {
+  final deadline = DateTime.now().add(_ioTimeout);
+  while (!condition()) {
+    if (DateTime.now().isAfter(deadline)) fail('condition not met in time');
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+  }
 }
 
 class _RawWebSocketClient {

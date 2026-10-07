@@ -10,9 +10,9 @@ import '../media/media_kind.dart';
 import '../models/download_models.dart';
 import '../utils/dialogs.dart';
 import '../utils/global_key_utils.dart';
+import '../mixins/unsuppress_focus_mixin.dart';
 import 'download_status_icon.dart';
 
-/// Represents a node in the download tree
 class DownloadTreeNode {
   final String key;
   final String title;
@@ -37,13 +37,11 @@ class DownloadTreeNode {
   /// Check if this node has children
   bool get hasChildren => children.isNotEmpty;
 
-  /// Get the number of completed children
   int get completedChildrenCount {
     return children.where((child) => child.status == DownloadStatus.completed).length;
   }
 }
 
-/// Type of node in the download tree
 enum DownloadNodeType { show, season, episode, movie, album, track }
 
 /// Hierarchical tree view for downloads
@@ -79,28 +77,14 @@ class DownloadTreeView extends StatefulWidget {
   State<DownloadTreeView> createState() => _DownloadTreeViewState();
 }
 
-class _DownloadTreeViewState extends State<DownloadTreeView> {
+class _DownloadTreeViewState extends State<DownloadTreeView> with UnsuppressFocusFirstMixin<DownloadTreeView> {
   final Set<String> _expandedNodes = {};
-  final FocusNode _firstItemFocusNode = FocusNode(debugLabel: 'DownloadTreeView_firstItem');
 
   @override
-  void dispose() {
-    _firstItemFocusNode.dispose();
-    super.dispose();
-  }
+  String get firstItemFocusDebugLabel => 'DownloadTreeView_firstItem';
 
   @override
-  void didUpdateWidget(DownloadTreeView oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    // When suppressAutoFocus changes from true to false, focus the first item
-    if (oldWidget.suppressAutoFocus && !widget.suppressAutoFocus) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (mounted && _firstItemFocusNode.canRequestFocus) {
-          _firstItemFocusNode.requestFocus();
-        }
-      });
-    }
-  }
+  bool suppressAutoFocusOf(DownloadTreeView widget) => widget.suppressAutoFocus;
 
   @override
   Widget build(BuildContext context) {
@@ -121,13 +105,11 @@ class _DownloadTreeViewState extends State<DownloadTreeView> {
     );
   }
 
-  /// Build the download tree from flat download list
   List<DownloadTreeNode> _buildTree() {
     final Map<String, List<MapEntry<String, DownloadProgress>>> showGroups = {};
     final Map<String, List<MapEntry<String, DownloadProgress>>> albumGroups = {};
     final List<DownloadTreeNode> movies = [];
 
-    // Group downloads
     for (final entry in widget.downloads.entries) {
       final globalKey = entry.key;
       final download = entry.value;
@@ -136,17 +118,14 @@ class _DownloadTreeViewState extends State<DownloadTreeView> {
       if (meta == null) continue;
 
       if (meta.isEpisode) {
-        // Group episodes by show
         final showKey = meta.grandparentId ?? 'unknown';
         showGroups.putIfAbsent(showKey, () => []);
         showGroups[showKey]!.add(entry);
       } else if (meta.kind == MediaKind.track) {
-        // Group tracks by album (single level — no per-disc tier)
         final albumKey = meta.parentId ?? 'unknown';
         albumGroups.putIfAbsent(albumKey, () => []);
         albumGroups[albumKey]!.add(entry);
       } else if (meta.isMovie) {
-        // Movies go at top level
         movies.add(
           DownloadTreeNode(
             key: globalKey,
@@ -161,7 +140,6 @@ class _DownloadTreeViewState extends State<DownloadTreeView> {
       }
     }
 
-    // Build show nodes
     final List<DownloadTreeNode> shows = [];
     for (final showEntry in showGroups.entries) {
       final showKey = showEntry.key;
@@ -169,11 +147,9 @@ class _DownloadTreeViewState extends State<DownloadTreeView> {
 
       if (episodes.isEmpty) continue;
 
-      // Get show metadata from first episode
       final firstEpisode = widget.metadata[episodes.first.key];
-      final showTitle = firstEpisode?.grandparentTitle ?? 'Unknown Show';
+      final showTitle = firstEpisode?.grandparentTitle ?? t.downloads.unknownShow;
 
-      // Group episodes by season
       final Map<String, List<MapEntry<String, DownloadProgress>>> seasonGroups = {};
       for (final episode in episodes) {
         final meta = widget.metadata[episode.key];
@@ -184,7 +160,6 @@ class _DownloadTreeViewState extends State<DownloadTreeView> {
         seasonGroups[seasonKey]!.add(episode);
       }
 
-      // Build season nodes
       final List<DownloadTreeNode> seasons = [];
       for (final seasonEntry in seasonGroups.entries) {
         final seasonKey = seasonEntry.key;
@@ -192,16 +167,14 @@ class _DownloadTreeViewState extends State<DownloadTreeView> {
 
         if (seasonEpisodes.isEmpty) continue;
 
-        // Get season metadata from first episode
         final firstEpisode = widget.metadata[seasonEpisodes.first.key];
         final seasonNumber = firstEpisode?.parentIndex;
         final seasonTitle = firstEpisode?.parentTitle?.isNotEmpty == true
             ? firstEpisode!.parentTitle!
             : seasonNumber != null
             ? t.common.seasonNumber(number: seasonNumber)
-            : 'Unknown Season';
+            : t.downloads.unknownSeason;
 
-        // Build episode nodes
         final List<DownloadTreeNode> episodeNodes = [];
         for (final episodeEntry in seasonEpisodes) {
           final globalKey = episodeEntry.key;
@@ -228,18 +201,16 @@ class _DownloadTreeViewState extends State<DownloadTreeView> {
           );
         }
 
-        // Sort episodes by episode number only (not by status)
         episodeNodes.sort((a, b) {
           final aIndex = a.metadata?.index ?? 0;
           final bIndex = b.metadata?.index ?? 0;
           return aIndex.compareTo(bIndex);
         });
 
-        // Calculate aggregate season progress
         final seasonProgress = episodeNodes.isEmpty
             ? 0.0
             : episodeNodes.map((e) => e.progress).reduce((a, b) => a + b) / episodeNodes.length;
-        final seasonStatus = _determineAggregateStatus(episodeNodes.map((e) => e.status).toList());
+        final seasonStatus = determineDownloadAggregateStatus(episodeNodes.map((e) => e.status).toList());
 
         seasons.add(
           DownloadTreeNode(
@@ -255,18 +226,16 @@ class _DownloadTreeViewState extends State<DownloadTreeView> {
 
       seasons.removeWhere((s) => s.children.isEmpty);
 
-      // Sort seasons by season number
       seasons.sort((a, b) {
         final aSeasonNum = widget.metadata[a.children.first.key]?.parentIndex ?? 0;
         final bSeasonNum = widget.metadata[b.children.first.key]?.parentIndex ?? 0;
         return aSeasonNum.compareTo(bSeasonNum);
       });
 
-      // Calculate aggregate show progress
       final showProgress = seasons.isEmpty
           ? 0.0
           : seasons.map((s) => s.progress).reduce((a, b) => a + b) / seasons.length;
-      final showStatus = _determineAggregateStatus(seasons.map((s) => s.status).toList());
+      final showStatus = determineDownloadAggregateStatus(seasons.map((s) => s.status).toList());
 
       shows.add(
         DownloadTreeNode(
@@ -280,16 +249,14 @@ class _DownloadTreeViewState extends State<DownloadTreeView> {
       );
     }
 
-    // Build album nodes (album -> tracks)
     final List<DownloadTreeNode> albums = [];
     for (final albumEntry in albumGroups.entries) {
       final albumKey = albumEntry.key;
       final tracks = albumEntry.value;
       if (tracks.isEmpty) continue;
 
-      // Album/artist names from any track's parent fields
       final firstTrack = widget.metadata[tracks.first.key];
-      final albumTitle = firstTrack?.albumTitle ?? 'Unknown Album';
+      final albumTitle = firstTrack?.albumTitle ?? t.downloads.unknownAlbum;
       final artistTitle = firstTrack?.albumArtistTitle;
       final albumNodeTitle = artistTitle != null && artistTitle.isNotEmpty ? '$artistTitle - $albumTitle' : albumTitle;
 
@@ -314,7 +281,6 @@ class _DownloadTreeViewState extends State<DownloadTreeView> {
       }
       if (trackNodes.isEmpty) continue;
 
-      // Sort tracks by disc then track number
       trackNodes.sort((a, b) {
         final byDisc = (a.metadata?.discNumber ?? 1).compareTo(b.metadata?.discNumber ?? 1);
         if (byDisc != 0) return byDisc;
@@ -322,7 +288,7 @@ class _DownloadTreeViewState extends State<DownloadTreeView> {
       });
 
       final albumProgress = trackNodes.map((e) => e.progress).reduce((a, b) => a + b) / trackNodes.length;
-      final albumStatus = _determineAggregateStatus(trackNodes.map((e) => e.status).toList());
+      final albumStatus = determineDownloadAggregateStatus(trackNodes.map((e) => e.status).toList());
 
       albums.add(
         DownloadTreeNode(
@@ -336,49 +302,26 @@ class _DownloadTreeViewState extends State<DownloadTreeView> {
       );
     }
 
-    // Sort shows, albums, and movies by status and title
     _sortNodesByStatusAndTitle(shows);
     _sortNodesByStatusAndTitle(albums);
     _sortNodesByStatusAndTitle(movies);
 
-    // Combine movies, shows, and albums
     return [...movies, ...shows, ...albums];
   }
 
-  /// Determine aggregate status from child statuses
-  /// Priority: downloading > queued > paused > completed > failed
-  DownloadStatus _determineAggregateStatus(List<DownloadStatus> statuses) {
-    if (statuses.isEmpty) return DownloadStatus.queued;
-
-    if (statuses.any((s) => s == DownloadStatus.downloading)) {
-      return DownloadStatus.downloading;
-    }
-    if (statuses.any((s) => s == DownloadStatus.queued)) {
-      return DownloadStatus.queued;
-    }
-    if (statuses.any((s) => s == DownloadStatus.paused)) {
-      return DownloadStatus.paused;
-    }
-    if (statuses.any((s) => s == DownloadStatus.failed)) {
-      return DownloadStatus.failed;
-    }
-    return DownloadStatus.completed;
-  }
-
-  /// Compare statuses for sorting (downloading first, then queued, etc.)
   int _compareByStatus(DownloadStatus a, DownloadStatus b) {
     const statusOrder = {
       DownloadStatus.downloading: 0,
       DownloadStatus.queued: 1,
       DownloadStatus.paused: 2,
-      DownloadStatus.completed: 3,
-      DownloadStatus.failed: 4,
-      DownloadStatus.cancelled: 5,
+      DownloadStatus.partial: 3,
+      DownloadStatus.completed: 4,
+      DownloadStatus.failed: 5,
+      DownloadStatus.cancelled: 6,
     };
     return (statusOrder[a] ?? 99).compareTo(statusOrder[b] ?? 99);
   }
 
-  /// Sort nodes by status (downloading first) then by title
   void _sortNodesByStatusAndTitle(List<DownloadTreeNode> nodes) {
     nodes.sort((a, b) {
       final statusCompare = _compareByStatus(a.status, b.status);
@@ -403,7 +346,6 @@ class _DownloadTreeViewState extends State<DownloadTreeView> {
     return result;
   }
 
-  /// Toggle node expansion
   void _toggleExpansion(String key) {
     setState(() {
       if (_expandedNodes.contains(key)) {
@@ -414,7 +356,6 @@ class _DownloadTreeViewState extends State<DownloadTreeView> {
     });
   }
 
-  /// Build a tree item widget
   Widget _buildTreeItem(DownloadTreeNode node, int depth, {bool isFirst = false}) {
     return _DownloadTreeItem(
       node: node,
@@ -428,7 +369,7 @@ class _DownloadTreeViewState extends State<DownloadTreeView> {
       onDelete: widget.onDelete,
       onNavigateLeft: widget.onNavigateLeft,
       onBack: widget.onBack,
-      rowFocusNode: isFirst ? _firstItemFocusNode : null,
+      rowFocusNode: isFirst ? firstItemFocusNode : null,
       autofocus: isFirst && !widget.suppressAutoFocus,
       pauseAllChildren: _pauseAllChildren,
       resumeAllChildren: _resumeAllChildren,
@@ -447,7 +388,6 @@ class _DownloadTreeViewState extends State<DownloadTreeView> {
     }
   }
 
-  /// Resume all paused children of a container node
   void _resumeAllChildren(DownloadTreeNode node) {
     final keys = _leafKeys(node, where: (leaf) => leaf.status == DownloadStatus.paused);
     for (final key in keys) {
@@ -511,6 +451,40 @@ String? resolveDownloadContainerGlobalKey(DownloadTreeNode node, Map<String, Med
   }
 }
 
+/// Reduce child statuses to a container status, covering every
+/// [DownloadStatus] value explicitly.
+///
+/// Active states take precedence (downloading > queued > paused > failed);
+/// among purely terminal children, all-cancelled stays cancelled, all-completed
+/// stays completed, and any other mix — completed next to cancelled, or a
+/// child that is itself partial — is partial.
+@visibleForTesting
+DownloadStatus determineDownloadAggregateStatus(List<DownloadStatus> statuses) {
+  if (statuses.isEmpty) return DownloadStatus.queued;
+
+  if (statuses.any((s) => s == DownloadStatus.downloading)) {
+    return DownloadStatus.downloading;
+  }
+  if (statuses.any((s) => s == DownloadStatus.queued)) {
+    return DownloadStatus.queued;
+  }
+  if (statuses.any((s) => s == DownloadStatus.paused)) {
+    return DownloadStatus.paused;
+  }
+  if (statuses.any((s) => s == DownloadStatus.failed)) {
+    return DownloadStatus.failed;
+  }
+
+  // Only terminal outcomes remain: completed, cancelled, partial.
+  if (statuses.every((s) => s == DownloadStatus.cancelled)) {
+    return DownloadStatus.cancelled;
+  }
+  if (statuses.every((s) => s == DownloadStatus.completed)) {
+    return DownloadStatus.completed;
+  }
+  return DownloadStatus.partial;
+}
+
 String? _firstLeafKey(DownloadTreeNode node) {
   for (final child in node.children) {
     if (child.hasChildren) {
@@ -523,7 +497,6 @@ String? _firstLeafKey(DownloadTreeNode node) {
   return null;
 }
 
-/// Helper class to store a node with its depth in the flattened tree
 class _FlatNode {
   final DownloadTreeNode node;
   final int depth;
@@ -590,9 +563,7 @@ class _DownloadTreeItemState extends State<_DownloadTreeItem> {
     return widget.node.status;
   }
 
-  // Focus node for row content (only created if not provided externally)
   FocusNode? _ownedRowFocusNode;
-  // Focus nodes for action buttons (up to 3 buttons max)
   final List<FocusNode> _buttonFocusNodes = [];
 
   FocusNode get _rowFocusNode => widget.rowFocusNode ?? _ownedRowFocusNode!;
@@ -676,10 +647,8 @@ class _DownloadTreeItemState extends State<_DownloadTreeItem> {
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
             child: Row(
               children: [
-                // Row content
                 Expanded(child: _buildRowContent(theme, canExpand)),
 
-                // Action buttons
                 if (actions.isNotEmpty)
                   Row(
                     mainAxisSize: .min,
@@ -696,7 +665,6 @@ class _DownloadTreeItemState extends State<_DownloadTreeItem> {
   Widget _buildRowContent(ThemeData theme, bool canExpand) {
     return Row(
       children: [
-        // Expand/collapse icon
         if (canExpand)
           AppIcon(widget.isExpanded ? Symbols.expand_more_rounded : Symbols.chevron_right_rounded, fill: 1, size: 20)
         else
@@ -704,12 +672,10 @@ class _DownloadTreeItemState extends State<_DownloadTreeItem> {
 
         const SizedBox(width: 8),
 
-        // Status icon
         DownloadStatusIcon(status: _effectiveStatus, size: 20),
 
         const SizedBox(width: 12),
 
-        // Title and info
         Expanded(
           child: Column(
             crossAxisAlignment: .start,
@@ -779,7 +745,7 @@ class _DownloadTreeItemState extends State<_DownloadTreeItem> {
   String _getNodeSummary() {
     final total = widget.node.children.length;
     final completed = widget.node.completedChildrenCount;
-    return '$completed/$total completed';
+    return t.downloads.completedOfTotal(completed: completed, total: total);
   }
 
   /// The actions this row offers, in render order. Single source of truth:

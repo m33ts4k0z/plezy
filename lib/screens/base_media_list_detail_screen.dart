@@ -8,7 +8,6 @@ import '../providers/download_provider.dart';
 import '../providers/multi_server_provider.dart';
 import '../utils/provider_extensions.dart';
 import '../services/media_list_playback_launcher.dart';
-import '../services/jellyfin_sequential_launcher.dart';
 import '../widgets/loading_indicator_box.dart';
 import '../utils/app_logger.dart';
 import '../utils/error_message_utils.dart';
@@ -89,17 +88,16 @@ abstract class BaseMediaListDetailScreen<T extends StatefulWidget> extends State
   /// Load or reload the items (subclasses implement this)
   Future<void> loadItems();
 
-  /// Play all items in the list
   Future<void> playItems() => _playWithShuffle(false);
 
-  /// Shuffle play all items in the list
   Future<void> shufflePlayItems() => _playWithShuffle(true);
 
   /// Internal helper to play items with optional shuffle.
   ///
   /// Dispatches to the right launcher implementation based on the item's
   /// backend — Plex uses server-side `/playQueues`, Jellyfin builds an
-  /// in-memory queue via [JellyfinSequentialLauncher].
+  /// in-memory queue client-side. Both show the loading indicator while
+  /// their round trips are in flight.
   Future<void> _playWithShuffle(bool shuffle) async {
     if (items.isEmpty) {
       if (mounted) {
@@ -110,20 +108,28 @@ abstract class BaseMediaListDetailScreen<T extends StatefulWidget> extends State
 
     final item = mediaItem;
     final launcher = MediaListPlaybackLauncher.forItem(context, item);
-    await launcher.launchFromCollectionOrPlaylist(
-      item: item,
-      shuffle: shuffle,
-      showLoadingIndicator: launcher is JellyfinSequentialLauncher,
-    );
+    await launcher.launchFromCollectionOrPlaylist(item: item, shuffle: shuffle);
   }
 
   @override
   void updateItemInLists(String sourceGlobalKey, MediaItem updatedItem) {
     final index = items.indexWhere((item) => item.globalKey == sourceGlobalKey);
     if (index != -1) {
-      items[index] = updatedItem;
+      items[index] = _keepPlaylistEntry(items[index], updatedItem);
     }
   }
+
+  /// A refreshed row comes from the item's own metadata, which knows nothing
+  /// of the playlist it sits in. Carry the playlist entry id across so the
+  /// next remove or move still addresses this entry.
+  static MediaItem _keepPlaylistEntry(MediaItem previous, MediaItem updated) => switch ((previous, updated)) {
+    (PlexMediaItem(:final playlistItemId?), final PlexMediaItem refreshed) when refreshed.playlistItemId == null =>
+      refreshed.copyWith(playlistItemId: playlistItemId),
+    (JellyfinMediaItem(:final playlistItemId?), final JellyfinMediaItem refreshed)
+        when refreshed.playlistItemId == null =>
+      refreshed.copyWith(playlistItemId: playlistItemId),
+    _ => updated,
+  };
 
   @override
   void refresh() {

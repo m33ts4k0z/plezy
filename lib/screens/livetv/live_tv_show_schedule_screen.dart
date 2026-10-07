@@ -70,7 +70,6 @@ class _LiveTvShowScheduleScreenState extends State<LiveTvShowScheduleScreen>
     final toDt = DateTime.fromMillisecondsSinceEpoch(endsAt * 1000, isUtc: true);
     final programs = await genericClient.liveTv.fetchSchedule(from: fromDt, to: toDt);
 
-    // Filter for this show
     final filtered = programs.where((p) {
       if (p.grandparentTitle == widget.showTitle) return true;
       if (p.grandparentTitle == null && p.title == widget.showTitle) return true;
@@ -200,7 +199,7 @@ class _ScheduleListTile extends StatelessWidget {
 
     if (program.isCurrentlyAiring && end != null) {
       final minutesLeft = end.difference(now).inMinutes;
-      return '${minutesLeft}min left';
+      return t.discover.minutesLeft(minutes: minutesLeft);
     }
 
     final minutesUntil = start.difference(now).inMinutes;
@@ -208,7 +207,7 @@ class _ScheduleListTile extends StatelessWidget {
       // Just started
       return _formatAbsoluteTime(start, now, is24Hour: is24Hour);
     } else if (minutesUntil < 90) {
-      return 'Starting in ${minutesUntil}min';
+      return t.liveTv.startingInMinutes(minutes: minutesUntil);
     } else {
       return _formatAbsoluteTime(start, now, is24Hour: is24Hour);
     }
@@ -216,7 +215,10 @@ class _ScheduleListTile extends StatelessWidget {
 
   String _formatAbsoluteTime(DateTime start, DateTime now, {required bool is24Hour}) {
     final time = formatClockTime(start, is24Hour: is24Hour);
-    return '${formatRelativeDayLabel(start, now: now)} at $time';
+    return t.liveTv.dayAtTime(
+      day: formatRelativeDayLabel(start, now: now),
+      time: time,
+    );
   }
 
   @override

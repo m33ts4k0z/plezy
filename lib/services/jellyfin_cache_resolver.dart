@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:drift/drift.dart';
 
 import '../database/app_database.dart';
+import '../utils/app_logger.dart';
 
 typedef JellyfinItemCacheKey = ({String scopeId, String machineId, String userId, String itemId});
 typedef JellyfinCacheItem = ({ApiCacheData cacheRow, JellyfinItemCacheKey key});
@@ -69,6 +70,19 @@ class JellyfinCacheResolver {
     }
     if (requested.userId != null) {
       matches.sort((a, b) => a.key.scopeId == serverOrScopeId ? -1 : (b.key.scopeId == serverOrScopeId ? 1 : 0));
+    } else {
+      // Mirror the write-path guard in JellyfinApiCache.applyWatchState: a bare
+      // machine id may only resolve when every surviving row belongs to one
+      // user. Picking any ordering would serve another user's cached state and
+      // token-stamped URLs.
+      final userIds = {for (final match in matches) match.key.userId};
+      if (userIds.length > 1) {
+        appLogger.w(
+          'Refusing ambiguous bare-scope MediaBrowser cache resolution',
+          error: {'serverOrScopeId': serverOrScopeId, 'itemId': itemId, 'userCount': userIds.length},
+        );
+        return const [];
+      }
     }
     return matches;
   }
@@ -131,11 +145,18 @@ class JellyfinCacheResolver {
                 (t) => OrderingTerm.asc(t.connectionId),
               ]))
             .get();
+    if (bindings.isEmpty) return null;
+    // One select for every bound connection; bindings keep their precedence
+    // order above, so the first matching binding still wins.
+    final connections = {
+      for (final connection in await (database.select(
+        database.connections,
+      )..where((t) => t.id.isIn(bindings.map((binding) => binding.connectionId)) & _mediaBrowserKind(t.kind))).get())
+        connection.id: connection,
+    };
     for (final binding in bindings) {
       if (binding.userIdentifier.isEmpty) continue;
-      final connection = await (database.select(
-        database.connections,
-      )..where((t) => t.id.equals(binding.connectionId) & _mediaBrowserKind(t.kind))).getSingleOrNull();
+      final connection = connections[binding.connectionId];
       if (connection == null) continue;
 
       final connectionScope = _splitScope(connection.id);
@@ -169,16 +190,12 @@ class JellyfinCacheResolver {
     final expectedUserId = userId ?? scope.userId;
 
     if (expectedUserId != null) {
-      final compoundId = '${scope.machineId}/$expectedUserId';
-      final compound = await (database.select(
-        database.connections,
-      )..where((t) => t.id.equals(compoundId) & _mediaBrowserKind(t.kind))).getSingleOrNull();
-      if (compound != null && await _matchesProfileBinding(compound.id, expectedUserId)) return compound;
-
-      final legacy = await (database.select(
-        database.connections,
-      )..where((t) => t.id.equals(scope.machineId) & _mediaBrowserKind(t.kind))).getSingleOrNull();
-      if (legacy != null && await _matchesProfileBinding(legacy.id, expectedUserId)) return legacy;
+      // Compound `machineId/userId` rows first, then a legacy bare-machine row
+      // whose profile binding names the same user.
+      for (final id in ['${scope.machineId}/$expectedUserId', scope.machineId]) {
+        final connection = await _mediaBrowserConnection(id);
+        if (connection != null && await _matchesProfileBinding(connection.id, expectedUserId)) return connection;
+      }
       return null;
     }
 
@@ -197,6 +214,10 @@ class JellyfinCacheResolver {
           ..limit(1))
         .getSingleOrNull();
   }
+
+  Future<ConnectionRow?> _mediaBrowserConnection(String id) => (database.select(
+    database.connections,
+  )..where((t) => t.id.equals(id) & _mediaBrowserKind(t.kind))).getSingleOrNull();
 
   Future<ConnectionRow?> _findPlexConnectionForServer(String serverId) async {
     final accounts = await (database.select(database.connections)..where((t) => t.kind.equals('plex'))).get();

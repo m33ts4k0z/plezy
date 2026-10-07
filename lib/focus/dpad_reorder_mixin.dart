@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
+import '../utils/scroll_utils.dart';
 import '../widgets/overlay_sheet.dart';
 import 'dpad_navigator.dart';
 import 'key_event_utils.dart';
@@ -24,10 +25,9 @@ import 'key_event_utils.dart';
 /// move mode was entered. BACK outside move mode dismisses the hosting sheet.
 /// D-pad keys are consumed at the list boundaries so focus cannot escape.
 mixin DpadReorderListMixin<E, W extends StatefulWidget> on State<W> {
-  /// Row height assumed by [ensureFocusedVisible] (Material `ListTile` with a
-  /// subtitle) and the list's top padding.
-  static const double _itemHeight = 72.0;
-  static const double _listTopPadding = 8.0;
+  /// Fraction of the viewport kept above the focused row when it is scrolled
+  /// into view.
+  static const double _revealAlignment = 0.25;
 
   /// Row the virtual cursor sits on.
   int focusedIndex = 0;
@@ -66,23 +66,7 @@ mixin DpadReorderListMixin<E, W extends StatefulWidget> on State<W> {
   void ensureFocusedVisible() {
     final scrollController = reorderScrollController;
     if (scrollController == null || !scrollController.hasClients) return;
-
-    final double targetTop = _listTopPadding + (focusedIndex * _itemHeight);
-    final double targetBottom = targetTop + _itemHeight;
-
-    final double viewportTop = scrollController.offset;
-    final double viewportHeight = scrollController.position.viewportDimension;
-    final double viewportBottom = viewportTop + viewportHeight;
-
-    // Already fully visible — skip
-    if (targetTop >= viewportTop && targetBottom <= viewportBottom) return;
-
-    final double destination = (targetTop - viewportHeight * 0.25).clamp(
-      0.0,
-      scrollController.position.maxScrollExtent,
-    );
-
-    scrollController.animateTo(destination, duration: const Duration(milliseconds: 150), curve: Curves.easeOut);
+    scrollIndexIntoView(scrollController, focusedIndex, alignment: _revealAlignment);
   }
 
   KeyEventResult handleReorderKeyEvent(FocusNode _, KeyEvent event) {
@@ -104,7 +88,6 @@ mixin DpadReorderListMixin<E, W extends StatefulWidget> on State<W> {
 
     final backResult = handleBackKeyAction(event, () {
       if (movingIndex != null) {
-        // Cancel move - restore original position
         setState(() {
           final originalOrder = _originalOrder;
           if (originalOrder != null) {
@@ -123,6 +106,11 @@ mixin DpadReorderListMixin<E, W extends StatefulWidget> on State<W> {
       return backResult;
     }
 
+    // SELECT is one-shot: holding OK must not repeat a destructive column
+    // action (e.g. removing a favorite) or flip move mode on and off.
+    final selectResult = handleOneShotSelect(event, _activateSelect);
+    if (selectResult != KeyEventResult.ignored) return selectResult;
+
     if (!event.isActionable) return KeyEventResult.ignored;
 
     final int? moving = movingIndex;
@@ -134,16 +122,6 @@ mixin DpadReorderListMixin<E, W extends StatefulWidget> on State<W> {
       }
       if (key.isDownKey && moving < reorderItems.length - 1) {
         _swapMovingItem(moving, moving + 1);
-        return KeyEventResult.handled;
-      }
-      if (key.isSelectKey) {
-        // Confirm move - apply the reorder
-        onReorderMoveConfirmed();
-        setState(() {
-          movingIndex = null;
-          _originalIndex = null;
-          _originalOrder = null;
-        });
         return KeyEventResult.handled;
       }
     } else {
@@ -172,19 +150,6 @@ mixin DpadReorderListMixin<E, W extends StatefulWidget> on State<W> {
         setState(() => focusedColumn++);
         return KeyEventResult.handled;
       }
-      if (key.isSelectKey) {
-        if (focusedColumn == 0) {
-          // Enter move mode
-          setState(() {
-            movingIndex = focusedIndex;
-            _originalIndex = focusedIndex;
-            _originalOrder = List<E>.from(reorderItems);
-          });
-        } else {
-          onReorderColumnActivated(focusedColumn, focusedIndex);
-        }
-        return KeyEventResult.handled;
-      }
     }
 
     // Block d-pad keys at boundaries so focus doesn't escape the dialog
@@ -193,6 +158,30 @@ mixin DpadReorderListMixin<E, W extends StatefulWidget> on State<W> {
     }
 
     return KeyEventResult.ignored;
+  }
+
+  void _activateSelect() {
+    if (movingIndex != null) {
+      // Confirm move - apply the reorder
+      onReorderMoveConfirmed();
+      setState(() {
+        movingIndex = null;
+        _originalIndex = null;
+        _originalOrder = null;
+      });
+      return;
+    }
+    if (focusedIndex >= reorderItems.length) return;
+    if (focusedColumn == 0) {
+      // Enter move mode
+      setState(() {
+        movingIndex = focusedIndex;
+        _originalIndex = focusedIndex;
+        _originalOrder = List<E>.from(reorderItems);
+      });
+    } else {
+      onReorderColumnActivated(focusedColumn, focusedIndex);
+    }
   }
 
   void _swapMovingItem(int from, int to) {

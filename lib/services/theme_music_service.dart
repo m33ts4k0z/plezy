@@ -66,7 +66,7 @@ class ThemeMusicService {
       return;
     }
 
-    final url = themePath.toPlexUrl(client.config.baseUrl, client.config.token);
+    final url = '${client.config.baseUrl}$themePath'.withPlexToken(client.config.token);
     if (_activeOwnerId == ownerId && _activeUrl == url && _player.state == PlayerState.playing) {
       if (_activeVolume != volume) {
         await _player.setVolume(volume);

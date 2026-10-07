@@ -21,6 +21,29 @@ PlaybackFailureAction resolve({
 }
 
 void main() {
+  group('HTTP 403', () {
+    test('on-demand playback treats the refusal as terminal', () {
+      // The server refused this account or connection (#2510); no retry,
+      // quality change, or backend switch gets past it.
+      expect(resolve(statuses: {403}), PlaybackFailureAction.playbackNotAllowedDialog);
+    });
+
+    test('outranks a 404 or 500 latched on the same open', () {
+      // Until the server lets this account stream, what it says about the file
+      // or the session is moot.
+      expect(resolve(statuses: {403, 404}), PlaybackFailureAction.playbackNotAllowedDialog);
+      expect(resolve(statuses: {403, 500}), PlaybackFailureAction.playbackNotAllowedDialog);
+      expect(
+        resolve(cause: PlayerError.serverHttp503, statuses: {403}),
+        PlaybackFailureAction.playbackNotAllowedDialog,
+      );
+    });
+
+    test('live TV keeps its fallback ladder', () {
+      expect(resolve(statuses: {403}, isLive: true), PlaybackFailureAction.liveRetry);
+    });
+  });
+
   group('HTTP 404', () {
     test('on-demand playback treats it as terminal', () {
       // The file behind the item is unreadable server-side (#1750); no retry,
@@ -59,6 +82,41 @@ void main() {
     });
   });
 
+  group('HTTP 503', () {
+    test('the open-phase watchdog tag is terminal for on-demand playback', () {
+      // The tag only exists once the watchdog has already waited out the
+      // reconnect loop's chances (#1830) — no further retry recovers it.
+      expect(resolve(cause: PlayerError.serverHttp503), PlaybackFailureAction.serverBusyDialog);
+    });
+
+    test('live TV keeps its fallback ladder', () {
+      // The watchdog never arms for live opens, but a defensively passed tag
+      // must still ride the ladder rather than kill a recoverable stream.
+      expect(resolve(cause: PlayerError.serverHttp503, isLive: true), PlaybackFailureAction.liveRetry);
+    });
+
+    test('a latched fatal status outranks the watchdog tag', () {
+      // A 500/404 seen on the same open is the more specific diagnosis.
+      expect(resolve(cause: PlayerError.serverHttp503, statuses: {500}), PlaybackFailureAction.serverLimitDialog);
+      expect(resolve(cause: PlayerError.serverHttp503, statuses: {404}), PlaybackFailureAction.mediaUnreadableDialog);
+    });
+  });
+
+  group('audio output failure', () {
+    test('is terminal even where a live retry or latched status would apply', () {
+      // The device stopped taking audio (#2255 Fire TV): re-opening the stream
+      // on the live ladder or diagnosing a latched status would only run the
+      // same dead output again.
+      expect(resolve(cause: PlayerError.audioOutputFailed), PlaybackFailureAction.fatal);
+      expect(resolve(cause: PlayerError.audioOutputFailed, isLive: true), PlaybackFailureAction.fatal);
+      expect(
+        resolve(cause: PlayerError.audioOutputFailed, isLive: true, liveRetrying: true),
+        PlaybackFailureAction.fatal,
+      );
+      expect(resolve(cause: PlayerError.audioOutputFailed, statuses: {404}), PlaybackFailureAction.fatal);
+    });
+  });
+
   group('live fallback ladder', () {
     test('climbs every rung below the bound', () {
       for (var level = 0; level < maxLiveFallbackLevel; level++) {
@@ -82,6 +140,13 @@ void main() {
     test('an exhausted ladder that never failed falls through to the raw error', () {
       expect(resolve(isLive: true, liveFallbackLevel: maxLiveFallbackLevel), PlaybackFailureAction.fatal);
     });
+  });
+
+  test('a stream mpv gave up on at open is a failed open, not a device fault', () {
+    // No status and no dead output: on-demand playback fails; live TV rides
+    // its ladder, since a different stream may decode where this one did not.
+    expect(resolve(cause: PlayerError.streamInitFailed), PlaybackFailureAction.fatal);
+    expect(resolve(cause: PlayerError.streamInitFailed, isLive: true), PlaybackFailureAction.liveRetry);
   });
 
   test('an error with no server status is fatal for on-demand playback', () {

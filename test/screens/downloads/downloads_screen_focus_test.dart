@@ -247,8 +247,7 @@ void main() {
 
     await _pumpScreen(tester, db, downloadProvider, multiServerProvider, screenKey: screenKey);
     screenKey.currentState!.tabController.index = 3;
-    await tester.pump();
-    await tester.pump(const Duration(milliseconds: 300));
+    await tester.pumpAndSettle();
 
     expect(find.text('Downloaded Album'), findsOneWidget);
     final headerImages = tester
@@ -335,8 +334,6 @@ Future<void> _pumpScreen(
           theme: monoTheme(dark: true).copyWith(platform: TargetPlatform.macOS),
           home: MainScreenFocusScope(
             focusSidebar: onSidebar ?? () {},
-            focusContent: () {},
-            isSidebarFocused: false,
             sideNavigationWidth: 0,
             child: DownloadsScreen(key: screenKey),
           ),

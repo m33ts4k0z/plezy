@@ -7,21 +7,22 @@ import '../focus/focusable_action_bar.dart';
 import '../i18n/strings.g.dart';
 import '../media/media_item.dart';
 import '../media/media_kind.dart';
+import '../media/media_playlist.dart';
 import '../media/media_server_client.dart';
 import '../database/app_database.dart';
 import '../providers/download_provider.dart';
 import '../providers/multi_server_provider.dart';
+import '../services/playlist_items_loader.dart';
 import '../services/settings_service.dart';
 import '../services/sync_rule_executor.dart';
 import '../widgets/background_download_warning_banner.dart';
-import '../widgets/dialog_action_button.dart';
-import '../widgets/focusable_list_tile.dart';
 import 'app_logger.dart';
 import 'content_utils.dart';
 import 'dialogs.dart';
 import 'download_version_utils.dart';
 import 'platform_detector.dart';
 import 'snackbar_helper.dart';
+import '../utils/error_message_utils.dart';
 
 @visibleForTesting
 String? validateEpisodeCountInput(String text, {required bool allowZero}) {
@@ -212,6 +213,40 @@ Future<DownloadResult?> showDownloadOptionsAndQueue(
   );
 }
 
+/// Run [showDownloadOptionsAndQueue] and surface the outcome: a success
+/// snackbar for a queued download, dedicated copy for cellular-blocked
+/// downloads, and a generic error snackbar otherwise. The dialog → snackbar
+/// shape shared by the detail screen buttons and the context menu.
+Future<void> queueDownloadWithFeedback(
+  BuildContext context, {
+  required MediaItem metadata,
+  required MediaServerClient client,
+  required DownloadProvider downloadProvider,
+  Future<void> Function()? onDelete,
+}) async {
+  try {
+    final result = await showDownloadOptionsAndQueue(
+      context,
+      metadata: metadata,
+      client: client,
+      downloadProvider: downloadProvider,
+      onDelete: onDelete,
+    );
+    if (result == null || !context.mounted) return;
+
+    showSuccessSnackBar(context, result.toSnackBarMessage());
+  } on CellularDownloadBlockedException {
+    if (context.mounted) {
+      showErrorSnackBar(context, t.settings.cellularDownloadBlocked);
+    }
+  } catch (e) {
+    appLogger.e('Failed to queue download', error: e);
+    if (context.mounted) {
+      showErrorSnackBar(context, t.messages.errorLoading(error: localizedErrorReason(e)));
+    }
+  }
+}
+
 /// Shows download options dialog for a collection or playlist, then queues
 /// the download. Offers both one-time download and "Keep Synced" (creates or
 /// updates a sync rule for the target).
@@ -252,7 +287,7 @@ Future<DownloadResult?> showListDownloadOptionsAndQueue(
   if (syncChoice == _SyncChoice.keepSynced) {
     final ruleKey = downloadProvider.syncRuleKeyFor(ServerId(serverId), rootMetadata.id);
     if (downloadProvider.hasSyncRule(ruleKey)) {
-      await downloadProvider.updateSyncRuleFilter(ruleKey, filterString);
+      await downloadProvider.updateSyncRuleOptions(ruleKey, downloadFilter: filterString);
       syncRuleUpdated = true;
     } else {
       await downloadProvider.createSyncRule(
@@ -278,6 +313,72 @@ Future<DownloadResult?> showListDownloadOptionsAndQueue(
     isListRule: true,
   );
 }
+
+/// Fetch a list's items with [fetchItems], then run
+/// [showListDownloadOptionsAndQueue] and surface the outcome: a success
+/// snackbar for a queued download, dedicated copy for cellular-blocked
+/// downloads, and a generic error snackbar otherwise. The fetch → dialog →
+/// snackbar shape shared by the detail screens and the context menu.
+Future<void> fetchAndQueueListDownload(
+  BuildContext context, {
+  required MediaServerClient client,
+  required DownloadProvider downloadProvider,
+  required Future<List<MediaItem>> Function() fetchItems,
+  required MediaItem rootMetadata,
+  required String targetType,
+}) async {
+  try {
+    final items = await fetchItems();
+    if (!context.mounted) return;
+
+    final result = await showListDownloadOptionsAndQueue(
+      context,
+      rootMetadata: rootMetadata,
+      targetType: targetType,
+      items: items,
+      client: client,
+      downloadProvider: downloadProvider,
+    );
+    if (result == null || !context.mounted) return;
+
+    showSuccessSnackBar(context, result.toSnackBarMessage());
+  } on CellularDownloadBlockedException {
+    if (context.mounted) {
+      showErrorSnackBar(context, t.settings.cellularDownloadBlocked);
+    }
+  } catch (e) {
+    appLogger.e('Failed to queue $targetType download', error: e);
+    if (context.mounted) {
+      showErrorSnackBar(context, t.messages.errorLoading(error: localizedErrorReason(e)));
+    }
+  }
+}
+
+/// Download [playlist]: page through its items via the backend-neutral
+/// interface (so Jellyfin playlists download too), synthesise the [MediaItem]
+/// view the download pipeline expects, and run [fetchAndQueueListDownload].
+/// Shared by the playlist detail screen and the context menu.
+Future<void> downloadPlaylist(
+  BuildContext context, {
+  required MediaServerClient client,
+  required DownloadProvider downloadProvider,
+  required MediaPlaylist playlist,
+}) => fetchAndQueueListDownload(
+  context,
+  client: client,
+  downloadProvider: downloadProvider,
+  fetchItems: () => fetchAllPlaylistItems(client, playlist.id),
+  rootMetadata: MediaItem(
+    id: playlist.id,
+    backend: playlist.backend,
+    kind: MediaKind.playlist,
+    title: playlist.title,
+    thumbPath: playlist.thumbPath,
+    serverId: playlist.serverId ?? client.serverId,
+    serverName: playlist.serverName,
+  ),
+  targetType: ContentTypes.playlist,
+);
 
 /// The all/unwatched option rows, shared by the pickers that differ only in
 /// how they spell those two values.
@@ -345,7 +446,7 @@ Future<bool> editSyncRuleCount(
     return false;
   }
 
-  await downloadProvider.updateSyncRuleCount(globalKey, count);
+  await downloadProvider.updateSyncRuleOptions(globalKey, episodeCount: count);
   return true;
 }
 
@@ -364,11 +465,10 @@ Future<bool> editSyncRuleFilter(
   );
   if (selected == null || selected == currentFilter || !context.mounted) return false;
 
-  await downloadProvider.updateSyncRuleFilter(globalKey, selected);
+  await downloadProvider.updateSyncRuleOptions(globalKey, downloadFilter: selected);
   return true;
 }
 
-/// Shows a confirmation dialog to remove a sync rule.
 Future<SyncRuleRemovalResult?> confirmAndRemoveSyncRule(
   BuildContext context, {
   required DownloadProvider downloadProvider,
@@ -380,7 +480,15 @@ Future<SyncRuleRemovalResult?> confirmAndRemoveSyncRule(
 
   final bool deleteDownloads;
   if (rule.isListRule) {
-    final choice = await _showListSyncRuleRemovalDialog(context, displayTitle);
+    final choice = await showConfirmWithSwitchDialog(
+      context,
+      title: t.downloads.removeSyncRule,
+      message: t.downloads.removeListSyncRuleConfirm(title: displayTitle),
+      confirmText: t.downloads.removeSyncRule,
+      switchTitle: t.downloads.deleteSyncRuleDownloads,
+      switchSubtitle: t.downloads.deleteSyncRuleDownloadsDescription,
+      switchKey: const ValueKey('delete_sync_rule_downloads'),
+    );
     if (choice == null || !context.mounted) return null;
     deleteDownloads = choice;
   } else {
@@ -411,58 +519,10 @@ Future<SyncRuleRemovalResult?> confirmAndRemoveSyncRule(
   } catch (error, stackTrace) {
     appLogger.e('Failed to remove sync rule', error: error, stackTrace: stackTrace);
     if (context.mounted) {
-      showErrorSnackBar(context, t.messages.errorLoading(error: error.toString()));
+      showErrorSnackBar(context, t.messages.errorLoading(error: localizedErrorReason(error)));
     }
     return null;
   }
-}
-
-Future<bool?> _showListSyncRuleRemovalDialog(BuildContext context, String displayTitle) {
-  var deleteDownloads = false;
-  return showScopedDialog<bool>(
-    context: context,
-    builder: (dialogContext) {
-      return StatefulBuilder(
-        builder: (context, setState) {
-          final colorScheme = Theme.of(context).colorScheme;
-          return AlertDialog(
-            title: Text(t.downloads.removeSyncRule),
-            content: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Text(t.downloads.removeListSyncRuleConfirm(title: displayTitle)),
-                const SizedBox(height: 12),
-                FocusableSwitchListTile(
-                  key: const ValueKey('delete_sync_rule_downloads'),
-                  value: deleteDownloads,
-                  onChanged: (value) => setState(() => deleteDownloads = value),
-                  title: Text(t.downloads.deleteSyncRuleDownloads),
-                  subtitle: Text(t.downloads.deleteSyncRuleDownloadsDescription),
-                  contentPadding: EdgeInsets.zero,
-                ),
-              ],
-            ),
-            actions: [
-              DialogActionButton(
-                autofocus: true,
-                onPressed: () => Navigator.pop(dialogContext),
-                label: t.common.cancel,
-              ),
-              DialogActionButton(
-                onPressed: () => Navigator.pop(dialogContext, deleteDownloads),
-                label: t.downloads.removeSyncRule,
-                isPrimary: true,
-                style: deleteDownloads
-                    ? FilledButton.styleFrom(backgroundColor: colorScheme.error, foregroundColor: colorScheme.onError)
-                    : null,
-              ),
-            ],
-          );
-        },
-      );
-    },
-  );
 }
 
 /// Whether this rule targets a collection or playlist (as opposed to a
@@ -564,4 +624,39 @@ List<FocusableAction> buildSyncRuleActions(
         ),
       ),
   ];
+}
+
+/// Confirm-and-delete flow for a playlist: confirmation dialog (titled by the
+/// caller — the detail screen and the context menu use different strings),
+/// [MediaServerClient.deletePlaylist], then success/error snackbars. Runs
+/// [onDeleted] only after a confirmed successful delete; the detail screen
+/// pops itself, the context menu triggers a list refresh.
+Future<void> deletePlaylistWithConfirm(
+  BuildContext context, {
+  required MediaServerClient client,
+  required MediaPlaylist playlist,
+  required String confirmTitle,
+  required VoidCallback onDeleted,
+}) async {
+  final confirmed = await showDeleteConfirmation(
+    context,
+    title: confirmTitle,
+    message: t.playlists.deleteMessage(name: playlist.title),
+  );
+  if (!confirmed || !context.mounted) return;
+
+  bool success = false;
+  try {
+    success = await client.deletePlaylist(playlist);
+  } catch (e) {
+    appLogger.e('Failed to delete playlist', error: e);
+  }
+
+  if (!context.mounted) return;
+  if (success) {
+    showSuccessSnackBar(context, t.playlists.deleted);
+    onDeleted();
+  } else {
+    showErrorSnackBar(context, t.playlists.errorDeleting);
+  }
 }

@@ -46,6 +46,12 @@ class VideoFilterManager {
 
   final Player player;
 
+  /// Whether [Player.setVideoZoom] scales the native video layer itself, so
+  /// the mpv `video-zoom` property must stay 0. On iOS/tvOS the avfoundation
+  /// VO re-renders zoomed frames through Core Image, which destroys HDR and
+  /// Dolby Vision passthrough — zoom must stay out of mpv's pipeline there.
+  final bool nativeVideoZoom;
+
   /// BoxFit mode state: 0=contain (letterbox), 1=cover (fill screen), 2=fill (stretch)
   int _boxFitMode;
 
@@ -58,7 +64,7 @@ class VideoFilterManager {
   /// Store whether ambient lighting was active before entering PiP
   bool? _prePipAmbientLighting;
 
-  /// Ambient lighting service reference - when active, video-aspect-override is managed by ambient lighting
+  /// Ambient lighting service reference, disabled for PiP and restored after it.
   AmbientLightingService? ambientLightingService;
 
   /// Custom video zoom layered on top of the selected fit mode.
@@ -85,6 +91,7 @@ class VideoFilterManager {
 
   VideoFilterManager({
     required this.player,
+    this.nativeVideoZoom = false,
     int initialBoxFitMode = 0,
     Size? initialPlayerSize,
     this.onBoxFitModeChanged,
@@ -130,6 +137,16 @@ class VideoFilterManager {
   void cycleBoxFitMode() {
     _boxFitMode = (_boxFitMode + 1) % 3;
     onBoxFitModeChanged?.call(_boxFitMode);
+    updateVideoFilter();
+  }
+
+  /// Apply an externally resolved BoxFit mode (scoped-preference re-resolution
+  /// on an in-place item change). Does not fire [onBoxFitModeChanged]: the
+  /// value came from the store, so echoing it back would be redundant.
+  void setBoxFitMode(int mode) {
+    final next = mode.clamp(0, 2);
+    if (_boxFitMode == next) return;
+    _boxFitMode = next;
     updateVideoFilter();
   }
 
@@ -199,7 +216,8 @@ class VideoFilterManager {
   /// Writes are diffed against the last applied values and serialized: while a
   /// run is in flight, further calls coalesce into one trailing re-run instead
   /// of interleaving stale writes (pinch zoom calls this per gesture tick).
-  /// When ambient lighting is active, video-aspect-override is managed by ambient lighting.
+  /// Owns `video-aspect-override` (the stretch of fill mode); ambient lighting
+  /// fills through `keepaspect` instead and never writes it.
   Future<void> updateVideoFilter() {
     final running = _updateLoop;
     if (running != null) {
@@ -227,7 +245,6 @@ class VideoFilterManager {
       final boxFitMode = _boxFitMode;
       final zoomScale = _zoomScale;
       final playerSize = _playerSize;
-      final ambientActive = ambientLightingService?.isEnabled == true;
       final coverMode = boxFitMode == 1;
 
       // ExoPlayer handles scaling via AspectRatioFrameLayout (no-op on mpv
@@ -246,7 +263,7 @@ class VideoFilterManager {
 
       // Compute final target values up-front: each mpv write takes effect
       // immediately, so transient intermediate values would flash on screen.
-      String? aspectOverride = ambientActive ? null : 'no';
+      var aspectOverride = 'no';
       if (boxFitMode == 2) {
         // Fill/stretch mode - override aspect ratio to match player (stretches video)
         if (playerSize != null && playerSize.width > 0 && playerSize.height > 0) {
@@ -258,17 +275,10 @@ class VideoFilterManager {
         }
       }
 
-      if (aspectOverride != null) {
-        await _applyProperty('video-aspect-override', aspectOverride);
-      }
-      if (ambientActive) {
-        // Ambient lighting writes video-aspect-override out-of-band, so any
-        // cached value is unreliable; forget it so the next run rewrites it.
-        _appliedProps.remove('video-aspect-override');
-      }
+      await _applyProperty('video-aspect-override', aspectOverride);
       await _applyProperty('sub-ass-force-margins', coverMode || zoomScale > 1.0001 ? 'yes' : 'no');
       await _applyProperty('panscan', coverMode ? '1.0' : '0');
-      await _applyProperty('video-zoom', videoZoomPropertyForScale(zoomScale).toString());
+      await _applyProperty('video-zoom', nativeVideoZoom ? '0.0' : videoZoomPropertyForScale(zoomScale).toString());
     } catch (e) {
       appLogger.w('Failed to update video filter', error: e);
     }

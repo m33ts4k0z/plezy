@@ -5,28 +5,30 @@ import 'package:flutter/material.dart'
     show BuildContext, ListenableBuilder, MouseRegion, StatelessWidget, SystemMouseCursors, Widget;
 
 /// Reasons that keep the video-player chrome visible and suppress auto-hide.
-enum PlayerChromeHold { pip, contentStrip, promptInteraction, scrub }
-
-/// Focus target to request after chrome has rebuilt visible controls.
-enum PlayerChromeFocusTarget { playPause, timeline }
+enum PlayerChromeHold { pip, contentStrip, promptInteraction, scrub, pointerPress }
 
 /// Owns video-player chrome visibility and auto-hide policy for one player route.
 class PlayerChromeController extends ChangeNotifier implements ValueListenable<bool> {
   PlayerChromeController({bool initiallyVisible = true})
     : _controlsVisible = initiallyVisible,
-      _controlsPresented = initiallyVisible;
+      _controlsPresented = initiallyVisible,
+      _controlsOpaque = initiallyVisible;
 
   bool _controlsVisible;
   bool _controlsPresented;
+  bool _controlsOpaque;
   bool _contentStripVisible = false;
   bool _playing = false;
   bool _hasFirstFrame = true;
   Duration _hideDelay = const Duration(seconds: 3);
+  bool _directionalNavigation = false;
   Timer? _hideTimer;
-  PlayerChromeFocusTarget? _pendingFocusTarget;
+  bool _pendingPlayPauseFocus = false;
   final Set<PlayerChromeHold> _holds = <PlayerChromeHold>{};
   final Stopwatch _pointerActivityStopwatch = Stopwatch()..start();
   int _lastPointerActivityMs = -1000;
+  final Set<int> _pressedPointers = <int>{};
+  bool _pointerLeftWhilePressed = false;
 
   @override
   bool get value => _controlsVisible;
@@ -37,9 +39,13 @@ class PlayerChromeController extends ChangeNotifier implements ValueListenable<b
   bool get controlsPresented => _controlsPresented;
   bool get contentStripVisible => _contentStripVisible;
   bool isHeld(PlayerChromeHold hold) => _holds.contains(hold);
-  PlayerChromeFocusTarget? get pendingFocusTarget => _pendingFocusTarget;
+  bool get pendingPlayPauseFocus => _pendingPlayPauseFocus;
 
-  void configure({Duration? hideDelay, bool? hasFirstFrame}) {
+  /// [directionalNavigation] marks a D-pad / keyboard-driven viewer: the
+  /// paused chrome then stays up until dismissed, because the remote has no
+  /// "tap to bring it back" and a viewer who paused to read the OSD would
+  /// otherwise lose it mid-read.
+  void configure({Duration? hideDelay, bool? hasFirstFrame, bool directionalNavigation = false}) {
     var restartTimer = false;
     if (hideDelay != null && hideDelay != _hideDelay) {
       _hideDelay = hideDelay;
@@ -47,6 +53,10 @@ class PlayerChromeController extends ChangeNotifier implements ValueListenable<b
     }
     if (hasFirstFrame != null && hasFirstFrame != _hasFirstFrame) {
       _hasFirstFrame = hasFirstFrame;
+      restartTimer = true;
+    }
+    if (directionalNavigation != _directionalNavigation) {
+      _directionalNavigation = directionalNavigation;
       restartTimer = true;
     }
     if (restartTimer) _startAutoHideForCurrentPlaybackState();
@@ -83,11 +93,11 @@ class PlayerChromeController extends ChangeNotifier implements ValueListenable<b
     }
   }
 
-  void show({bool restartAutoHide = true, PlayerChromeFocusTarget? focusTarget}) {
+  void show({bool restartAutoHide = true, bool focusPlayPause = false}) {
     _controlsPresented = true;
     var shouldNotify = false;
-    if (focusTarget != null) {
-      _pendingFocusTarget = focusTarget;
+    if (focusPlayPause) {
+      _pendingPlayPauseFocus = true;
       shouldNotify = true;
     }
     if (!_controlsVisible) {
@@ -98,10 +108,11 @@ class PlayerChromeController extends ChangeNotifier implements ValueListenable<b
     if (restartAutoHide) _startAutoHideForCurrentPlaybackState();
   }
 
-  PlayerChromeFocusTarget? takeFocusTarget() {
-    final target = _pendingFocusTarget;
-    _pendingFocusTarget = null;
-    return target;
+  /// Returns whether a play/pause focus request was queued by [show], and clears it.
+  bool takePlayPauseFocus() {
+    final requested = _pendingPlayPauseFocus;
+    _pendingPlayPauseFocus = false;
+    return requested;
   }
 
   bool hide({bool ignoreHolds = false}) {
@@ -109,12 +120,27 @@ class PlayerChromeController extends ChangeNotifier implements ValueListenable<b
     if (!ignoreHolds && _holds.isNotEmpty) return false;
     cancelAutoHide();
     _controlsVisible = false;
+    // A chrome that never reached full opacity has no fade-out to run — a
+    // freshly inserted AnimatedOpacity sits at its hidden target and never
+    // fires onEnd, so markControlsHidden would never arrive. Retire the
+    // presented flag now; the controls host drops its subtree in response.
+    // A chrome that did fade in keeps the flag until markControlsHidden.
+    if (!_controlsOpaque) _controlsPresented = false;
+    _controlsOpaque = false;
     if (_contentStripVisible) {
       _contentStripVisible = false;
       _holds.remove(PlayerChromeHold.contentStrip);
     }
     notifyListeners();
     return true;
+  }
+
+  /// Called when the controls subtree is actually rendered at full opacity,
+  /// so a later [hide] can rely on a real fade-out (and its
+  /// [markControlsHidden] completion) to retire [controlsPresented].
+  void markControlsOpaque() {
+    if (!_controlsVisible) return;
+    _controlsOpaque = true;
   }
 
   /// Called when the controls opacity animation reaches its hidden target.
@@ -152,7 +178,7 @@ class PlayerChromeController extends ChangeNotifier implements ValueListenable<b
 
   void startPausedAutoHide() {
     _hideTimer?.cancel();
-    if (!_controlsVisible || !_hasFirstFrame || _holds.isNotEmpty) return;
+    if (!_controlsVisible || !_hasFirstFrame || _holds.isNotEmpty || _directionalNavigation) return;
     _hideTimer = Timer(_hideDelay, hide);
   }
 
@@ -170,9 +196,36 @@ class PlayerChromeController extends ChangeNotifier implements ValueListenable<b
 
   void restartAutoHideForCurrentPlaybackState() => _startAutoHideForCurrentPlaybackState();
 
+  /// Hides the chrome when the pointer leaves the player. A press that drags
+  /// out keeps the chrome until it lifts, so a slider or scrub in progress is
+  /// not unmounted under the pointer.
   void hideForPointerExit() {
     if (_holds.contains(PlayerChromeHold.pip)) return;
+    if (_holds.contains(PlayerChromeHold.pointerPress)) {
+      _pointerLeftWhilePressed = true;
+      return;
+    }
     hide(ignoreHolds: true);
+  }
+
+  /// The pointer came back over the player, so a press that left and returned
+  /// no longer hides the chrome when it lifts.
+  void recordPointerEnter() {
+    _pointerLeftWhilePressed = false;
+  }
+
+  /// A pointer went down on interactive chrome. The chrome is held until every
+  /// pressed pointer lifts.
+  void recordPointerDown(int pointer) {
+    if (!_pressedPointers.add(pointer) || _pressedPointers.length > 1) return;
+    hold(PlayerChromeHold.pointerPress);
+  }
+
+  void recordPointerUp(int pointer) {
+    if (!_pressedPointers.remove(pointer) || _pressedPointers.isNotEmpty) return;
+    final pointerLeft = _pointerLeftWhilePressed;
+    release(PlayerChromeHold.pointerPress);
+    if (pointerLeft) hideForPointerExit();
   }
 
   void cancelAutoHide() {
@@ -192,6 +245,10 @@ class PlayerChromeController extends ChangeNotifier implements ValueListenable<b
 
   void release(PlayerChromeHold hold, {bool notify = true, bool restartAutoHide = true}) {
     if (!_holds.remove(hold)) return;
+    if (hold == PlayerChromeHold.pointerPress) {
+      _pressedPointers.clear();
+      _pointerLeftWhilePressed = false;
+    }
     if (notify) notifyListeners();
     if (restartAutoHide && _holds.isEmpty) _startAutoHideForCurrentPlaybackState();
   }
@@ -224,6 +281,7 @@ class PlayerChromeInteractionRegion extends StatelessWidget {
         return MouseRegion(
           cursor: controller.controlsVisible ? SystemMouseCursors.basic : SystemMouseCursors.none,
           onHover: (_) => controller.recordPointerActivity(),
+          onEnter: hideOnExit ? (_) => controller.recordPointerEnter() : null,
           onExit: (_) {
             if (!hideOnExit) return;
             controller.cancelAutoHide();

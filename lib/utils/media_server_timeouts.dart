@@ -26,6 +26,15 @@ class MediaServerTimeouts {
   /// worst case was the dominant cold-start stall in #1784.
   static const libraryHubDeadline = Duration(seconds: 20);
 
+  /// Whole-request deadline for the Explore reverse library lookup
+  /// (`findByExternalIds`: Plex `/hubs/search` and `/library/all?guid=`,
+  /// Jellyfin `/Items?SearchTerm=`). It runs behind an in-page progress row
+  /// after a tap, so it can afford the same budget as a library hub row. Used
+  /// with endpoint failover off: a large library that answers slowly is not a
+  /// dead endpoint, and treating the timeout as one used to cascade the whole
+  /// client through its stale LAN candidates (#2098).
+  static const libraryLookup = Duration(seconds: 20);
+
   /// Timeout for probing a cached/preferred endpoint (used in
   /// [PlexServer.findBestWorkingConnection]).
   static const preferredEndpointProbe = Duration(milliseconds: 1500);
@@ -47,9 +56,27 @@ class MediaServerTimeouts {
   /// sum of phases.
   static const perServerConnect = Duration(milliseconds: 6500);
 
-  /// HTTP timeout for the live-TV tune POST. Matches Plex web's value — the
-  /// default 10s connect budget is too tight on Fire-TV cold starts.
+  /// How long the startup splash waits for the initial bind when the OS
+  /// reports no network. The bind still runs — `none` leaves loopback and
+  /// LAN-without-WAN servers reachable (#2505) — but an airplane-mode launch
+  /// must not sit through [perServerConnect]. Past the cap the offline shell
+  /// opens and the bind keeps going, so a server that connects later still
+  /// brings the app online.
+  static const noNetworkStartupBind = Duration(seconds: 2);
+
+  /// How long a caller waits for a Plex tune or a MediaBrowser Live TV
+  /// PlaybackInfo that opens a source. Matches Plex web's value: a cold
+  /// tuner can take longer than the default 10s to return response headers.
+  ///
+  /// Only the wait: the request itself runs to [tuneTransport]. Servers finish
+  /// opening a tuner whether or not the client is still connected (#2394), so
+  /// the tune's answer must still arrive to be released.
   static const tune = Duration(seconds: 30);
+
+  /// Per-phase HTTP timeout for a tune request, and for closing what one
+  /// opened (the close queues behind other opens on the server). Bounds a dead
+  /// connection, not the user's wait — see [tune].
+  static const tuneTransport = Duration(minutes: 3);
 
   static const plexTvConnect = Duration(seconds: 15);
 
@@ -85,8 +112,4 @@ class MediaServerTimeouts {
   /// instead downgrades the confirmation to its explicit "scope unverified"
   /// form.
   static const deleteImpactProbe = Duration(seconds: 10);
-
-  /// Best-effort `/Sessions/Logout` timeout — short because the call is
-  /// fire-and-forget; the token is removed locally regardless.
-  static const jellyfinSignOut = Duration(seconds: 5);
 }

@@ -14,14 +14,20 @@ import 'package:plezy/media/media_kind.dart';
 import 'package:plezy/media/media_library.dart';
 import 'package:plezy/media/media_hub.dart';
 import 'package:plezy/media/server_capabilities.dart';
+import 'package:plezy/media/media_person.dart';
 import 'package:plezy/media/media_server_client.dart';
 import 'package:plezy/media/media_item.dart';
-import 'package:plezy/models/plex/plex_config.dart';
+import 'package:plezy/media/search_hit.dart';
+import 'package:plezy/models/catalog/catalog_item.dart';
+import 'package:plezy/providers/multi_server_provider.dart';
+import 'package:plezy/services/catalog/catalog_library_matcher.dart';
 import 'package:plezy/services/data_aggregation_service.dart';
 import 'package:plezy/services/jellyfin_client.dart';
+import 'package:plezy/services/jellyfin_api_cache.dart';
 import 'package:plezy/services/multi_server_manager.dart';
 import 'package:plezy/services/plex_api_cache.dart';
 import 'package:plezy/services/settings_service.dart';
+import 'package:plezy/utils/external_ids.dart';
 import 'package:plezy/utils/media_server_http_client.dart';
 
 import '../test_helpers/backend_client_fixtures.dart';
@@ -45,6 +51,8 @@ class _LibrariesClient implements MediaServerClient {
     this.libraries = const [],
     this.searchError,
     this.searchResults = const [],
+    this.peopleError,
+    this.peopleResults = const [],
   });
 
   @override
@@ -57,7 +65,10 @@ class _LibrariesClient implements MediaServerClient {
   final List<MediaLibrary> libraries;
   final Object? searchError;
   final List<MediaItem> searchResults;
+  final Object? peopleError;
+  final List<MediaPerson> peopleResults;
   Set<String>? lastExcludedLibraryIds;
+  Set<String>? lastPeopleExcludedLibraryIds;
 
   @override
   Future<List<MediaLibrary>> fetchLibraries() async {
@@ -79,11 +90,36 @@ class _LibrariesClient implements MediaServerClient {
   }
 
   @override
+  Future<List<MediaPerson>> searchPeople(
+    String query, {
+    int limit = defaultPeopleSearchLimit,
+    AbortController? abort,
+    Set<String> excludedLibraryIds = const {},
+  }) async {
+    lastPeopleExcludedLibraryIds = excludedLibraryIds;
+    abort?.throwIfAborted();
+    if (peopleError != null) throw peopleError!;
+    return peopleResults;
+  }
+
+  @override
   void close() {}
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
+
+MediaPerson _person(String id, String name, {required String serverId}) =>
+    MediaPerson(id: id, name: name, backend: MediaBackend.plex, serverId: ServerId(serverId));
+
+/// Hit identities in rank order: a title's id, or `person:<id>`.
+List<String> _hitIds(SearchAggregationResult result) => [
+  for (final hit in result.hits)
+    switch (hit) {
+      MediaSearchHit(:final item) => item.id,
+      PersonSearchHit(:final person) => 'person:${person.id}',
+    },
+];
 
 /// Per-library hub client whose fetches are held open individually, so a test
 /// can observe exactly when the fan-out starts each library.
@@ -126,6 +162,7 @@ class _GatedHubsClient implements MediaServerClient {
     int limit = defaultHubPreviewLimit,
     bool includePlaybackHubs = true,
     MediaKind? libraryKind,
+    HubFetchDiagnostics? diagnostics,
   }) {
     started.add(libraryId);
     return (_gates[libraryId] = Completer<List<MediaHub>>()).future;
@@ -138,11 +175,8 @@ class _GatedHubsClient implements MediaServerClient {
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-/// Smoke tests for the surviving cross-server aggregation surface on
-/// [DataAggregationService]. Single-server passthroughs were removed in
-/// favour of `context.tryGetMediaClientForServer(...).<method>()`; what's
-/// left here is the multi-client fan-out, which is testable without a
-/// real backend by simply asserting the empty-state behaviour.
+/// Covers the remaining cross-server [DataAggregationService] fan-out surface;
+/// single-server calls now go through the per-server client context.
 void main() {
   late AppDatabase db;
   late MultiServerManager manager;
@@ -153,6 +187,7 @@ void main() {
     SettingsService.resetForTesting();
     db = AppDatabase.forTesting(NativeDatabase.memory());
     PlexApiCache.initialize(db);
+    JellyfinApiCache.initialize(db);
     manager = MultiServerManager();
     service = DataAggregationService(manager);
   });
@@ -160,6 +195,284 @@ void main() {
   tearDown(() async {
     manager.dispose();
     await db.close();
+  });
+
+  /// Registers a Plex server whose `/hubs` answers a single Continue Watching
+  /// hub built from [rows]; [metadata] answers `/library/metadata/<ratingKey>`
+  /// for the keys it recognises. Any other request is an unexpected one.
+  /// Returns the URLs the server was asked for.
+  List<Uri> registerContinueWatchingPlex(
+    List<Map<String, Object?>> rows, {
+    Map<String, Object?>? Function(String ratingKey)? metadata,
+  }) {
+    final requests = <Uri>[];
+    final client = testPlexClient(
+      serverId: ServerId('plex-1'),
+      serverName: 'Plex',
+      handler: (req) async {
+        requests.add(req.url);
+        if (req.url.path == '/hubs') {
+          return _json({
+            'MediaContainer': {
+              'Hub': [
+                {
+                  'key': '/hubs/home/continueWatching',
+                  'title': 'Continue Watching',
+                  'type': 'mixed',
+                  'hubIdentifier': 'home.continue',
+                  'size': rows.length,
+                  'Metadata': rows,
+                },
+              ],
+            },
+          });
+        }
+        if (metadata != null && req.url.path.startsWith('/library/metadata/')) {
+          final entry = metadata(req.url.pathSegments.last);
+          if (entry != null) {
+            return _json({
+              'MediaContainer': {
+                'Metadata': [entry],
+              },
+            });
+          }
+        }
+        return http.Response('unexpected request', 500);
+      },
+    );
+    addTearDown(client.close);
+    manager.debugRegisterClientForTesting(client);
+    return requests;
+  }
+
+  for (final backend in ['plex', 'jellyfin', 'emby']) {
+    test('$backend offline expected-server misses expire and reveal copies after recovery', () async {
+      var requests = 0;
+      Future<http.Response> respond(http.Request request) async {
+        requests++;
+        if (backend == 'plex') {
+          return _json({
+            'MediaContainer': {
+              'Metadata': request.url.path == '/library/all'
+                  ? [
+                      {
+                        'ratingKey': 'recovered',
+                        'type': 'movie',
+                        'title': 'Recovered Movie',
+                        'guid': 'com.plexapp.agents.themoviedb://42?lang=en',
+                      },
+                    ]
+                  : <Object>[],
+              'Hub': <Object>[],
+            },
+          });
+        }
+        return request.url.path.endsWith('/Ancestors')
+            ? _json(<Object>[])
+            : _json({
+                'Items': [
+                  {
+                    'Id': 'recovered',
+                    'Type': 'Movie',
+                    'Name': 'Recovered Movie',
+                    'ProviderIds': {'Tmdb': '42'},
+                  },
+                ],
+              });
+      }
+
+      final MediaServerClient client = switch (backend) {
+        'plex' => testPlexClient(serverId: ServerId(backend), handler: respond),
+        'emby' => testEmbyClient(
+          connection: testEmbyConnection(machineId: backend),
+          handler: respond,
+        ),
+        _ => testJellyfinClient(
+          connection: testJellyfinConnection(machineId: backend),
+          handler: respond,
+        ),
+      };
+      manager.debugRegisterClientForTesting(client, online: false);
+      final multiServer = MultiServerProvider(manager, service)
+        ..setExpectedVisibleServerIds({backend})
+        ..setVisibleServerIds({});
+      var now = DateTime.utc(2026, 7, 28);
+      final matcher = CatalogLibraryMatcher.withClock(multiServer, () => now);
+      addTearDown(() {
+        matcher.dispose();
+        multiServer.dispose();
+      });
+      const item = CatalogItem(
+        source: CatalogSourceId.trakt,
+        kind: MediaKind.movie,
+        title: 'Recovered Movie',
+        ids: CatalogItemIds(tmdb: 42),
+      );
+
+      final offline = await matcher.match(item);
+      expect(offline.items, isEmpty);
+      expect(offline.succeededServerIds, isEmpty);
+      expect(offline.unqueriedServerIds, {backend});
+      manager.debugRegisterClientForTesting(client);
+      now = now.add(CatalogLibraryMatcher.negativeTtl - const Duration(seconds: 1));
+      expect((await matcher.match(item)).unqueriedServerIds, {backend});
+      expect(requests, 0);
+
+      now = now.add(const Duration(seconds: 1));
+      final recovered = await matcher.match(item);
+      expect(recovered.items.single.id, 'recovered');
+      expect(recovered.items.single.serverId, backend);
+      expect(recovered.succeededServerIds, {backend});
+      expect(recovered.unqueriedServerIds, isEmpty);
+    });
+  }
+
+  group('external-id query coverage', () {
+    for (final query in [
+      (
+        name: 'Plex-only guid',
+        ids: const ExternalIds(),
+        titles: const ['Night on the Galactic Railroad'],
+        plexGuid: 'plex://movie/5d776b59ad5437001f79c6f8',
+        succeeded: {'plex'},
+        plexPaths: ['/library/all'],
+        mediaBrowserPaths: <String>[],
+      ),
+      (
+        name: 'external id without title',
+        ids: const ExternalIds(tmdb: 34523),
+        titles: const <String>[],
+        plexGuid: null,
+        succeeded: {'plex'},
+        plexPaths: ['/library/all'],
+        mediaBrowserPaths: <String>[],
+      ),
+      (
+        name: 'external id and native title',
+        ids: const ExternalIds(tmdb: 34523),
+        titles: const ['銀河鉄道の夜'],
+        plexGuid: null,
+        succeeded: {'plex', 'jellyfin', 'emby'},
+        plexPaths: ['/library/all', '/hubs/search'],
+        mediaBrowserPaths: ['/Items'],
+      ),
+      (
+        name: 'title without a verifiable identity',
+        ids: const ExternalIds(),
+        titles: const ['Night on the Galactic Railroad'],
+        plexGuid: null,
+        succeeded: <String>{},
+        plexPaths: <String>[],
+        mediaBrowserPaths: <String>[],
+      ),
+    ]) {
+      test('${query.name} counts only executed backend lookups as successful misses', () async {
+        final requests = <String, List<String>>{'plex': [], 'jellyfin': [], 'emby': []};
+        final plex = testPlexClient(
+          serverId: ServerId('plex'),
+          handler: (request) async {
+            requests['plex']!.add(request.url.path);
+            return _json({
+              'MediaContainer': {'Metadata': <Object>[], 'Hub': <Object>[]},
+            });
+          },
+        );
+        final jellyfin = testJellyfinClient(
+          connection: testJellyfinConnection(machineId: 'jellyfin'),
+          handler: (request) async {
+            requests['jellyfin']!.add(request.url.path);
+            return _json({'Items': <Object>[]});
+          },
+        );
+        final emby = testEmbyClient(
+          connection: testEmbyConnection(machineId: 'emby'),
+          handler: (request) async {
+            requests['emby']!.add(request.url.path);
+            return _json({'Items': <Object>[]});
+          },
+        );
+        for (final client in <MediaServerClient>[plex, jellyfin, emby]) {
+          manager.debugRegisterClientForTesting(client);
+        }
+
+        final result = await service.findByExternalIdsAcrossServers(
+          query.ids,
+          kind: MediaKind.movie,
+          serverIds: {'plex', 'jellyfin', 'emby'},
+          titles: query.titles,
+          plexGuid: query.plexGuid,
+        );
+
+        expect(result.items, isEmpty);
+        expect(result.succeededServerIds, query.succeeded);
+        expect(result.unqueriedServerIds, {'plex', 'jellyfin', 'emby'}.difference(query.succeeded));
+        expect(result.failedServerIds, isEmpty);
+        expect(result.cancelledServerIds, isEmpty);
+        expect(requests['plex'], query.plexPaths);
+        expect(requests['jellyfin'], query.mediaBrowserPaths);
+        expect(requests['emby'], query.mediaBrowserPaths);
+      });
+    }
+
+    test('unsupported media kinds are unqueried, not successful empty answers', () async {
+      Future<http.Response> unexpected(http.Request request) async => fail('Unexpected lookup: ${request.url}');
+      final clients = <MediaServerClient>[
+        testPlexClient(serverId: ServerId('plex'), handler: unexpected),
+        testJellyfinClient(
+          connection: testJellyfinConnection(machineId: 'jellyfin'),
+          handler: unexpected,
+        ),
+        testEmbyClient(
+          connection: testEmbyConnection(machineId: 'emby'),
+          handler: unexpected,
+        ),
+      ];
+      for (final client in clients) {
+        manager.debugRegisterClientForTesting(client);
+      }
+      final result = await service.findByExternalIdsAcrossServers(
+        const ExternalIds(tmdb: 42),
+        kind: MediaKind.episode,
+        titles: const ['Pilot'],
+        serverIds: {'plex', 'jellyfin', 'emby'},
+      );
+      expect(result.items, isEmpty);
+      expect(result.succeededServerIds, isEmpty);
+      expect(result.unqueriedServerIds, {'plex', 'jellyfin', 'emby'});
+      expect(result.failedServerIds, isEmpty);
+      expect(result.cancelledServerIds, isEmpty);
+    });
+
+    test('cancellation, HTTP failure and unavailable clients remain distinct from successful misses', () async {
+      manager.debugRegisterClientForTesting(
+        testPlexClient(serverId: ServerId('cancelled'), handler: (_) async => throw http.RequestAbortedException()),
+      );
+      manager.debugRegisterClientForTesting(
+        testJellyfinClient(
+          connection: testJellyfinConnection(machineId: 'failed'),
+          handler: (_) async => http.Response('Unauthorized', 401),
+        ),
+      );
+      manager.debugRegisterClientForTesting(
+        testEmbyClient(
+          connection: testEmbyConnection(machineId: 'miss'),
+          handler: (_) async => _json({'Items': <Object>[]}),
+        ),
+      );
+
+      final result = await service.findByExternalIdsAcrossServers(
+        const ExternalIds(tmdb: 34523),
+        kind: MediaKind.movie,
+        titles: const ['Night on the Galactic Railroad'],
+        serverIds: {'cancelled', 'failed', 'miss', 'clientless'},
+      );
+
+      expect(result.items, isEmpty);
+      expect(result.succeededServerIds, {'miss'});
+      expect(result.failedServerIds, {'failed'});
+      expect(result.cancelledServerIds, {'cancelled'});
+      expect(result.unqueriedServerIds, {'clientless'});
+    });
   });
 
   group('DataAggregationService cross-server aggregation', () {
@@ -208,7 +521,9 @@ void main() {
 
     test('searchAcrossServers and getOnDeckFromAllServers return empty when no clients', () async {
       final search = await service.searchAcrossServers('hello');
-      expect(search.items, isEmpty);
+      expect(search.hits, isEmpty);
+      expect(search.candidates, isEmpty);
+      expect(search.people, isEmpty);
       expect(search.succeededServerIds, isEmpty);
       expect(search.cancelledServerIds, isEmpty);
       expect(search.failedServerIds, isEmpty);
@@ -272,7 +587,7 @@ void main() {
 
       final result = await service.searchAcrossServers('Target');
 
-      expect(result.items.map((item) => item.id), ['show-1']);
+      expect(_hitIds(result), ['show-1']);
       expect(result.succeededServerIds, {'ok'});
       expect(result.cancelledServerIds, {'cancelled'});
       expect(result.failedServerIds, {'failed'});
@@ -311,7 +626,7 @@ void main() {
 
       final result = await service.searchAcrossServers('Target', hiddenLibraryKeys: {'plex:2'});
 
-      expect(result.items.map((item) => item.id), unorderedEquals(['visible-1', 'shared-1']));
+      expect(_hitIds(result), unorderedEquals(['visible-1', 'shared-1']));
       expect(result.succeededServerIds, {'plex'});
     });
 
@@ -339,7 +654,45 @@ void main() {
 
       final result = await service.searchAcrossServers('Target', limit: 1, hiddenLibraryKeys: {'plex:2'});
 
-      expect(result.items.map((item) => item.id), ['visible-1']);
+      expect(_hitIds(result), ['visible-1']);
+    });
+
+    test('candidates keeps rows the ranked limit dropped, minus hidden ones', () async {
+      // The search screen's kind filter re-ranks `candidates`, so a kind
+      // crowded out of the trimmed `items` must still be present there — but
+      // a hidden library's rows must not be.
+      final movie = testMediaItem(
+        id: 'movie-1',
+        backend: MediaBackend.plex,
+        kind: MediaKind.movie,
+        title: 'Target',
+        serverId: 'plex',
+        libraryId: '1',
+      );
+      final episode = testMediaItem(
+        id: 'episode-1',
+        backend: MediaBackend.plex,
+        kind: MediaKind.episode,
+        title: 'Target Sequel',
+        serverId: 'plex',
+        libraryId: '1',
+      );
+      final hidden = testMediaItem(
+        id: 'hidden-1',
+        backend: MediaBackend.plex,
+        kind: MediaKind.track,
+        title: 'Target',
+        serverId: 'plex',
+        libraryId: '2',
+      );
+      manager.debugRegisterClientForTesting(
+        _LibrariesClient(ServerId('plex'), searchResults: [movie, episode, hidden]),
+      );
+
+      final result = await service.searchAcrossServers('Target', limit: 1, hiddenLibraryKeys: {'plex:2'});
+
+      expect(_hitIds(result), ['movie-1']);
+      expect(result.candidates.map((item) => item.id), unorderedEquals(['movie-1', 'episode-1']));
     });
 
     test('each server is told only about its own hidden libraries', () async {
@@ -354,6 +707,98 @@ void main() {
 
       expect(alpha.lastExcludedLibraryIds, {'1', '9'});
       expect(beta.lastExcludedLibraryIds, {'1'});
+      // People span libraries, so each backend drops hidden-only people itself
+      // and needs the same scoping.
+      expect(alpha.lastPeopleExcludedLibraryIds, {'1', '9'});
+      expect(beta.lastPeopleExcludedLibraryIds, {'1'});
+    });
+
+    test('a failed or cancelled people search keeps that server\'s titles and success', () async {
+      final failingPeople = testMediaItem(
+        id: 'movie-a',
+        backend: MediaBackend.plex,
+        kind: MediaKind.movie,
+        title: 'Target',
+        serverId: 'a',
+      );
+      final cancelledPeople = testMediaItem(
+        id: 'movie-b',
+        backend: MediaBackend.plex,
+        kind: MediaKind.movie,
+        title: 'Target',
+        serverId: 'b',
+      );
+      manager.debugRegisterClientForTesting(
+        _LibrariesClient(
+          ServerId('a'),
+          searchResults: [failingPeople],
+          peopleError: MediaServerHttpException(type: MediaServerHttpErrorType.connectionError, message: 'refused'),
+        ),
+      );
+      manager.debugRegisterClientForTesting(
+        _LibrariesClient(
+          ServerId('b'),
+          searchResults: [cancelledPeople],
+          peopleError: MediaServerHttpException(type: MediaServerHttpErrorType.cancelled, message: 'closing'),
+        ),
+      );
+
+      final result = await service.searchAcrossServers('Target');
+
+      expect(_hitIds(result), unorderedEquals(['movie-a', 'movie-b']));
+      expect(result.people, isEmpty);
+      expect(result.succeededServerIds, {'a', 'b'});
+      expect(result.failedServerIds, isEmpty);
+      expect(result.cancelledServerIds, isEmpty);
+    });
+
+    test('titles and people rank on one scale', () async {
+      // An exact title outranks a person whose name merely contains the
+      // query; a person whose name is the query outranks a loose title.
+      manager.debugRegisterClientForTesting(
+        _LibrariesClient(
+          ServerId('plex'),
+          searchResults: [
+            testMediaItem(
+              id: 'oppenheimer',
+              backend: MediaBackend.plex,
+              kind: MediaKind.movie,
+              title: 'Oppenheimer',
+              serverId: 'plex',
+            ),
+            testMediaItem(
+              id: 'waltz-with-bashir',
+              backend: MediaBackend.plex,
+              kind: MediaKind.movie,
+              title: 'Waltz with Bashir',
+              serverId: 'plex',
+            ),
+          ],
+          peopleResults: [
+            _person('38906', 'Brianna Oppenheimer', serverId: 'plex'),
+            _person('38797', 'Christoph Waltz', serverId: 'plex'),
+          ],
+        ),
+      );
+
+      final byTitle = await service.searchAcrossServers('Oppenheimer');
+      final byPerson = await service.searchAcrossServers('Christoph Waltz');
+
+      expect(_hitIds(byTitle).take(2), ['oppenheimer', 'person:38906']);
+      expect(_hitIds(byPerson).first, 'person:38797');
+      expect(byPerson.people.map((person) => person.id), unorderedEquals(['38906', '38797']));
+    });
+
+    test('a query only people match still returns hits', () async {
+      manager.debugRegisterClientForTesting(
+        _LibrariesClient(ServerId('plex'), peopleResults: [_person('38797', 'Christoph Waltz', serverId: 'plex')]),
+      );
+
+      final result = await service.searchAcrossServers('Christoph Waltz');
+
+      expect(_hitIds(result), ['person:38797']);
+      expect(result.candidates, isEmpty);
+      expect(result.succeededServerIds, {'plex'});
     });
 
     test('no hidden libraries passes an empty exclusion set', () async {
@@ -370,17 +815,15 @@ void main() {
       final jellyfinRequests = <Uri>[];
 
       final plexClient = testPlexClient(
-        config: PlexConfig(
-          baseUrl: 'https://plex.example.com',
-          token: 'token',
-          clientIdentifier: 'client-id',
-          product: 'Plezy',
-          version: 'test',
-        ),
         serverId: ServerId('plex-1'),
         serverName: 'Plex',
         httpClient: MockClient((req) async {
           plexRequests.add(req.url);
+          if (req.url.path == '/library/search' && req.url.queryParameters['searchTypes'] == 'people') {
+            return _json({
+              'MediaContainer': {'SearchResult': <Object>[]},
+            });
+          }
           if (req.url.path == '/library/search') {
             return _json({
               'MediaContainer': {
@@ -403,12 +846,22 @@ void main() {
         connection: _conn(),
         httpClient: MockClient((req) async {
           jellyfinRequests.add(req.url);
+          if (req.url.path == '/Users/user-1/Views') {
+            return _json({
+              'Items': [
+                {'Id': 'shows', 'Name': 'Shows', 'CollectionType': 'tvshows'},
+              ],
+            });
+          }
           if (req.url.path == '/Items') {
             return _json({
               'Items': [
                 {'Id': 'jf-show', 'Type': 'Series', 'Name': 'Spider‑Man'},
               ],
             });
+          }
+          if (req.url.path == '/Persons') {
+            return _json({'Items': <Object>[]});
           }
           return http.Response('unexpected request', 500);
         }),
@@ -418,57 +871,31 @@ void main() {
 
       final results = await service.searchAcrossServers('Spider Man', limit: 1);
 
-      expect(results.items.map((item) => item.id), ['jf-show']);
-      expect(plexRequests.single.queryParameters['query'], 'Spider Man');
-      expect(plexRequests.single.queryParameters['limit'], '100');
-      expect(plexRequests.single.queryParameters['searchTypes'], 'movies,tv,music');
-      // Jellyfin search fans out to /Items plus a best-effort /Artists call
-      // (500 above → treated as empty).
+      expect(_hitIds(results), ['jf-show']);
+      // The winning hit carries the library it was found in — a scoped
+      // request per visible library is the only way a Jellyfin search row
+      // ever learns its library (#1970).
+      final winner = (results.hits.single as MediaSearchHit).item;
+      expect(winner.libraryId, 'shows');
+      expect(winner.libraryTitle, 'Shows');
+      final plexTitleRequest = plexRequests.singleWhere((url) => url.queryParameters['searchTypes'] != 'people');
+      expect(plexTitleRequest.queryParameters['query'], 'Spider Man');
+      expect(plexTitleRequest.queryParameters['limit'], '100');
+      expect(plexTitleRequest.queryParameters['searchTypes'], 'movies,tv,music,otherVideos');
+      // Jellyfin search is always library-scoped: each visible library gets
+      // its own /Items request with the full candidate budget, and a video
+      // library issues no /Artists leg.
       final jfItemsRequest = jellyfinRequests.singleWhere((url) => url.path == '/Items');
       expect(jfItemsRequest.queryParameters['Limit'], '100');
       expect(jfItemsRequest.queryParameters['SearchTerm'], 'Spider Man');
-      final jfArtistsRequest = jellyfinRequests.singleWhere((url) => url.path == '/Artists');
-      expect(jfArtistsRequest.queryParameters['searchTerm'], 'Spider Man');
+      expect(jfItemsRequest.queryParameters['ParentId'], 'shows');
+      expect(jellyfinRequests.where((url) => url.path == '/Artists'), isEmpty);
     });
 
     test('getOnDeckFromAllServers forwards preview limit to clients', () async {
-      final captured = <Uri>[];
-
-      final client = testPlexClient(
-        config: PlexConfig(
-          baseUrl: 'https://plex.example.com',
-          token: 'token',
-          clientIdentifier: 'client-id',
-          product: 'Plezy',
-          version: 'test',
-        ),
-        serverId: ServerId('plex-1'),
-        serverName: 'Plex',
-        httpClient: MockClient((req) async {
-          captured.add(req.url);
-          if (req.url.path == '/hubs') {
-            return _json({
-              'MediaContainer': {
-                'Hub': [
-                  {
-                    'key': '/hubs/home/continueWatching',
-                    'title': 'Continue Watching',
-                    'type': 'mixed',
-                    'hubIdentifier': 'home.continue',
-                    'size': 1,
-                    'Metadata': [
-                      {'ratingKey': 'movie-1', 'type': 'movie', 'title': 'Movie 1'},
-                    ],
-                  },
-                ],
-              },
-            });
-          }
-          return http.Response('unexpected request', 500);
-        }),
-      );
-      addTearDown(client.close);
-      manager.debugRegisterClientForTesting(client);
+      final captured = registerContinueWatchingPlex([
+        {'ratingKey': 'movie-1', 'type': 'movie', 'title': 'Movie 1'},
+      ]);
 
       final result = await service.getOnDeckFromAllServers(limit: 21);
 
@@ -479,53 +906,22 @@ void main() {
     });
 
     test('getOnDeckFromAllServers filters hidden Plex continue-watching libraries', () async {
-      final client = testPlexClient(
-        config: PlexConfig(
-          baseUrl: 'https://plex.example.com',
-          token: 'token',
-          clientIdentifier: 'client-id',
-          product: 'Plezy',
-          version: 'test',
-        ),
-        serverId: ServerId('plex-1'),
-        serverName: 'Plex',
-        httpClient: MockClient((req) async {
-          if (req.url.path == '/hubs') {
-            return _json({
-              'MediaContainer': {
-                'Hub': [
-                  {
-                    'key': '/hubs/home/continueWatching',
-                    'title': 'Continue Watching',
-                    'type': 'mixed',
-                    'hubIdentifier': 'home.continue',
-                    'size': 2,
-                    'Metadata': [
-                      {
-                        'ratingKey': 'movie-visible',
-                        'type': 'movie',
-                        'title': 'Visible Movie',
-                        'lastViewedAt': 100,
-                        'librarySectionID': 1,
-                      },
-                      {
-                        'ratingKey': 'movie-hidden',
-                        'type': 'movie',
-                        'title': 'Hidden Movie',
-                        'lastViewedAt': 200,
-                        'librarySectionID': 2,
-                      },
-                    ],
-                  },
-                ],
-              },
-            });
-          }
-          return http.Response('unexpected request', 500);
-        }),
-      );
-      addTearDown(client.close);
-      manager.debugRegisterClientForTesting(client);
+      registerContinueWatchingPlex([
+        {
+          'ratingKey': 'movie-visible',
+          'type': 'movie',
+          'title': 'Visible Movie',
+          'lastViewedAt': 100,
+          'librarySectionID': 1,
+        },
+        {
+          'ratingKey': 'movie-hidden',
+          'type': 'movie',
+          'title': 'Hidden Movie',
+          'lastViewedAt': 200,
+          'librarySectionID': 2,
+        },
+      ]);
 
       final result = await service.getOnDeckFromAllServers(limit: 10, hiddenLibraryKeys: {'plex-1:2'});
 
@@ -534,75 +930,41 @@ void main() {
     });
 
     test('getOnDeckFromAllServers hides duplicate show entries by stable show ids', () async {
-      final client = testPlexClient(
-        config: PlexConfig(
-          baseUrl: 'https://plex.example.com',
-          token: 'token',
-          clientIdentifier: 'client-id',
-          product: 'Plezy',
-          version: 'test',
-        ),
-        serverId: ServerId('plex-1'),
-        serverName: 'Plex',
-        httpClient: MockClient((req) async {
-          if (req.url.path == '/hubs') {
-            return _json({
-              'MediaContainer': {
-                'Hub': [
-                  {
-                    'key': '/hubs/home/continueWatching',
-                    'title': 'Continue Watching',
-                    'type': 'mixed',
-                    'hubIdentifier': 'home.continue',
-                    'size': 2,
-                    'Metadata': [
-                      {
-                        'ratingKey': 'old-episode',
-                        'type': 'episode',
-                        'title': 'Episode 1',
-                        'grandparentRatingKey': 'old-show',
-                        'grandparentTitle': 'Shared Show',
-                        'guid': 'plex://episode/shared-episode-1',
-                        'lastViewedAt': 100,
-                        'librarySectionID': 1,
-                      },
-                      {
-                        'ratingKey': 'new-episode',
-                        'type': 'episode',
-                        'title': 'Episode 2',
-                        'grandparentRatingKey': 'new-show',
-                        'grandparentTitle': 'Shared Show',
-                        'guid': 'plex://episode/shared-episode-2',
-                        'lastViewedAt': 200,
-                        'librarySectionID': 2,
-                      },
-                    ],
-                  },
-                ],
-              },
-            });
-          }
-          if (req.url.path == '/library/metadata/old-show' || req.url.path == '/library/metadata/new-show') {
-            return _json({
-              'MediaContainer': {
-                'Metadata': [
-                  {
-                    'ratingKey': req.url.pathSegments.last,
-                    'type': 'show',
-                    'title': 'Shared Show',
-                    'Guid': [
-                      {'id': 'tvdb://12345'},
-                    ],
-                  },
-                ],
-              },
-            });
-          }
-          return http.Response('unexpected request', 500);
-        }),
+      registerContinueWatchingPlex(
+        [
+          {
+            'ratingKey': 'old-episode',
+            'type': 'episode',
+            'title': 'Episode 1',
+            'grandparentRatingKey': 'old-show',
+            'grandparentTitle': 'Shared Show',
+            'guid': 'plex://episode/shared-episode-1',
+            'lastViewedAt': 100,
+            'librarySectionID': 1,
+          },
+          {
+            'ratingKey': 'new-episode',
+            'type': 'episode',
+            'title': 'Episode 2',
+            'grandparentRatingKey': 'new-show',
+            'grandparentTitle': 'Shared Show',
+            'guid': 'plex://episode/shared-episode-2',
+            'lastViewedAt': 200,
+            'librarySectionID': 2,
+          },
+        ],
+        metadata: (ratingKey) {
+          if (ratingKey != 'old-show' && ratingKey != 'new-show') return null;
+          return {
+            'ratingKey': ratingKey,
+            'type': 'show',
+            'title': 'Shared Show',
+            'Guid': [
+              {'id': 'tvdb://12345'},
+            ],
+          };
+        },
       );
-      addTearDown(client.close);
-      manager.debugRegisterClientForTesting(client);
 
       final result = await service.getOnDeckFromAllServers(limit: 10);
 
@@ -616,76 +978,42 @@ void main() {
       // reliably. The locally recorded play must decide the surviving card —
       // and it must keep the winner in the group's original shelf slot,
       // ahead of the unrelated movie sorted between the two episodes (#1492).
-      final client = testPlexClient(
-        config: PlexConfig(
-          baseUrl: 'https://plex.example.com',
-          token: 'token',
-          clientIdentifier: 'client-id',
-          product: 'Plezy',
-          version: 'test',
-        ),
-        serverId: ServerId('plex-1'),
-        serverName: 'Plex',
-        httpClient: MockClient((req) async {
-          if (req.url.path == '/hubs') {
-            return _json({
-              'MediaContainer': {
-                'Hub': [
-                  {
-                    'key': '/hubs/home/continueWatching',
-                    'title': 'Continue Watching',
-                    'type': 'mixed',
-                    'hubIdentifier': 'home.continue',
-                    'size': 3,
-                    'Metadata': [
-                      {
-                        'ratingKey': 'hd-episode',
-                        'type': 'episode',
-                        'title': 'Episode 1',
-                        'grandparentRatingKey': 'hd-show',
-                        'grandparentTitle': 'Shared Show',
-                        'guid': 'plex://episode/shared-episode-hd',
-                        'lastViewedAt': 200,
-                        'librarySectionID': 1,
-                      },
-                      {'ratingKey': 'movie-between', 'type': 'movie', 'title': 'Unrelated Movie', 'lastViewedAt': 150},
-                      {
-                        'ratingKey': 'uhd-episode',
-                        'type': 'episode',
-                        'title': 'Episode 1',
-                        'grandparentRatingKey': 'uhd-show',
-                        'grandparentTitle': 'Shared Show',
-                        'guid': 'plex://episode/shared-episode-uhd',
-                        'lastViewedAt': 100,
-                        'librarySectionID': 2,
-                      },
-                    ],
-                  },
-                ],
-              },
-            });
-          }
-          if (req.url.path == '/library/metadata/hd-show' || req.url.path == '/library/metadata/uhd-show') {
-            return _json({
-              'MediaContainer': {
-                'Metadata': [
-                  {
-                    'ratingKey': req.url.pathSegments.last,
-                    'type': 'show',
-                    'title': 'Shared Show',
-                    'Guid': [
-                      {'id': 'tvdb://12345'},
-                    ],
-                  },
-                ],
-              },
-            });
-          }
-          return http.Response('unexpected request', 500);
-        }),
+      registerContinueWatchingPlex(
+        [
+          {
+            'ratingKey': 'hd-episode',
+            'type': 'episode',
+            'title': 'Episode 1',
+            'grandparentRatingKey': 'hd-show',
+            'grandparentTitle': 'Shared Show',
+            'guid': 'plex://episode/shared-episode-hd',
+            'lastViewedAt': 200,
+            'librarySectionID': 1,
+          },
+          {'ratingKey': 'movie-between', 'type': 'movie', 'title': 'Unrelated Movie', 'lastViewedAt': 150},
+          {
+            'ratingKey': 'uhd-episode',
+            'type': 'episode',
+            'title': 'Episode 1',
+            'grandparentRatingKey': 'uhd-show',
+            'grandparentTitle': 'Shared Show',
+            'guid': 'plex://episode/shared-episode-uhd',
+            'lastViewedAt': 100,
+            'librarySectionID': 2,
+          },
+        ],
+        metadata: (ratingKey) {
+          if (ratingKey != 'hd-show' && ratingKey != 'uhd-show') return null;
+          return {
+            'ratingKey': ratingKey,
+            'type': 'show',
+            'title': 'Shared Show',
+            'Guid': [
+              {'id': 'tvdb://12345'},
+            ],
+          };
+        },
       );
-      addTearDown(client.close);
-      manager.debugRegisterClientForTesting(client);
 
       // The user last played something in the 4K library's show tree.
       final settings = await SettingsService.getInstance();
@@ -700,71 +1028,37 @@ void main() {
     });
 
     test('getOnDeckFromAllServers prefers a duplicate recorded by item key', () async {
-      final client = testPlexClient(
-        config: PlexConfig(
-          baseUrl: 'https://plex.example.com',
-          token: 'token',
-          clientIdentifier: 'client-id',
-          product: 'Plezy',
-          version: 'test',
-        ),
-        serverId: ServerId('plex-1'),
-        serverName: 'Plex',
-        httpClient: MockClient((req) async {
-          if (req.url.path == '/hubs') {
-            return _json({
-              'MediaContainer': {
-                'Hub': [
-                  {
-                    'key': '/hubs/home/continueWatching',
-                    'title': 'Continue Watching',
-                    'type': 'mixed',
-                    'hubIdentifier': 'home.continue',
-                    'size': 2,
-                    'Metadata': [
-                      {
-                        'ratingKey': 'movie-hd',
-                        'type': 'movie',
-                        'title': 'Shared Movie',
-                        'guid': 'plex://movie/shared-movie',
-                        'lastViewedAt': 200,
-                        'librarySectionID': 1,
-                      },
-                      {
-                        'ratingKey': 'movie-uhd',
-                        'type': 'movie',
-                        'title': 'Shared Movie',
-                        'guid': 'plex://movie/shared-movie',
-                        'lastViewedAt': 100,
-                        'librarySectionID': 2,
-                      },
-                    ],
-                  },
-                ],
-              },
-            });
-          }
-          if (req.url.path == '/library/metadata/movie-hd' || req.url.path == '/library/metadata/movie-uhd') {
-            return _json({
-              'MediaContainer': {
-                'Metadata': [
-                  {
-                    'ratingKey': req.url.pathSegments.last,
-                    'type': 'movie',
-                    'title': 'Shared Movie',
-                    'Guid': [
-                      {'id': 'tmdb://777'},
-                    ],
-                  },
-                ],
-              },
-            });
-          }
-          return http.Response('unexpected request', 500);
-        }),
+      registerContinueWatchingPlex(
+        [
+          {
+            'ratingKey': 'movie-hd',
+            'type': 'movie',
+            'title': 'Shared Movie',
+            'guid': 'plex://movie/shared-movie',
+            'lastViewedAt': 200,
+            'librarySectionID': 1,
+          },
+          {
+            'ratingKey': 'movie-uhd',
+            'type': 'movie',
+            'title': 'Shared Movie',
+            'guid': 'plex://movie/shared-movie',
+            'lastViewedAt': 100,
+            'librarySectionID': 2,
+          },
+        ],
+        metadata: (ratingKey) {
+          if (ratingKey != 'movie-hd' && ratingKey != 'movie-uhd') return null;
+          return {
+            'ratingKey': ratingKey,
+            'type': 'movie',
+            'title': 'Shared Movie',
+            'Guid': [
+              {'id': 'tmdb://777'},
+            ],
+          };
+        },
       );
-      addTearDown(client.close);
-      manager.debugRegisterClientForTesting(client);
 
       final settings = await SettingsService.getInstance();
       await settings.write(SettingsService.localLastPlayedAt, {'plex-1:movie-uhd': 999999});
@@ -775,67 +1069,32 @@ void main() {
     });
 
     test('getOnDeckFromAllServers keeps duplicate titles without stable ids', () async {
-      final client = testPlexClient(
-        config: PlexConfig(
-          baseUrl: 'https://plex.example.com',
-          token: 'token',
-          clientIdentifier: 'client-id',
-          product: 'Plezy',
-          version: 'test',
-        ),
-        serverId: ServerId('plex-1'),
-        serverName: 'Plex',
-        httpClient: MockClient((req) async {
-          if (req.url.path == '/hubs') {
-            return _json({
-              'MediaContainer': {
-                'Hub': [
-                  {
-                    'key': '/hubs/home/continueWatching',
-                    'title': 'Continue Watching',
-                    'type': 'mixed',
-                    'hubIdentifier': 'home.continue',
-                    'size': 2,
-                    'Metadata': [
-                      {
-                        'ratingKey': 'old-unmatched',
-                        'type': 'episode',
-                        'title': 'Episode 1',
-                        'grandparentRatingKey': 'old-unmatched-show',
-                        'grandparentTitle': 'Shared Show',
-                        'guid': 'com.plexapp.agents.none://old-unmatched',
-                        'lastViewedAt': 100,
-                      },
-                      {
-                        'ratingKey': 'new-unmatched',
-                        'type': 'episode',
-                        'title': 'Episode 2',
-                        'grandparentRatingKey': 'new-unmatched-show',
-                        'grandparentTitle': 'Shared Show',
-                        'guid': 'com.plexapp.agents.none://new-unmatched',
-                        'lastViewedAt': 200,
-                      },
-                    ],
-                  },
-                ],
-              },
-            });
-          }
-          if (req.url.path == '/library/metadata/old-unmatched-show' ||
-              req.url.path == '/library/metadata/new-unmatched-show') {
-            return _json({
-              'MediaContainer': {
-                'Metadata': [
-                  {'ratingKey': req.url.pathSegments.last, 'type': 'show', 'title': 'Shared Show'},
-                ],
-              },
-            });
-          }
-          return http.Response('unexpected request', 500);
-        }),
+      registerContinueWatchingPlex(
+        [
+          {
+            'ratingKey': 'old-unmatched',
+            'type': 'episode',
+            'title': 'Episode 1',
+            'grandparentRatingKey': 'old-unmatched-show',
+            'grandparentTitle': 'Shared Show',
+            'guid': 'com.plexapp.agents.none://old-unmatched',
+            'lastViewedAt': 100,
+          },
+          {
+            'ratingKey': 'new-unmatched',
+            'type': 'episode',
+            'title': 'Episode 2',
+            'grandparentRatingKey': 'new-unmatched-show',
+            'grandparentTitle': 'Shared Show',
+            'guid': 'com.plexapp.agents.none://new-unmatched',
+            'lastViewedAt': 200,
+          },
+        ],
+        metadata: (ratingKey) {
+          if (ratingKey != 'old-unmatched-show' && ratingKey != 'new-unmatched-show') return null;
+          return {'ratingKey': ratingKey, 'type': 'show', 'title': 'Shared Show'};
+        },
       );
-      addTearDown(client.close);
-      manager.debugRegisterClientForTesting(client);
 
       final result = await service.getOnDeckFromAllServers(limit: 10);
 
@@ -870,7 +1129,7 @@ void main() {
               final parentId = req.url.queryParameters['ParentId']!;
               return _json({
                 'Items': [
-                  {'Id': 'item-$parentId', 'Type': 'Movie', 'Name': 'Latest $parentId', 'ParentLibraryId': parentId},
+                  {'Id': 'item-$parentId', 'Type': 'Movie', 'Name': 'Latest $parentId'},
                 ],
               });
             } finally {
@@ -926,12 +1185,12 @@ void main() {
             return switch (parentId) {
               'movies' => _json({
                 'Items': [
-                  {'Id': 'movie-1', 'Type': 'Movie', 'Name': 'Latest Movie', 'ParentLibraryId': 'movies'},
+                  {'Id': 'movie-1', 'Type': 'Movie', 'Name': 'Latest Movie'},
                 ],
               }),
               'shows' => _json({
                 'Items': [
-                  {'Id': 'show-1', 'Type': 'Series', 'Name': 'Latest Show', 'ParentLibraryId': 'shows'},
+                  {'Id': 'show-1', 'Type': 'Series', 'Name': 'Latest Show'},
                 ],
               }),
               _ => http.Response('mixed latest should not be requested', 500),
@@ -983,22 +1242,22 @@ void main() {
             return switch (parentId) {
               'movies' => _json({
                 'Items': [
-                  {'Id': 'movie-1', 'Type': 'Movie', 'Name': 'Latest Movie', 'ParentLibraryId': 'movies'},
+                  {'Id': 'movie-1', 'Type': 'Movie', 'Name': 'Latest Movie'},
                 ],
               }),
               'mv' => _json({
                 'Items': [
-                  {'Id': 'mv-1', 'Type': 'MusicVideo', 'Name': 'Latest Music Video', 'ParentLibraryId': 'mv'},
+                  {'Id': 'mv-1', 'Type': 'MusicVideo', 'Name': 'Latest Music Video'},
                 ],
               }),
               'home-vids' => _json({
                 'Items': [
-                  {'Id': 'vid-1', 'Type': 'Video', 'Name': 'Latest Home Video', 'ParentLibraryId': 'home-vids'},
+                  {'Id': 'vid-1', 'Type': 'Video', 'Name': 'Latest Home Video'},
                 ],
               }),
               'music' => _json({
                 'Items': [
-                  {'Id': 'album-1', 'Type': 'MusicAlbum', 'Name': 'Latest Album', 'ParentLibraryId': 'music'},
+                  {'Id': 'album-1', 'Type': 'MusicAlbum', 'Name': 'Latest Album'},
                 ],
               }),
               _ => http.Response('latest should not be requested for $parentId', 500),
@@ -1041,7 +1300,7 @@ void main() {
       final musicLatest = captured.singleWhere(
         (uri) => uri.path == '/Users/user-1/Items/Latest' && uri.queryParameters['ParentId'] == 'music',
       );
-      expect(musicLatest.queryParameters['Fields'], 'PremiereDate,OriginalTitle,SortName');
+      expect(musicLatest.queryParameters['Fields'], 'PremiereDate,OriginalTitle,SortName,DateCreated');
       expect(musicLatest.queryParameters['EnableUserData'], 'false');
       // Video Latest rows carry the same risk: `/Items/Latest` groups a TV
       // library by series, so the rows are Series FOLDER dtos and the count
@@ -1050,7 +1309,7 @@ void main() {
       final movieLatest = captured.singleWhere(
         (uri) => uri.path == '/Users/user-1/Items/Latest' && uri.queryParameters['ParentId'] == 'movies',
       );
-      expect(movieLatest.queryParameters['Fields'], 'Overview');
+      expect(movieLatest.queryParameters['Fields'], 'Overview,DateCreated');
       expect(movieLatest.queryParameters.containsKey('EnableUserData'), isFalse);
     });
 
@@ -1062,7 +1321,7 @@ void main() {
           captured.add(req.url);
           if (req.url.path == '/Users/user-1/Items/Latest') {
             return _json([
-              {'Id': 'album-1', 'Type': 'MusicAlbum', 'Name': 'Latest Album', 'ParentLibraryId': 'music'},
+              {'Id': 'album-1', 'Type': 'MusicAlbum', 'Name': 'Latest Album'},
             ]);
           }
           if (req.url.path == '/Items' && req.url.queryParameters['Filters'] == 'IsPlayed') {
@@ -1073,7 +1332,6 @@ void main() {
                   'Id': sortBy == 'DatePlayed' ? 'recent-track' : 'most-played-track',
                   'Type': 'Audio',
                   'Name': sortBy == 'DatePlayed' ? 'Recent Track' : 'Most Played Track',
-                  'ParentLibraryId': 'music',
                 },
               ],
             });
@@ -1110,13 +1368,6 @@ void main() {
       final captured = <Uri>[];
 
       final client = testPlexClient(
-        config: PlexConfig(
-          baseUrl: 'https://plex.example.com',
-          token: 'token',
-          clientIdentifier: 'client-id',
-          product: 'Plezy',
-          version: 'test',
-        ),
         serverId: ServerId('plex-1'),
         serverName: 'Plex',
         promotedHubKey: '/hubs/promoted',
@@ -1185,13 +1436,6 @@ void main() {
       final captured = <Uri>[];
 
       final client = testPlexClient(
-        config: PlexConfig(
-          baseUrl: 'https://plex.example.com',
-          token: 'token',
-          clientIdentifier: 'client-id',
-          product: 'Plezy',
-          version: 'test',
-        ),
         serverId: ServerId('plex-1'),
         serverName: 'Plex',
         promotedHubKey: '/hubs/promoted',
@@ -1260,6 +1504,62 @@ void main() {
       expect(captured.where((uri) => uri.path.startsWith('/hubs/sections/')).map((uri) => uri.path), [
         '/hubs/sections/9',
       ]);
+    });
+
+    test('Plex server with a failed global leg is not marked succeeded by the optional music append', () async {
+      // /hubs/promoted failures are recorded in diagnostics and returned as []
+      // (never thrown), so only the success accounting separates "promoted
+      // hubs are gone" from "promoted hubs are empty". Counting the optional
+      // music leg as server success let DiscoverProvider replace every cached
+      // movie/TV home row with the lone music row.
+      final client = testPlexClient(
+        serverId: ServerId('plex-1'),
+        serverName: 'Plex',
+        promotedHubKey: '/hubs/promoted',
+        httpClient: MockClient((req) async {
+          if (req.url.path == '/library/sections') {
+            return _json({
+              'MediaContainer': {
+                'Directory': [
+                  {'key': '1', 'type': 'movie', 'title': 'Movies'},
+                  {'key': '9', 'type': 'artist', 'title': 'Music'},
+                ],
+              },
+            });
+          }
+          if (req.url.path == '/hubs/promoted') {
+            return http.Response('server error', 500);
+          }
+          if (req.url.path == '/hubs/sections/9') {
+            return _json({
+              'MediaContainer': {
+                'Hub': [
+                  {
+                    'key': '/library/sections/9/recentlyAdded',
+                    'title': 'Recently Added Music',
+                    'type': 'album',
+                    'hubIdentifier': 'music.recent',
+                    'size': 1,
+                    'Metadata': [
+                      {'ratingKey': 'album-1', 'type': 'album', 'title': 'Album', 'librarySectionID': 9},
+                    ],
+                  },
+                ],
+              },
+            });
+          }
+          return http.Response('unexpected request', 500);
+        }),
+      );
+      addTearDown(client.close);
+      manager.debugRegisterClientForTesting(client);
+
+      final result = await service.getHubsFromAllServers(useGlobalHubs: true, includePlaybackHubs: false);
+
+      expect(result.succeededServerIds, isEmpty, reason: 'the optional music leg must not vouch for the server');
+      expect(result.failedServerIds, {'plex-1'});
+      // The music rows that did arrive are still delivered.
+      expect(result.hubs.map((h) => h.identifier), ['music.recent']);
     });
   });
 }

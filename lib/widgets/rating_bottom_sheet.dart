@@ -21,7 +21,7 @@ import '../utils/app_logger.dart';
 import '../utils/snackbar_helper.dart';
 import 'app_icon.dart';
 import 'backend_badge.dart';
-import 'bottom_sheet_header.dart';
+import 'bottom_sheet_page_scaffold.dart';
 import 'catalog_source_logo.dart';
 import 'clickable_cursor.dart';
 
@@ -56,7 +56,6 @@ class _RatingBottomSheetState extends State<RatingBottomSheet> {
   final Map<String, Timer> _autoSaveTimers = {};
   final Map<String, _TrackerRatingSource> _trackerSourcesByKey = {};
   final Set<String> _pendingAutoSaves = {};
-  final Set<TrackerService> _hiddenTrackers = {};
   final Set<String> _loading = {};
   final Map<String, _SectionStatus> _statuses = {};
   TrackerIdResolver? _resolver;
@@ -86,17 +85,13 @@ class _RatingBottomSheetState extends State<RatingBottomSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final size = MediaQuery.sizeOf(context);
-    final maxHeight = size.height * (size.width > 600 ? 0.64 : 0.74);
-
     // Trakt's account provider is watched by [_trackerSources] via `context`.
     return Consumer<TrackersProvider>(
       builder: (context, trackers, _) {
-        final allTrackerSources = _trackerSources(context);
-        final trackerSources = allTrackerSources.where((source) => !_hiddenTrackers.contains(source.service)).toList();
+        final trackerSources = _trackerSources(context);
         _updateTrackerSourceMap(trackerSources);
         _resolverNeedsFribb = trackers.isMalConnected || trackers.isAnilistConnected;
-        _queueTrackerScoreLoad(allTrackerSources);
+        _queueTrackerScoreLoad(trackerSources);
 
         final serverCaps = widget.serverClient?.capabilities;
         final showServerRow = serverCaps != null && (serverCaps.numericUserRating || serverCaps.userFavorites);
@@ -106,45 +101,43 @@ class _RatingBottomSheetState extends State<RatingBottomSheet> {
         ];
         var focusIndex = 0;
 
-        return ConstrainedBox(
-          constraints: BoxConstraints(maxHeight: maxHeight),
-          child: Column(
-            mainAxisSize: .min,
+        // Hugs its content: a handful of rows in a 720px sheet was mostly empty
+        // space. The row set is therefore fixed from the first frame — see
+        // [_loadTrackerScores], which marks an unratable tracker `notAvailable`
+        // rather than removing its row.
+        return BottomSheetPageScaffold(
+          title: t.rateSheet.title,
+          icon: Symbols.star_rounded,
+          child: ListView(
+            shrinkWrap: true,
+            padding: const EdgeInsets.fromLTRB(10, 4, 10, 12),
             children: [
-              BottomSheetHeader(title: t.rateSheet.title, icon: Symbols.star_rounded),
-              Flexible(
-                child: ListView(
-                  padding: const EdgeInsets.fromLTRB(10, 4, 10, 12),
-                  children: [
-                    if (showServerRow)
-                      _buildServerRow(
-                        widget.serverClient!,
-                        _serverFocusNode,
-                        autofocus: focusIndex == 0,
-                        onNavigateUp: _navTo(focusNodes, focusIndex - 1),
-                        onNavigateDown: _navTo(focusNodes, focusIndex++ + 1),
-                      ),
-                    for (final source in trackerSources)
-                      _buildTrackerRow(
-                        source,
-                        _trackerFocusNode(source.service),
-                        autofocus: focusIndex == 0,
-                        onNavigateUp: _navTo(focusNodes, focusIndex - 1),
-                        onNavigateDown: _navTo(focusNodes, focusIndex++ + 1),
-                      ),
-                    if (allTrackerSources.isEmpty)
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
-                        child: Text(
-                          t.rateSheet.noConnectedServices,
-                          style: Theme.of(
-                            context,
-                          ).textTheme.bodySmall?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant),
-                        ),
-                      ),
-                  ],
+              if (showServerRow)
+                _buildServerRow(
+                  widget.serverClient!,
+                  _serverFocusNode,
+                  autofocus: focusIndex == 0,
+                  onNavigateUp: _navTo(focusNodes, focusIndex - 1),
+                  onNavigateDown: _navTo(focusNodes, focusIndex++ + 1),
                 ),
-              ),
+              for (final source in trackerSources)
+                _buildTrackerRow(
+                  source,
+                  _trackerFocusNode(source.service),
+                  autofocus: focusIndex == 0,
+                  onNavigateUp: _navTo(focusNodes, focusIndex - 1),
+                  onNavigateDown: _navTo(focusNodes, focusIndex++ + 1),
+                ),
+              if (trackerSources.isEmpty)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 4),
+                  child: Text(
+                    t.rateSheet.noConnectedServices,
+                    style: Theme.of(
+                      context,
+                    ).textTheme.bodySmall?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant),
+                  ),
+                ),
             ],
           ),
         );
@@ -279,6 +272,11 @@ class _RatingBottomSheetState extends State<RatingBottomSheet> {
     });
   }
 
+  /// Every tracker that cannot rate this item keeps its row and shows
+  /// `notAvailable`. Removing a row instead would shorten the sheet several
+  /// hundred ms after it opens, and because sheets are bottom-anchored that
+  /// slides the rows above it — which here are live rating controls — out from
+  /// under the user's finger.
   Future<void> _loadTrackerScores(List<_TrackerRatingSource> sources) async {
     setState(() {
       for (final source in sources) {
@@ -287,21 +285,27 @@ class _RatingBottomSheetState extends State<RatingBottomSheet> {
       }
     });
 
+    void settleAll(_SectionStatus status) {
+      if (!mounted) return;
+      setState(() {
+        for (final source in sources) {
+          _loading.remove(source.service.name);
+          _statuses[source.service.name] = status;
+        }
+      });
+    }
+
     TrackerRatingContext ctx;
     try {
       ctx = await _resolveTrackerContext();
     } on TrackerRatingUnavailableException {
-      if (!mounted) return;
-      setState(() {
-        for (final source in sources) {
-          if (_hidesWhenUnavailable(source)) {
-            _hideTrackerSource(source);
-          } else {
-            _loading.remove(source.service.name);
-            _statuses[source.service.name] = _SectionStatus(t.rateSheet.notAvailable, isError: true);
-          }
-        }
-      });
+      settleAll(_SectionStatus(t.rateSheet.notAvailable, isError: true));
+      return;
+    } catch (e) {
+      // The server or the anime mapping failed to answer: settle the rows the
+      // same way a per-tracker load failure does, or they spin forever.
+      appLogger.w('Failed to resolve tracker rating ids', error: e);
+      settleAll(_SectionStatus(t.errors.failedToRate, isError: true));
       return;
     }
 
@@ -318,12 +322,6 @@ class _RatingBottomSheetState extends State<RatingBottomSheet> {
         } on TrackerRatingUnavailableException catch (e) {
           appLogger.d('Rating unavailable', error: e);
           if (!mounted) return;
-          if (_hidesWhenUnavailable(source)) {
-            setState(() {
-              _hideTrackerSource(source);
-            });
-            return;
-          }
           setState(() {
             _statuses[key] = _SectionStatus(t.rateSheet.notAvailable, isError: true);
           });
@@ -342,21 +340,6 @@ class _RatingBottomSheetState extends State<RatingBottomSheet> {
         }
       }),
     );
-  }
-
-  bool _hidesWhenUnavailable(_TrackerRatingSource source) {
-    return source.service == TrackerService.mal || source.service == TrackerService.anilist;
-  }
-
-  void _hideTrackerSource(_TrackerRatingSource source) {
-    final key = source.service.name;
-    _hiddenTrackers.add(source.service);
-    _loading.remove(key);
-    _statuses.remove(key);
-    _trackerScores.remove(source.service);
-    _autoSaveTimers.remove(key)?.cancel();
-    _pendingAutoSaves.remove(key);
-    _trackerSourcesByKey.remove(key);
   }
 
   void _setServerStarUnits(int units) {
@@ -565,11 +548,7 @@ class _RatingBottomSheetState extends State<RatingBottomSheet> {
     return () => nodes[index].requestFocus();
   }
 
-  String _backendLabel(MediaBackend backend) => switch (backend) {
-    MediaBackend.plex => 'Plex',
-    MediaBackend.jellyfin => 'Jellyfin',
-    MediaBackend.emby => 'Emby',
-  };
+  String _backendLabel(MediaBackend backend) => backend.dialect?.productName ?? 'Plex';
 }
 
 const _serverKey = 'server';

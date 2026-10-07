@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart' show defaultTargetPlatform;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
@@ -12,8 +14,10 @@ import 'key_event_utils.dart';
 import 'owned_focus_node_binding.dart';
 
 enum TvTextInputPresentation {
-  /// Use the native platform keyboard for single-line Apple TV input and the
-  /// Flutter overlay on other TVs or for multiline input.
+  /// Use the native platform keyboard wherever it can host the field: always
+  /// on Android TV (its docked IME handles multiline input), and for
+  /// single-line input on Apple TV, whose modal fullscreen keyboard cannot
+  /// edit multiline text — that falls back to the Flutter overlay.
   automatic,
 
   /// Always use the platform text input implementation.
@@ -27,7 +31,7 @@ bool _usesTvKeyboard({required TvTextInputPresentation presentation, TextInputTy
   if (!PlatformDetector.isTV()) return false;
   return switch (presentation) {
     TvTextInputPresentation.automatic =>
-      !PlatformDetector.isAppleTV() || _isMultilineTextInput(keyboardType: keyboardType, maxLines: maxLines),
+      PlatformDetector.isAppleTV() && _isMultilineTextInput(keyboardType: keyboardType, maxLines: maxLines),
     TvTextInputPresentation.platform => false,
     TvTextInputPresentation.flutterOverlay => true,
   };
@@ -36,24 +40,13 @@ bool _usesTvKeyboard({required TvTextInputPresentation presentation, TextInputTy
 String? _keyboardHint(InputDecoration? decoration) => decoration?.hintText ?? decoration?.labelText;
 
 enum TvTextInputAutoOpenBehavior {
-  /// Resolve per presentation: [onFirstFocus] for the native tvOS keyboard —
-  /// arriving at a field opens it once, but returning to it during D-pad
-  /// traversal does not, since it is a modal full-screen surface and
-  /// re-raising it on every pass makes a form untraversable. [onFocus] for the
-  /// in-app Flutter overlay, which is cheap, non-modal, and involves no UIKit
-  /// first responder.
+  /// Resolve per presentation: open-on-first-focus for the native tvOS
+  /// keyboard — arriving at a field opens it once, but returning to it during
+  /// D-pad traversal does not, since it is a modal full-screen surface and
+  /// re-raising it on every pass makes a form untraversable. Open-on-focus for
+  /// the in-app Flutter overlay, which is cheap, non-modal, and involves no
+  /// UIKit first responder.
   automatic,
-
-  /// Open the selected TV text input presentation whenever the field receives
-  /// focus. On Apple TV this raises the system keyboard on every focus entry,
-  /// including plain D-pad traversal — prefer [automatic] unless the field is
-  /// the sole purpose of its screen.
-  onFocus,
-
-  /// Open on the field's first focus, then stay closed on later focus entries.
-  /// Explicit tap/select still opens it, as does the first focus after a
-  /// focus-node or presentation change.
-  onFirstFocus,
 
   /// Keep initial focus on the field without opening text input, then open it
   /// automatically on later focus entries. Explicit tap/select still opens it.
@@ -69,8 +62,8 @@ enum TvTextInputAutoOpenBehavior {
 /// This is the one documented exception to the `automatic` rule that a field's
 /// first focus opens text input — the URL field's first focus is the screen's
 /// own `autofocus`, not the user arriving. Apple TV therefore waits for an
-/// explicit Select; the in-app overlay is cheap enough to open on a deliberate
-/// return.
+/// explicit Select; Android's docked IME is cheap enough to open on a
+/// deliberate return.
 TvTextInputAutoOpenBehavior get deferredUrlFieldAutoOpen =>
     PlatformDetector.isAppleTV() ? TvTextInputAutoOpenBehavior.never : TvTextInputAutoOpenBehavior.afterFirstFocus;
 
@@ -95,11 +88,11 @@ class TvTextInputController {
   /// Focus the field without opening either native or Flutter text input for
   /// this focus entry.
   void focusInputWithoutOpening() => _host?._focusWithoutKeyboard();
-}
 
-String _describeTextInputKey(KeyEvent event) {
-  return 'type=${event.runtimeType} logical=${event.logicalKey.keyLabel}/${event.logicalKey.keyId} '
-      'physical=${event.physicalKey.usbHidUsage} deviceType=${event.deviceType} character=${event.character}';
+  /// Focus the field and open its text input, as an explicit Select would —
+  /// for a field the app creates on the user's behalf (a new editor row) that
+  /// should be typed into at once, without a second press.
+  void focusAndOpenTextInput() => _host?._focusAndOpenTextInput();
 }
 
 void _logTvTextInput(String message) {
@@ -185,7 +178,7 @@ KeyEventResult _handleInputKey({
   KeyEventResult finish(KeyEventResult result, String reason) {
     if (diagnosticsEnabled) {
       _logTvTextInput(
-        'result=$result reason=$reason key=(${_describeTextInputKey(event)}) '
+        'result=$result reason=$reason key=(${describeKeyEvent(event)}) '
         'usesTvKeyboard=$usesTvKeyboard enabled=$enabled textLength=${controller.text.length} '
         'selection=${controller.selection} onNav(up=${onNavigateUp != null},down=${onNavigateDown != null},'
         'left=${onNavigateLeft != null},right=${onNavigateRight != null}) onSelect=${onSelect != null} onBack=${onBack != null}',
@@ -196,7 +189,7 @@ KeyEventResult _handleInputKey({
 
   if (diagnosticsEnabled) {
     _logTvTextInput(
-      'received key=(${_describeTextInputKey(event)}) usesTvKeyboard=$usesTvKeyboard enabled=$enabled '
+      'received key=(${describeKeyEvent(event)}) usesTvKeyboard=$usesTvKeyboard enabled=$enabled '
       'textLength=${controller.text.length} selection=${controller.selection}',
     );
   }
@@ -236,9 +229,39 @@ KeyEventResult _handleInputKey({
     if (result != KeyEventResult.ignored) return finish(result, 'custom-tv-hardware-keyboard');
   }
 
-  if (onBack != null && key.isBackKey) {
-    if (event is KeyDownEvent) onBack();
-    return finish(KeyEventResult.handled, 'onBack');
+  // A TV back press this field already claimed on KeyDown (its own onBack
+  // below, or the host closing a native session) leaves the matching KeyUp
+  // in flight: swallow it here regardless of onBack, so a field without one
+  // never lets the KeyUp bubble to an ancestor that acts on KeyUp.
+  if (event.logicalKey.isBackKey && PlatformDetector.isTV() && BackKeyUpSuppressor.consumeIfSuppressed(event)) {
+    return finish(KeyEventResult.handled, 'suppressed-back');
+  }
+
+  if (onBack != null && event.logicalKey.isBackKey) {
+    // On TV the native text-input path can swallow the matching KeyUp (the
+    // closing IME session eats it), so back fires on KeyDown — the same
+    // down-only shape as [handleBackKeyAction]'s Apple TV branch, coordinator
+    // mark included so a parallel back dispatch still dedupes. Elsewhere the
+    // shared handler's KeyUp semantics apply.
+    if (PlatformDetector.isTV()) {
+      if (event is KeyDownEvent) {
+        BackKeyCoordinator.markHandled();
+        onBack();
+        // onBack may move focus (empty search field -> sidebar); the matching
+        // KeyUp is then delivered to the NEW focus chain, whose shared
+        // handlers act on KeyUp — a second back action. Arm the suppressor
+        // (after onBack, so a modal opened by it cannot clear the arming) so
+        // whichever chain receives the KeyUp swallows it. This cannot pin:
+        // the suppressor's hardware observer clears the armed state once the
+        // physical press ends, and if the IME swallows that KeyUp entirely,
+        // the next back KeyDown is treated as stale arming and passes
+        // through — see _KeyUpSuppressor.
+        BackKeyUpSuppressor.suppressBackUntilKeyUp();
+      }
+      return finish(KeyEventResult.handled, 'onBack');
+    }
+    final backResult = handleBackKeyAction(event, onBack);
+    if (backResult != KeyEventResult.ignored) return finish(backResult, 'onBack');
   }
 
   // Enter/numpad enter are left to TextField.onSubmitted. Handle only
@@ -310,19 +333,23 @@ bool _shouldPassNativeTvKeyToPlatform({
   required bool enabled,
   required KeyEvent event,
 }) {
-  if (!enabled || usesTvKeyboard || !nativeTextInputActive || !PlatformDetector.isTV()) {
+  if (!enabled || usesTvKeyboard || !nativeTextInputActive || !PlatformDetector.isAppleTV()) {
     if (TextInputDiagnostics.enabled) {
       _logTvTextInput(
         'native-pass=false reason=inactive-disabled-or-custom enabled=$enabled '
         'usesTvKeyboard=$usesTvKeyboard nativeTextInputActive=$nativeTextInputActive '
-        'isTv=${PlatformDetector.isTV()} key=(${_describeTextInputKey(event)})',
+        'isAppleTV=${PlatformDetector.isAppleTV()} key=(${describeKeyEvent(event)})',
       );
     }
     return false;
   }
 
-  // Android TV provides its own IME. Remote keys must reach the platform so
-  // users can move around that keyboard instead of escaping the app field.
+  // tvOS only: the custom engine routes remote keys through Flutter even
+  // while UIKit text input is live, so they must be skipped back to the
+  // platform to drive the system keyboard. Android needs no such pass — the
+  // IME sees hardware keys *before* the app (ImeInputStage), so a navigation
+  // key arriving here was already declined by the IME and must keep its
+  // local caret/traversal semantics (see the host's Android branch).
   // Some remotes (Chromecast) are reported by Flutter as keyboard events, so
   // native TV navigation cannot rely on deviceType.
   final key = event.logicalKey;
@@ -330,7 +357,7 @@ bool _shouldPassNativeTvKeyToPlatform({
   if (TextInputDiagnostics.enabled) {
     _logTvTextInput(
       'native-pass=$shouldPass reason=${shouldPass ? "remote-navigation-key" : "not-navigation-key"} '
-      'key=(${_describeTextInputKey(event)})',
+      'key=(${describeKeyEvent(event)})',
     );
   }
   return shouldPass;
@@ -393,7 +420,7 @@ KeyEventResult _handleTvHardwareKeyboardKey({
   }
 
   final character = event.character;
-  if (character != null && character.isNotEmpty && !key.isNavigationKey && !_isControlCharacter(character)) {
+  if (character != null && character.isNotEmpty && !key.isReservedControlKey && !_isControlCharacter(character)) {
     _insertText(
       controller: controller,
       text: character,
@@ -769,7 +796,29 @@ class _FocusableTextInputHost extends StatefulWidget {
   State<_FocusableTextInputHost> createState() => _FocusableTextInputHostState();
 }
 
-class _FocusableTextInputHostState extends State<_FocusableTextInputHost> {
+enum _NativeTextInputEndReason {
+  dismissed,
+  completed,
+  explicitClose,
+  restart,
+  focusLost,
+  configurationChanged,
+  disposed,
+}
+
+/// Kept after dismissal so an IME action already in flight can still complete
+/// this session, but never a replacement session on the same field.
+class _NativeTextInputSession {
+  final FocusNode focusNode;
+  _NativeTextInputEndReason? endReason;
+  bool keyboardWasVisible = false;
+
+  _NativeTextInputSession(this.focusNode);
+
+  bool get isActive => endReason == null;
+}
+
+class _FocusableTextInputHostState extends State<_FocusableTextInputHost> with WidgetsBindingObserver {
   final OwnedFocusNodeBinding _focusNodeBinding = OwnedFocusNodeBinding();
   FocusNode? _installedFocusNode;
   FocusOnKeyEventCallback? _previousOnKeyEvent;
@@ -783,10 +832,13 @@ class _FocusableTextInputHostState extends State<_FocusableTextInputHost> {
   bool _suppressTvKeyboardAutoOpen = false;
   bool _hasSeenTvKeyboardFocus = false;
   bool _suppressTvKeyboardForCurrentFocus = false;
-  bool _nativeTextInputActivated = false;
+  _NativeTextInputSession? _nativeTextInputSession;
+  int _nativeTextInputGeneration = 0;
+  ui.FlutterView? _nativeTextInputView;
   bool _hasSeenNativeTextInputFocus = false;
   bool _suppressNativeTextInputForCurrentFocus = false;
-  bool _nativeTextInputCompletionHandled = false;
+
+  bool get _nativeTextInputActivated => _nativeTextInputSession?.isActive == true;
 
   FocusNode get _effectiveFocusNode => _focusNodeBinding.node;
 
@@ -795,6 +847,40 @@ class _FocusableTextInputHostState extends State<_FocusableTextInputHost> {
     super.initState();
     _focusNodeBinding.bind(externalNode: widget.input.focusNode, debugLabel: 'FocusableTextInput');
     widget.input.tvTextInputController?._attach(this);
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_nativeTextInputView != null) {
+      final view = View.of(context);
+      if (!identical(view, _nativeTextInputView)) {
+        _nativeTextInputView = view;
+        _nativeTextInputSession?.keyboardWasVisible = view.viewInsets.bottom > 0;
+        _nativeTextInputGeneration++;
+      }
+    }
+  }
+
+  @override
+  void didChangeMetrics() {
+    final session = _nativeTextInputSession;
+    if (!mounted || session == null || !session.isActive || !session.focusNode.hasFocus) return;
+    final view = View.of(context);
+    if (!identical(view, _nativeTextInputView)) {
+      _nativeTextInputView = view;
+      session.keyboardWasVisible = view.viewInsets.bottom > 0;
+      _nativeTextInputGeneration++;
+      return;
+    }
+    if (view.viewInsets.bottom > 0) {
+      session.keyboardWasVisible = true;
+    } else if (session.keyboardWasVisible) {
+      // Leanback can consume Back and hide without closing the connection or
+      // sending performAction. Zero before any visible metrics is not a hide:
+      // the IME may still be opening, or this may be a hardware keyboard.
+      _endNativeTextInput(_NativeTextInputEndReason.dismissed);
+    }
   }
 
   @override
@@ -813,13 +899,17 @@ class _FocusableTextInputHostState extends State<_FocusableTextInputHost> {
       _tvKeyboardOpenScheduled = false;
       _hasSeenTvKeyboardFocus = false;
       _suppressTvKeyboardForCurrentFocus = false;
-      _nativeTextInputActivated = false;
+      _endNativeTextInput(_NativeTextInputEndReason.configurationChanged, rebuild: false);
       _hasSeenNativeTextInputFocus = false;
       _suppressNativeTextInputForCurrentFocus = false;
     }
     if (oldWidget.input.tvTextInputPresentation != widget.input.tvTextInputPresentation ||
-        oldWidget.input.tvTextInputAutoOpenBehavior != widget.input.tvTextInputAutoOpenBehavior) {
-      _nativeTextInputActivated = false;
+        oldWidget.input.tvTextInputAutoOpenBehavior != widget.input.tvTextInputAutoOpenBehavior ||
+        oldWidget.input.enabled != widget.input.enabled ||
+        oldWidget.input.controller != widget.input.controller ||
+        oldWidget.input.keyboardType != widget.input.keyboardType ||
+        oldWidget.input.maxLines != widget.input.maxLines) {
+      _endNativeTextInput(_NativeTextInputEndReason.configurationChanged, rebuild: false);
       _hasSeenNativeTextInputFocus = false;
       _suppressNativeTextInputForCurrentFocus = false;
     }
@@ -831,6 +921,7 @@ class _FocusableTextInputHostState extends State<_FocusableTextInputHost> {
   @override
   void dispose() {
     widget.input.tvTextInputController?._detach(this);
+    _endNativeTextInput(_NativeTextInputEndReason.disposed, rebuild: false);
     _restoreInstalledHandler();
     // The keyboard is a navigator route — it must not outlive the field that
     // opened it (e.g. a form section swapped out while the keyboard is up).
@@ -864,18 +955,20 @@ class _FocusableTextInputHostState extends State<_FocusableTextInputHost> {
   void _restoreFocusAfterPlatformDismissal() {
     final node = _installedFocusNode;
     if (node == null || node.hasFocus || !_nativeTextInputActivated) return;
-    // Apple TV only: Android TV's IME close keeps its historical semantics,
-    // and no production field selects the native path there anyway.
+    // Apple TV only: connectionClosed-driven unfocus is a behavior of the
+    // custom tvOS engine. Android's IME hide keeps the field focused and the
+    // connection alive, so there is nothing to restore there.
     if (!PlatformDetector.isAppleTV()) return;
     if (!widget.input.enabled || !widget.input._usesNativeTvKeyboard) return;
     final scope = node.enclosingScope;
     if (scope == null || !identical(FocusManager.instance.primaryFocus, scope)) return;
 
-    _setNativeTextInputActivated(false);
+    _endNativeTextInput(_NativeTextInputEndReason.focusLost);
+    final generation = _nativeTextInputGeneration;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
+      if (!mounted || generation != _nativeTextInputGeneration) return;
       final target = _installedFocusNode;
-      if (target == null || target.hasFocus || !target.canRequestFocus) return;
+      if (!identical(target, node) || target == null || target.hasFocus || !target.canRequestFocus) return;
       if (!identical(FocusManager.instance.primaryFocus, scope)) return;
       // Set before requesting focus so the resulting focus-change callback
       // cannot reopen the keyboard we were just dismissed out of.
@@ -889,7 +982,7 @@ class _FocusableTextInputHostState extends State<_FocusableTextInputHost> {
     final focused = _installedFocusNode?.hasFocus == true && input.enabled && input._usesNativeTvKeyboard;
     if (!focused) {
       _suppressNativeTextInputForCurrentFocus = false;
-      _setNativeTextInputActivated(false);
+      _endNativeTextInput(_NativeTextInputEndReason.focusLost);
       return;
     }
     if (_suppressNativeTextInputForCurrentFocus) return;
@@ -899,61 +992,115 @@ class _FocusableTextInputHostState extends State<_FocusableTextInputHost> {
       // field should still open it — otherwise typing always costs two
       // presses — but re-raising it every time D-pad traversal passes back
       // over the field makes a multi-field form unusable, so `automatic`
-      // resolves to `onFirstFocus` there. Android TV's native IME is a docked
+      // opens only on first focus there. Android TV's native IME is a docked
       // soft keyboard that does not take over the screen, so it keeps the
-      // historical auto-open. Explicit modes stay literal on both: a caller
-      // that asks for onFocus gets onFocus.
+      // historical auto-open.
       case TvTextInputAutoOpenBehavior.automatic:
         if (PlatformDetector.isAppleTV() && _hasSeenNativeTextInputFocus) return;
         _hasSeenNativeTextInputFocus = true;
-        _setNativeTextInputActivated(true);
-      case TvTextInputAutoOpenBehavior.onFirstFocus:
-        if (_hasSeenNativeTextInputFocus) return;
-        _hasSeenNativeTextInputFocus = true;
-        _setNativeTextInputActivated(true);
-      case TvTextInputAutoOpenBehavior.onFocus:
-        _hasSeenNativeTextInputFocus = true;
-        _setNativeTextInputActivated(true);
+        _beginNativeTextInput();
       case TvTextInputAutoOpenBehavior.afterFirstFocus:
         if (!_hasSeenNativeTextInputFocus) {
           _hasSeenNativeTextInputFocus = true;
           _suppressNativeTextInputForCurrentFocus = true;
           return;
         }
-        _setNativeTextInputActivated(true);
+        _beginNativeTextInput();
       case TvTextInputAutoOpenBehavior.never:
         return;
     }
   }
 
-  void _setNativeTextInputActivated(bool activated) {
-    if (_nativeTextInputActivated == activated) return;
-    if (activated) _nativeTextInputCompletionHandled = false;
-    if (!mounted) {
-      _nativeTextInputActivated = activated;
+  void _beginNativeTextInput() {
+    final node = _installedFocusNode;
+    if (_nativeTextInputActivated || node == null || !node.hasFocus) return;
+    _nativeTextInputGeneration++;
+    _nativeTextInputSession = _NativeTextInputSession(node);
+    if (!PlatformDetector.isAppleTV() && defaultTargetPlatform == TargetPlatform.android) {
+      // Observe the owning view, not MediaQuery: Scaffold removes the bottom
+      // inset before building its body. A focus handoff can keep the same IME
+      // visible, so sample the current view rather than wait for another show.
+      _nativeTextInputView = View.of(context);
+      _nativeTextInputSession!.keyboardWasVisible = _nativeTextInputView!.viewInsets.bottom > 0;
+      WidgetsBinding.instance.addObserver(this);
+    }
+    _syncNativeTextInputFocus();
+    setState(() {});
+  }
+
+  void _endNativeTextInput(_NativeTextInputEndReason reason, {bool rebuild = true}) {
+    final session = _nativeTextInputSession;
+    if (session == null) {
+      if (reason == _NativeTextInputEndReason.explicitClose ||
+          reason == _NativeTextInputEndReason.configurationChanged ||
+          reason == _NativeTextInputEndReason.disposed) {
+        _nativeTextInputGeneration++;
+      }
       return;
     }
-    setState(() => _nativeTextInputActivated = activated);
+    if (session.endReason == reason) return;
+    final wasActive = session.isActive;
+    session.endReason = reason;
+    session.keyboardWasVisible = false;
+    _nativeTextInputGeneration++;
+    if (_nativeTextInputView != null) {
+      WidgetsBinding.instance.removeObserver(this);
+      _nativeTextInputView = null;
+    }
+    if (reason == _NativeTextInputEndReason.dismissed ||
+        reason == _NativeTextInputEndReason.completed ||
+        reason == _NativeTextInputEndReason.explicitClose ||
+        reason == _NativeTextInputEndReason.restart) {
+      _suppressNativeTextInputForCurrentFocus = true;
+    }
+    _setNativeTextInputFocused(false);
+    if (wasActive && rebuild && mounted) setState(() {});
+  }
+
+  void _scheduleNativeTextInputReactivation() {
+    final generation = _nativeTextInputGeneration;
+    final node = _installedFocusNode;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted ||
+          generation != _nativeTextInputGeneration ||
+          !identical(node, _installedFocusNode) ||
+          node?.hasFocus != true) {
+        return;
+      }
+      _activateNativeTextInput();
+    });
   }
 
   void _activateNativeTextInput() {
     if (!widget.input.enabled || !widget.input._usesNativeTvKeyboard) return;
     _hasSeenNativeTextInputFocus = true;
     _suppressNativeTextInputForCurrentFocus = false;
-    _setNativeTextInputActivated(true);
+    _beginNativeTextInput();
   }
 
   VoidCallback? get _effectiveOnEditingComplete {
     final input = widget.input;
     if (!input._usesNativeTvKeyboard) return input._effectiveOnEditingComplete;
-    return _handleNativeEditingComplete;
+    final session = _nativeTextInputSession;
+    return () => _handleNativeEditingComplete(session);
   }
 
-  void _handleNativeEditingComplete() {
-    if (_nativeTextInputCompletionHandled) return;
-    _nativeTextInputCompletionHandled = true;
-    _suppressNativeTextInputForCurrentFocus = true;
-    _setNativeTextInputActivated(false);
+  void _handleNativeEditingComplete(_NativeTextInputSession? session) {
+    if (!mounted ||
+        session == null ||
+        !identical(session, _nativeTextInputSession) ||
+        !session.focusNode.hasFocus ||
+        !widget.input.enabled ||
+        !widget.input._usesNativeTvKeyboard) {
+      return;
+    }
+    // Hide and performAction are separate platform notifications. A hide is
+    // not completion, but must not consume a real Done/Previous delivered for
+    // this same connection before EditableText detaches it at rebuild. Accept
+    // that action once even if metrics won the race; every other terminal
+    // reason (or a successor session) makes the callback stale.
+    if (!session.isActive && session.endReason != _NativeTextInputEndReason.dismissed) return;
+    _endNativeTextInput(_NativeTextInputEndReason.completed);
 
     final input = widget.input;
     final callback = input._effectiveOnEditingComplete;
@@ -978,12 +1125,22 @@ class _FocusableTextInputHostState extends State<_FocusableTextInputHost> {
   }
 
   void _syncNativeTextInputFocus() {
-    final focused = _installedFocusNode?.hasFocus == true && widget.input.enabled && widget.input._usesNativeTvKeyboard;
+    // Activation-based, not focus-based: the platform hint pauses the gamepad
+    // bridge and defers the pre-IME D-pad intercept to the IME, and it arms
+    // MainActivity's soft-input show-retry/repair session — all of which must
+    // track a *live* text input session, not a merely focused (read-only
+    // gated) field. A dismissed keyboard therefore hands D-pad routing back
+    // to the app immediately.
+    final focused =
+        _installedFocusNode?.hasFocus == true &&
+        widget.input.enabled &&
+        widget.input._usesNativeTvKeyboard &&
+        _nativeTextInputActivated;
     if (TextInputDiagnostics.enabled) {
       _logTvTextInput(
         'Host.syncNativeTextInputFocus focused=$focused installed=${_installedFocusNode?.debugLabel} '
         'hasFocus=${_installedFocusNode?.hasFocus} enabled=${widget.input.enabled} '
-        'usesNativeTvKeyboard=${widget.input._usesNativeTvKeyboard}',
+        'usesNativeTvKeyboard=${widget.input._usesNativeTvKeyboard} activated=$_nativeTextInputActivated',
       );
     }
     _setNativeTextInputFocused(focused);
@@ -1035,11 +1192,6 @@ class _FocusableTextInputHostState extends State<_FocusableTextInputHost> {
       // The Flutter overlay is an in-app, non-modal widget with no UIKit first
       // responder behind it, so opening it on focus costs nothing.
       case TvTextInputAutoOpenBehavior.automatic:
-      case TvTextInputAutoOpenBehavior.onFocus:
-        return true;
-      case TvTextInputAutoOpenBehavior.onFirstFocus:
-        if (_hasSeenTvKeyboardFocus) return false;
-        _hasSeenTvKeyboardFocus = true;
         return true;
       case TvTextInputAutoOpenBehavior.afterFirstFocus:
         if (!_hasSeenTvKeyboardFocus) {
@@ -1118,9 +1270,8 @@ class _FocusableTextInputHostState extends State<_FocusableTextInputHost> {
   /// that must show results instead of the keyboard). Suppresses auto-reopen
   /// so a field that keeps or regains focus does not relaunch it.
   void _dismissTvKeyboard() {
-    if (widget.input._usesNativeTvKeyboard && _nativeTextInputActivated) {
-      _suppressNativeTextInputForCurrentFocus = true;
-      _setNativeTextInputActivated(false);
+    if (widget.input._usesNativeTvKeyboard) {
+      _endNativeTextInput(_NativeTextInputEndReason.explicitClose);
     }
 
     // No-op for the Flutter presentation when no overlay is up: setting its
@@ -1140,15 +1291,64 @@ class _FocusableTextInputHostState extends State<_FocusableTextInputHost> {
     _suppressNativeTextInputForCurrentFocus = true;
     _tvKeyboardOpenScheduled = false;
     if (widget.input._usesNativeTvKeyboard) {
-      _setNativeTextInputActivated(false);
+      _endNativeTextInput(_NativeTextInputEndReason.explicitClose);
     }
     final focusNode = _installedFocusNode ?? _effectiveFocusNode;
+    final generation = _nativeTextInputGeneration;
     focusNode.requestFocus();
     scheduleMicrotask(() {
-      if (!mounted || focusNode.hasFocus || _tvKeyboardOpen || _tvKeyboardOpenScheduled) return;
+      if (!mounted ||
+          generation != _nativeTextInputGeneration ||
+          !identical(focusNode, _installedFocusNode) ||
+          focusNode.hasFocus ||
+          _tvKeyboardOpen ||
+          _tvKeyboardOpenScheduled) {
+        return;
+      }
       _suppressTvKeyboardAutoOpen = false;
       _suppressNativeTextInputForCurrentFocus = false;
     });
+  }
+
+  /// Focus the field and open text input as an explicit Select would. Clears
+  /// per-focus suppression first so a field configured with
+  /// [TvTextInputAutoOpenBehavior.never] still opens.
+  void _focusAndOpenTextInput() {
+    _suppressTvKeyboardAutoOpen = false;
+    _suppressNativeTextInputForCurrentFocus = false;
+    final focusNode = _installedFocusNode ?? _effectiveFocusNode;
+    if (focusNode.hasFocus) {
+      _openTextInputForFocusedField();
+      return;
+    }
+    focusNode.requestFocus();
+    final generation = _nativeTextInputGeneration;
+    // Focus lands in FocusManager's microtask. Activating before that would be
+    // undone by the focus sync this frame's build already scheduled, which
+    // deactivates an unfocused field.
+    scheduleMicrotask(() {
+      if (mounted &&
+          generation == _nativeTextInputGeneration &&
+          identical(focusNode, _installedFocusNode) &&
+          focusNode.hasFocus) {
+        _openTextInputForFocusedField();
+      }
+    });
+  }
+
+  void _openTextInputForFocusedField() {
+    if (widget.input._usesNativeTvKeyboard) {
+      _activateNativeTextInput();
+    } else if (widget.input._hasTvKeyboard && !_tvKeyboardOpen && !_tvKeyboardOpenScheduled) {
+      // The overlay is a navigator route; push it once the focus request has
+      // landed so the route's focus scope does not race the field's.
+      _tvKeyboardOpenScheduled = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted) return;
+        _tvKeyboardOpenScheduled = false;
+        _openTvKeyboard();
+      });
+    }
   }
 
   void _setNativeTextInputFocused(bool focused) {
@@ -1166,36 +1366,61 @@ class _FocusableTextInputHostState extends State<_FocusableTextInputHost> {
     if (previous != null && !identical(previous, _keyHandler)) {
       final result = previous(node, event);
       _logTvTextInput(
-        'Host.previousOnKeyEvent node=${node.debugLabel} result=$result key=(${_describeTextInputKey(event)})',
+        'Host.previousOnKeyEvent node=${node.debugLabel} result=$result key=(${describeKeyEvent(event)})',
       );
       if (result != KeyEventResult.ignored) return result;
     }
     var activateNativeTextInput = widget.input._usesNativeTvKeyboard && !_nativeTextInputActivated;
     final isRemoteNavigation = event.logicalKey.isDpadDirection || event.logicalKey.isBackKey || event.isTvSelectEvent;
-    if (PlatformDetector.isAppleTV() &&
-        widget.input._usesNativeTvKeyboard &&
+    if (widget.input._usesNativeTvKeyboard &&
         _nativeTextInputActivated &&
         event is KeyDownEvent &&
         isRemoteNavigation) {
-      // Remote navigation events are system-owned while the native keyboard
-      // is active. Receiving one here proves that UIKit has dismissed the
-      // keyboard while Flutter focus stayed on the field. Restore the
-      // read-only gate so this press navigates Flutter instead of reopening
-      // the input connection.
-      _suppressNativeTextInputForCurrentFocus = true;
-      _setNativeTextInputActivated(false);
-      activateNativeTextInput = true;
-      if (event.logicalKey.isBackKey) {
-        // This is the Menu press that dismissed UIKit's keyboard. Consume its
-        // Flutter continuation so one press cannot also pop the app route.
+      if (PlatformDetector.isAppleTV()) {
+        // Remote navigation events are system-owned while the native keyboard
+        // is active. Receiving one here proves that UIKit has dismissed the
+        // keyboard while Flutter focus stayed on the field. Restore the
+        // read-only gate so this press navigates Flutter instead of reopening
+        // the input connection.
+        _endNativeTextInput(
+          event.isTvSelectEvent ? _NativeTextInputEndReason.restart : _NativeTextInputEndReason.dismissed,
+        );
+        activateNativeTextInput = true;
+        if (event.logicalKey.isBackKey) {
+          // This is the Menu press that dismissed UIKit's keyboard. Consume its
+          // Flutter continuation so one press cannot also pop the app route.
+          return KeyEventResult.handled;
+        }
+        if (event.isTvSelectEvent) {
+          _scheduleNativeTextInputReactivation();
+          return KeyEventResult.handled;
+        }
+      } else if (event.logicalKey.isBackKey) {
+        // Android: a healthy IME consumes Back to dismiss itself before the
+        // app ever sees it. One arriving here means the keyboard is already
+        // gone (or its key session is broken and MainActivity's repair budget
+        // ran out): close the session and claim the whole press — coordinator
+        // mark so a same-press platform popRoute dedupes, suppressor armed so
+        // the matching KeyUp (delivered to this node with the session closed,
+        // or to an ancestor acting on KeyUp) cannot pop the route underneath.
+        _endNativeTextInput(_NativeTextInputEndReason.dismissed);
+        BackKeyCoordinator.markHandled();
+        BackKeyUpSuppressor.suppressBackUntilKeyUp();
+        return KeyEventResult.handled;
+      } else if (event.isTvSelectEvent) {
+        // Android: Select on a field whose keyboard was dismissed re-raises
+        // it (EditText parity). Toggle the connection so the engine issues a
+        // fresh TextInput.show; MainActivity's show-retry covers the
+        // served-view race (#1051/#1079).
+        _endNativeTextInput(_NativeTextInputEndReason.restart);
+        _scheduleNativeTextInputReactivation();
         return KeyEventResult.handled;
       }
-      if (event.isTvSelectEvent) {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) _activateNativeTextInput();
-        });
-        return KeyEventResult.handled;
-      }
+      // Android arrows fall through deliberately: a healthy visible IME
+      // consumes them before the app, and leaked ones are repaired and eaten
+      // by MainActivity — so an arrow reaching this handler is real caret or
+      // traversal input (BT keyboards included) and keeps the caret-aware
+      // edge-escape semantics below.
     }
     return widget.input._handleKey(
       context,
@@ -1229,7 +1454,7 @@ class _FocusableTextInputHostState extends State<_FocusableTextInputHost> {
   void _restoreInstalledHandler() {
     _logTvTextInput('Host.restoreInstalledHandler node=${_installedFocusNode?.debugLabel}');
     _setNativeTextInputFocused(false);
-    _nativeTextInputActivated = false;
+    _endNativeTextInput(_NativeTextInputEndReason.focusLost, rebuild: false);
     _suppressNativeTextInputForCurrentFocus = false;
     final node = _installedFocusNode;
     if (node != null) {

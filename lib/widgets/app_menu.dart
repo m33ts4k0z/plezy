@@ -78,8 +78,6 @@ Future<T?> showAppMenu<T>(
   Rect? anchorRect,
   AppMenuAnchorAlignment anchorAlignment = AppMenuAnchorAlignment.start,
   bool focusFirstItem = false,
-  double minWidth = 220,
-  double? maxWidth,
 }) {
   assert(position != null || anchorRect != null, 'showAppMenu requires a position or anchorRect');
 
@@ -95,8 +93,6 @@ Future<T?> showAppMenu<T>(
       anchorRect: anchorRect,
       anchorAlignment: anchorAlignment,
       focusFirstItem: focusFirstItem,
-      minWidth: minWidth,
-      maxWidth: maxWidth,
     ),
     transitionBuilder: (dialogContext, animation, _, child) {
       final curved = CurvedAnimation(parent: animation, curve: Curves.easeOutCubic, reverseCurve: Curves.easeInCubic);
@@ -119,6 +115,136 @@ Future<T?> showAppMenu<T>(
   );
 }
 
+const double _anchoredPanelWidth = 380;
+const double _anchoredPanelMaxHeight = 560;
+
+/// Shows arbitrary content in a menu-styled surface anchored to [anchorRect].
+///
+/// The menu entry API covers rows that close on selection; a panel hosts a
+/// control the user stays inside (the library filter editor), which a
+/// `PopupMenu` cannot do because selecting an item pops the route. Dismissal
+/// (barrier, back key, secondary click) resolves the future with null, so a
+/// caller commits pending state the same way it does for a sheet.
+Future<T?> showAnchoredPanel<T>(
+  BuildContext context, {
+  required Rect anchorRect,
+  required WidgetBuilder builder,
+  AppMenuAnchorAlignment anchorAlignment = AppMenuAnchorAlignment.start,
+  double width = _anchoredPanelWidth,
+  double maxHeight = _anchoredPanelMaxHeight,
+}) {
+  return showGeneralDialog<T>(
+    context: context,
+    barrierDismissible: true,
+    barrierLabel: MaterialLocalizations.of(context).modalBarrierDismissLabel,
+    barrierColor: Colors.transparent,
+    transitionDuration: const Duration(milliseconds: 120),
+    pageBuilder: (dialogContext, _, _) => _AnchoredPanel(
+      anchorRect: anchorRect,
+      anchorAlignment: anchorAlignment,
+      width: width,
+      maxHeight: maxHeight,
+      builder: builder,
+    ),
+    transitionBuilder: (dialogContext, animation, _, child) {
+      final curved = CurvedAnimation(parent: animation, curve: Curves.easeOutCubic, reverseCurve: Curves.easeInCubic);
+      return FadeTransition(
+        opacity: curved,
+        child: AnimatedBuilder(
+          animation: curved,
+          child: child,
+          builder: (context, child) => Transform.scale(
+            scale: 0.96 + curved.value * 0.04,
+            alignment: _transitionAlignment(dialogContext, anchorRect: anchorRect),
+            transformHitTests: false,
+            child: child,
+          ),
+        ),
+      );
+    },
+  );
+}
+
+class _AnchoredPanel extends StatelessWidget {
+  final Rect anchorRect;
+  final AppMenuAnchorAlignment anchorAlignment;
+  final double width;
+  final double maxHeight;
+  final WidgetBuilder builder;
+
+  const _AnchoredPanel({
+    required this.anchorRect,
+    required this.anchorAlignment,
+    required this.width,
+    required this.maxHeight,
+    required this.builder,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final screenSize = MediaQuery.sizeOf(context);
+    const edgePadding = 8.0;
+    const gap = 4.0;
+    final colorScheme = Theme.of(context).colorScheme;
+    final panelWidth = width.clamp(0.0, math.max(160.0, screenSize.width - edgePadding * 2)).toDouble();
+    final leftCandidate = switch (anchorAlignment) {
+      AppMenuAnchorAlignment.start => anchorRect.left,
+      AppMenuAnchorAlignment.end => anchorRect.right - panelWidth,
+      AppMenuAnchorAlignment.center => anchorRect.center.dx - panelWidth / 2,
+    };
+    final maxLeft = screenSize.width - panelWidth - edgePadding;
+    final left = leftCandidate.clamp(edgePadding, maxLeft < edgePadding ? edgePadding : maxLeft).toDouble();
+
+    // Below the chip when there is room for the panel's ceiling, otherwise
+    // pinned above it. Anchoring by the opposite edge in the flipped case
+    // keeps a content-sized panel attached to the chip instead of floating.
+    final spaceBelow = screenSize.height - anchorRect.bottom - gap - edgePadding;
+    final openBelow = spaceBelow >= math.min(maxHeight, 220.0);
+    final availableHeight = openBelow ? spaceBelow : anchorRect.top - gap - edgePadding;
+    final effectiveMaxHeight = math.max(120.0, math.min(maxHeight, availableHeight));
+
+    final panel = Material(
+      elevation: 3,
+      shadowColor: colorScheme.shadow,
+      color: Color.alphaBlend(colorScheme.onSurface.withValues(alpha: 0.08), colorScheme.surface),
+      borderRadius: BorderRadius.circular(tokens(context).radiusMd),
+      clipBehavior: Clip.antiAlias,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(minWidth: panelWidth, maxWidth: panelWidth, maxHeight: effectiveMaxHeight),
+        child: PrimaryScrollController.none(child: builder(context)),
+      ),
+    );
+
+    return FocusScope(
+      autofocus: false,
+      child: Focus(
+        canRequestFocus: false,
+        skipTraversal: true,
+        onKeyEvent: (node, event) {
+          if (SelectKeyUpSuppressor.consumeIfSuppressed(event)) return KeyEventResult.handled;
+          if (BackKeyUpSuppressor.consumeIfSuppressed(event)) return KeyEventResult.handled;
+          if (event.logicalKey.isBackKey) return handleBackKeyAction(event, () => Navigator.pop(context));
+          return KeyEventResult.ignored;
+        },
+        child: Listener(
+          behavior: HitTestBehavior.translucent,
+          onPointerDown: (event) {
+            if ((event.buttons & kSecondaryMouseButton) != 0) Navigator.pop(context);
+          },
+          child: Stack(
+            children: [
+              if (openBelow)
+                Positioned(left: left, top: anchorRect.bottom + gap, child: panel)
+              else
+                Positioned(left: left, bottom: screenSize.height - anchorRect.top + gap, child: panel),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 Future<T?> showAdaptiveAppMenu<T>(
   BuildContext context, {
   required List<AppMenuEntry<T>> entries,
@@ -127,8 +253,6 @@ Future<T?> showAdaptiveAppMenu<T>(
   Rect? anchorRect,
   AppMenuAnchorAlignment anchorAlignment = AppMenuAnchorAlignment.start,
   bool focusFirstItem = false,
-  double minWidth = 220,
-  double? maxWidth,
   bool isScrollControlled = false,
 }) {
   // ThemeData.platform follows the real target platform by default, including
@@ -150,8 +274,6 @@ Future<T?> showAdaptiveAppMenu<T>(
     anchorRect: anchorRect,
     anchorAlignment: anchorAlignment,
     focusFirstItem: focusFirstItem,
-    minWidth: minWidth,
-    maxWidth: maxWidth,
   );
 }
 
@@ -168,28 +290,27 @@ class AppMenuButton<T> extends StatefulWidget {
   final Widget? icon;
   final Widget? child;
   final String? tooltip;
+
+  /// When true, iOS/Android (phones plus Android TV / tvOS) present the menu
+  /// as an untitled bottom sheet — just the drag handle and rows — via
+  /// [showAdaptiveAppMenu]; desktop keeps the anchored popup. False keeps the
+  /// anchored popup on every platform.
+  final bool adaptiveSheet;
   final bool enabled;
   final AppMenuEntryBuilder<T> entriesBuilder;
   final ValueChanged<T>? onSelected;
   final AppMenuAnchorAlignment anchorAlignment;
-  final Offset alignmentOffset;
-  final double minWidth;
-  final double? maxWidth;
-  final EdgeInsetsGeometry? childPadding;
 
   const AppMenuButton({
     super.key,
     this.icon,
     this.child,
     this.tooltip,
+    this.adaptiveSheet = false,
     this.enabled = true,
     required this.entriesBuilder,
     this.onSelected,
     this.anchorAlignment = AppMenuAnchorAlignment.start,
-    this.alignmentOffset = Offset.zero,
-    this.minWidth = 220,
-    this.maxWidth,
-    this.childPadding,
   }) : assert(icon != null || child != null, 'AppMenuButton requires icon or child');
 
   @override
@@ -203,17 +324,23 @@ class AppMenuButtonState<T> extends State<AppMenuButton<T>> {
     final renderBox = context.findRenderObject() as RenderBox?;
     if (renderBox == null) return null;
 
-    final topLeft = renderBox.localToGlobal(Offset.zero) + widget.alignmentOffset;
+    final topLeft = renderBox.localToGlobal(Offset.zero);
     final anchorRect = Rect.fromLTWH(topLeft.dx, topLeft.dy, renderBox.size.width, renderBox.size.height);
-    final selected = await showAppMenu<T>(
-      context,
-      entries: widget.entriesBuilder(context),
-      anchorRect: anchorRect,
-      anchorAlignment: widget.anchorAlignment,
-      focusFirstItem: focusFirstItem,
-      minWidth: widget.minWidth,
-      maxWidth: widget.maxWidth,
-    );
+    final selected = widget.adaptiveSheet
+        ? await showAdaptiveAppMenu<T>(
+            context,
+            entries: widget.entriesBuilder(context),
+            anchorRect: anchorRect,
+            anchorAlignment: widget.anchorAlignment,
+            focusFirstItem: focusFirstItem,
+          )
+        : await showAppMenu<T>(
+            context,
+            entries: widget.entriesBuilder(context),
+            anchorRect: anchorRect,
+            anchorAlignment: widget.anchorAlignment,
+            focusFirstItem: focusFirstItem,
+          );
     if (!mounted || selected == null) return selected;
     widget.onSelected?.call(selected);
     return selected;
@@ -227,13 +354,12 @@ class AppMenuButtonState<T> extends State<AppMenuButton<T>> {
   Widget build(BuildContext context) {
     final child = widget.child;
     if (child != null) {
-      final content = Padding(padding: widget.childPadding ?? EdgeInsets.zero, child: child);
       final button = ClickableCursor(
         enabled: widget.enabled,
         child: InkWell(
           onTap: widget.enabled ? _handlePressed : null,
           borderRadius: BorderRadius.circular(tokens(context).radiusSm),
-          child: content,
+          child: child,
         ),
       );
       final tooltip = widget.tooltip;
@@ -568,8 +694,6 @@ class _AppMenuPopup<T> extends StatefulWidget {
   final Rect? anchorRect;
   final AppMenuAnchorAlignment anchorAlignment;
   final bool focusFirstItem;
-  final double minWidth;
-  final double? maxWidth;
 
   const _AppMenuPopup({
     required this.entries,
@@ -577,8 +701,6 @@ class _AppMenuPopup<T> extends StatefulWidget {
     required this.anchorRect,
     required this.anchorAlignment,
     required this.focusFirstItem,
-    required this.minWidth,
-    required this.maxWidth,
   });
 
   @override
@@ -586,15 +708,14 @@ class _AppMenuPopup<T> extends StatefulWidget {
 }
 
 class _AppMenuPopupState<T> extends State<_AppMenuPopup<T>> {
+  static const double _minMenuWidth = 220;
+
   @override
   Widget build(BuildContext context) {
     final screenSize = MediaQuery.sizeOf(context);
     const edgePadding = 8.0;
-    final desiredWidth = widget.maxWidth ?? math.max(widget.minWidth, _estimateMenuWidth(context));
-    final menuWidth = desiredWidth.clamp(
-      widget.minWidth,
-      math.max(widget.minWidth, screenSize.width - edgePadding * 2),
-    );
+    final desiredWidth = math.max(_minMenuWidth, _estimateMenuWidth(context));
+    final menuWidth = desiredWidth.clamp(_minMenuWidth, math.max(_minMenuWidth, screenSize.width - edgePadding * 2));
     final estimatedHeight = _estimateMenuHeight(widget.entries);
     final availableHeight = math.max(0.0, screenSize.height - edgePadding * 2);
     final menuHeight = estimatedHeight.clamp(0.0, availableHeight).toDouble();
@@ -682,7 +803,7 @@ class _AppMenuPopupState<T> extends State<_AppMenuPopup<T>> {
         longest = math.max(longest, entry.label?.length ?? 0);
       }
     }
-    return math.min(360, math.max(widget.minWidth, 96 + longest * 7.5));
+    return math.min(360, math.max(_minMenuWidth, 96 + longest * 7.5));
   }
 }
 

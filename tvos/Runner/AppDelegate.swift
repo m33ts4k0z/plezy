@@ -57,7 +57,7 @@ import wakelock_plus
     }
 
     let subtype = event.subtype
-    print("PlezyTvRemote: remote control event subtype=\(remoteControlSubtypeName(subtype))")
+    MpvLog.debug("PlezyTvRemote: remote control event subtype=\(remoteControlSubtypeName(subtype))")
     switch subtype {
     case .remoteControlPlay, .remoteControlPause, .remoteControlTogglePlayPause:
       sendPlayPauseEvent(source: "remote_control", detail: remoteControlSubtypeName(subtype))
@@ -80,7 +80,7 @@ import wakelock_plus
   }
 
   private func sendPlayPauseEvent(source: String, detail: String) {
-    print("PlezyTvRemote: intercepted play/pause source=\(source) detail=\(detail)")
+    MpvLog.debug("PlezyTvRemote: intercepted play/pause source=\(source) detail=\(detail)")
     tvRemoteChannel.sendMessage(["type": "play_pause", "source": source, "detail": detail])
   }
 
@@ -113,28 +113,23 @@ import wakelock_plus
 }
 
 @main
-@objc class AppDelegate: FlutterAppDelegate {
+@objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
   override func application(
     _ application: UIApplication,
     didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
   ) -> Bool {
-    // Dolby's sequence diagram prescribes exactly this at app launch: the
-    // long-form playback profile, then activation, so the session is eligible
-    // for the system's Dolby decode/render path and its rendering capabilities
-    // can be read before any content is chosen. The mpv AVFoundation audio
-    // output reconfigures and re-activates the same shared session at playback
-    // start; this establishes the launch-time state the guide expects.
+    // Configure the long-form profile before playback. The media controls
+    // plugin claims the session when playback actually starts.
     do {
       let session = AVAudioSession.sharedInstance()
       try session.setCategory(
         .playback, mode: .default, policy: .longFormAudio, options: [])
-      try session.setActive(true)
     } catch {
-      print("Failed to configure long-form audio session: \(error)")
+      MpvLog.debug("Failed to configure long-form audio session: \(error)")
       do {
         try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
       } catch {
-        print("Failed to configure audio session: \(error)")
+        MpvLog.error("Failed to configure audio session: \(error)")
       }
     }
 
@@ -144,44 +139,53 @@ import wakelock_plus
       _ = SystemShelfPlugin.handleOpenURL(url)
     }
 
-    if let r = self.registrar(forPlugin: "SharedPreferencesPlugin") {
+    return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+  }
+
+  // UIScene creates the storyboard's Flutter engine after application launch.
+  // Register plugins against that engine instead of creating a second one.
+  func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
+    let pluginRegistry = engineBridge.pluginRegistry
+
+    if let r = pluginRegistry.registrar(forPlugin: "SharedPreferencesPlugin") {
       SharedPreferencesPlugin.register(with: r)
     }
-    if let r = self.registrar(forPlugin: "MpvPlayerPlugin") {
+    if let r = pluginRegistry.registrar(forPlugin: "MpvPlayerPlugin") {
       MpvPlayerPlugin.register(with: r)
     }
-    if let r = self.registrar(forPlugin: "MpvAudioPlayerPlugin") {
+    if let r = pluginRegistry.registrar(forPlugin: "MpvAudioPlayerPlugin") {
       MpvAudioPlayerPlugin.register(with: r)
     }
-    if let r = self.registrar(forPlugin: "AtmosProbePlugin") {
-      AtmosProbePlugin.register(with: r)
-    }
-    if let r = self.registrar(forPlugin: "PackageInfoPlusPlugin") {
+    if let r = pluginRegistry.registrar(forPlugin: "PackageInfoPlusPlugin") {
       PackageInfoPlusPlugin.register(with: r)
     }
-    if let r = self.registrar(forPlugin: "PathProviderPlugin") {
+    if let r = pluginRegistry.registrar(forPlugin: "PathProviderPlugin") {
       PathProviderPlugin.register(with: r)
     }
-    if let r = self.registrar(forPlugin: "GamepadPlugin") {
+    if let r = pluginRegistry.registrar(forPlugin: "GamepadPlugin") {
       GamepadPlugin.register(with: r)
     }
-    if let r = self.registrar(forPlugin: "DeviceInfoPlusPlugin") {
+    if let r = pluginRegistry.registrar(forPlugin: "DeviceInfoPlusPlugin") {
       DeviceInfoPlusPlugin.register(with: r)
     }
-    if let r = self.registrar(forPlugin: "ConnectivityPlusPlugin") {
+    if let r = pluginRegistry.registrar(forPlugin: "ConnectivityPlusPlugin") {
       ConnectivityPlusPlugin.register(with: r)
     }
-    if let r = self.registrar(forPlugin: "OsMediaControlsPlugin") {
+    if let r = pluginRegistry.registrar(forPlugin: "OsMediaControlsPlugin") {
       OsMediaControlsPlugin.register(with: r)
     }
-    if let r = self.registrar(forPlugin: "WakelockPlusPlugin") {
+    if let r = pluginRegistry.registrar(forPlugin: "WakelockPlusPlugin") {
       WakelockPlusPlugin.register(with: r)
     }
-    if let r = self.registrar(forPlugin: "SystemShelfPlugin") {
+    if let r = pluginRegistry.registrar(forPlugin: "SystemShelfPlugin") {
       SystemShelfPlugin.register(with: r)
     }
-
-    return super.application(application, didFinishLaunchingWithOptions: launchOptions)
+    if let r = pluginRegistry.registrar(forPlugin: "VideoDecodeCapabilitiesPlugin") {
+      VideoDecodeCapabilitiesPlugin.register(with: r)
+    }
+    if let r = pluginRegistry.registrar(forPlugin: "ExternalPlayerPlugin") {
+      ExternalPlayerPlugin.register(with: r)
+    }
   }
 
   override func application(

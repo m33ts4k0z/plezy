@@ -60,6 +60,64 @@ void main() {
     expect(MediaGridDelegate.aspectRatioFor(useWideAspectRatio: true), GridLayoutConstants.episodeGridCellAspectRatio);
   });
 
+  testWidgets('square grid delegates use square gutters, others unchanged', (tester) async {
+    tester.view.devicePixelRatio = 1.0;
+    tester.view.physicalSize = const Size(1280, 720);
+    addTearDown(() {
+      tester.view.resetDevicePixelRatio();
+      tester.view.resetPhysicalSize();
+    });
+
+    SliverGridDelegateWithMaxCrossAxisExtent? square;
+    SliverGridDelegateWithMaxCrossAxisExtent? poster;
+    SliverGridDelegateWithMaxCrossAxisExtent? wide;
+    SliverGridDelegateWithMaxCrossAxisExtent? fullBleed;
+    await tester.pumpWidget(
+      _TestApp(
+        child: Builder(
+          builder: (context) {
+            square = MediaGridGeometry.resolve(
+              context: context,
+              crossAxisExtent: 1280,
+              density: LibraryDensity.defaultValue,
+              shape: CardShape.square,
+            ).delegate;
+            poster = MediaGridGeometry.resolve(
+              context: context,
+              crossAxisExtent: 1280,
+              density: LibraryDensity.defaultValue,
+            ).delegate;
+            wide = MediaGridGeometry.resolve(
+              context: context,
+              crossAxisExtent: 1280,
+              density: LibraryDensity.defaultValue,
+              useWideAspectRatio: true,
+            ).delegate;
+            fullBleed = MediaGridGeometry.resolve(
+              context: context,
+              crossAxisExtent: 1280,
+              density: LibraryDensity.defaultValue,
+              fullBleedImage: true,
+            ).delegate;
+            return const SizedBox.shrink();
+          },
+        ),
+      ),
+    );
+
+    // Square (music) grids get breathing room.
+    expect(square!.crossAxisSpacing, GridLayoutConstants.squareGridSpacing);
+    expect(square!.mainAxisSpacing, GridLayoutConstants.squareGridSpacing);
+    // Poster and wide grids keep the platform default (0 off-automotive).
+    expect(poster!.crossAxisSpacing, GridLayoutConstants.crossAxisSpacing);
+    expect(poster!.mainAxisSpacing, GridLayoutConstants.crossAxisSpacing);
+    expect(wide!.crossAxisSpacing, GridLayoutConstants.crossAxisSpacing);
+    expect(wide!.mainAxisSpacing, GridLayoutConstants.crossAxisSpacing);
+    // Full-bleed TV gutters are unchanged.
+    expect(fullBleed!.crossAxisSpacing, GridLayoutConstants.fullCardGridSpacingForScale(0.85));
+    expect(fullBleed!.mainAxisSpacing, fullBleed!.crossAxisSpacing);
+  });
+
   test('list layout sizes square cards 1:1', () {
     final base = MediaCardListLayout.basePosterWidth(LibraryDensity.defaultValue);
     expect(MediaCardListLayout.posterWidth(density: LibraryDensity.defaultValue, shape: CardShape.square), base);
@@ -79,7 +137,7 @@ void main() {
           item: _item(MediaKind.album, parentTitle: 'Album Artist'),
           width: 200,
           height: 194,
-          forceGridMode: true,
+          viewModeOverride: ViewMode.grid,
           isOffline: true,
         ),
       ),
@@ -97,7 +155,13 @@ void main() {
   testWidgets('artist grid card clips to a circle and skips the watched overlay', (tester) async {
     await tester.pumpWidget(
       _TestApp(
-        child: MediaCard(item: _item(MediaKind.artist), width: 200, height: 194, forceGridMode: true, isOffline: true),
+        child: MediaCard(
+          item: _item(MediaKind.artist),
+          width: 200,
+          height: 194,
+          viewModeOverride: ViewMode.grid,
+          isOffline: true,
+        ),
       ),
     );
 
@@ -110,7 +174,13 @@ void main() {
   testWidgets('movie grid card still renders the 2:3 poster', (tester) async {
     await tester.pumpWidget(
       _TestApp(
-        child: MediaCard(item: _item(MediaKind.movie), width: 200, height: 291, forceGridMode: true, isOffline: true),
+        child: MediaCard(
+          item: _item(MediaKind.movie),
+          width: 200,
+          height: 291,
+          viewModeOverride: ViewMode.grid,
+          isOffline: true,
+        ),
       ),
     );
 
@@ -128,7 +198,7 @@ void main() {
           height: 160,
           child: MediaCard(
             item: _item(MediaKind.track, parentTitle: 'Album', durationMs: 200000),
-            forceListMode: true,
+            viewModeOverride: ViewMode.list,
             isOffline: true,
           ),
         ),
@@ -147,7 +217,7 @@ void main() {
           item: _item(MediaKind.collection),
           width: 200,
           height: 194,
-          forceGridMode: true,
+          viewModeOverride: ViewMode.grid,
           isOffline: true,
           cardShapeOverride: CardShape.square,
         ),
@@ -172,7 +242,12 @@ void main() {
         child: SizedBox(
           width: 420,
           height: 160,
-          child: MediaCard(item: playlist, forceListMode: true, isOffline: true, cardShapeOverride: CardShape.square),
+          child: MediaCard(
+            item: playlist,
+            viewModeOverride: ViewMode.list,
+            isOffline: true,
+            cardShapeOverride: CardShape.square,
+          ),
         ),
       ),
     );
@@ -196,7 +271,9 @@ void main() {
     );
 
     await tester.pumpWidget(
-      _TestApp(child: MediaCard(item: item, width: 200, height: 194, forceGridMode: true, isOffline: true)),
+      _TestApp(
+        child: MediaCard(item: item, width: 200, height: 194, viewModeOverride: ViewMode.grid, isOffline: true),
+      ),
     );
 
     final primaryFinder = find.descendant(of: find.byType(MediaCard), matching: find.byType(OptimizedMediaImage)).first;
@@ -223,7 +300,9 @@ void main() {
     );
 
     Future<void> pumpCard() => tester.pumpWidget(
-      _TestApp(child: MediaCard(item: item, width: 200, height: 194, forceGridMode: true, isOffline: true)),
+      _TestApp(
+        child: MediaCard(item: item, width: 200, height: 194, viewModeOverride: ViewMode.grid, isOffline: true),
+      ),
     );
 
     await pumpCard();

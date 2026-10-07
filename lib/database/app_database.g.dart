@@ -153,6 +153,17 @@ class $DownloadedMediaTable extends DownloadedMedia
     type: DriftSqlType.string,
     requiredDuringInsert: false,
   );
+  static const VerificationMeta _additionalPartPathsMeta =
+      const VerificationMeta('additionalPartPaths');
+  @override
+  late final GeneratedColumn<String> additionalPartPaths =
+      GeneratedColumn<String>(
+        'additional_part_paths',
+        aliasedName,
+        true,
+        type: DriftSqlType.string,
+        requiredDuringInsert: false,
+      );
   static const VerificationMeta _safRootUriMeta = const VerificationMeta(
     'safRootUri',
   );
@@ -243,6 +254,28 @@ class $DownloadedMediaTable extends DownloadedMedia
     type: DriftSqlType.string,
     requiredDuringInsert: false,
   );
+  static const VerificationMeta _libraryIdMeta = const VerificationMeta(
+    'libraryId',
+  );
+  @override
+  late final GeneratedColumn<String> libraryId = GeneratedColumn<String>(
+    'library_id',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _libraryTitleMeta = const VerificationMeta(
+    'libraryTitle',
+  );
+  @override
+  late final GeneratedColumn<String> libraryTitle = GeneratedColumn<String>(
+    'library_title',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
   @override
   List<GeneratedColumn> get $columns => [
     id,
@@ -258,6 +291,7 @@ class $DownloadedMediaTable extends DownloadedMedia
     totalBytes,
     downloadedBytes,
     videoFilePath,
+    additionalPartPaths,
     safRootUri,
     thumbPath,
     downloadedAt,
@@ -266,6 +300,8 @@ class $DownloadedMediaTable extends DownloadedMedia
     bgTaskId,
     mediaIndex,
     mediaSourceId,
+    libraryId,
+    libraryTitle,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -379,6 +415,15 @@ class $DownloadedMediaTable extends DownloadedMedia
         ),
       );
     }
+    if (data.containsKey('additional_part_paths')) {
+      context.handle(
+        _additionalPartPathsMeta,
+        additionalPartPaths.isAcceptableOrUnknown(
+          data['additional_part_paths']!,
+          _additionalPartPathsMeta,
+        ),
+      );
+    }
     if (data.containsKey('saf_root_uri')) {
       context.handle(
         _safRootUriMeta,
@@ -436,6 +481,21 @@ class $DownloadedMediaTable extends DownloadedMedia
         mediaSourceId.isAcceptableOrUnknown(
           data['media_source_id']!,
           _mediaSourceIdMeta,
+        ),
+      );
+    }
+    if (data.containsKey('library_id')) {
+      context.handle(
+        _libraryIdMeta,
+        libraryId.isAcceptableOrUnknown(data['library_id']!, _libraryIdMeta),
+      );
+    }
+    if (data.containsKey('library_title')) {
+      context.handle(
+        _libraryTitleMeta,
+        libraryTitle.isAcceptableOrUnknown(
+          data['library_title']!,
+          _libraryTitleMeta,
         ),
       );
     }
@@ -500,6 +560,10 @@ class $DownloadedMediaTable extends DownloadedMedia
         DriftSqlType.string,
         data['${effectivePrefix}video_file_path'],
       ),
+      additionalPartPaths: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}additional_part_paths'],
+      ),
       safRootUri: attachedDatabase.typeMapping.read(
         DriftSqlType.string,
         data['${effectivePrefix}saf_root_uri'],
@@ -532,6 +596,14 @@ class $DownloadedMediaTable extends DownloadedMedia
         DriftSqlType.string,
         data['${effectivePrefix}media_source_id'],
       ),
+      libraryId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}library_id'],
+      ),
+      libraryTitle: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}library_title'],
+      ),
     );
   }
 
@@ -556,6 +628,13 @@ class DownloadedMediaItem extends DataClass
   final int? totalBytes;
   final int downloadedBytes;
   final String? videoFilePath;
+
+  /// Stored paths of the files after the first when the downloaded version is
+  /// stacked across several files (Plex `Part 2`, `Part 3`), as a JSON array in
+  /// playback order. Each entry has the same stored form as [videoFilePath]
+  /// (relative path or SAF `content://` URI), or is null while that file is
+  /// not stored yet. Null for single-file downloads and rows from before v24.
+  final String? additionalPartPaths;
   final String? safRootUri;
   final String? thumbPath;
   final int? downloadedAt;
@@ -564,6 +643,13 @@ class DownloadedMediaItem extends DataClass
   final String? bgTaskId;
   final int mediaIndex;
   final String? mediaSourceId;
+
+  /// Owning library identity, stamped at enqueue time so downloads can be
+  /// grouped/filtered by library while offline. Plex items carry
+  /// librarySectionID/Title natively; Jellyfin resolves them via ancestors.
+  /// Null for rows enqueued before v23 or when resolution was skipped/failed.
+  final String? libraryId;
+  final String? libraryTitle;
   const DownloadedMediaItem({
     required this.id,
     required this.serverId,
@@ -578,6 +664,7 @@ class DownloadedMediaItem extends DataClass
     this.totalBytes,
     required this.downloadedBytes,
     this.videoFilePath,
+    this.additionalPartPaths,
     this.safRootUri,
     this.thumbPath,
     this.downloadedAt,
@@ -586,6 +673,8 @@ class DownloadedMediaItem extends DataClass
     this.bgTaskId,
     required this.mediaIndex,
     this.mediaSourceId,
+    this.libraryId,
+    this.libraryTitle,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -613,6 +702,9 @@ class DownloadedMediaItem extends DataClass
     if (!nullToAbsent || videoFilePath != null) {
       map['video_file_path'] = Variable<String>(videoFilePath);
     }
+    if (!nullToAbsent || additionalPartPaths != null) {
+      map['additional_part_paths'] = Variable<String>(additionalPartPaths);
+    }
     if (!nullToAbsent || safRootUri != null) {
       map['saf_root_uri'] = Variable<String>(safRootUri);
     }
@@ -632,6 +724,12 @@ class DownloadedMediaItem extends DataClass
     map['media_index'] = Variable<int>(mediaIndex);
     if (!nullToAbsent || mediaSourceId != null) {
       map['media_source_id'] = Variable<String>(mediaSourceId);
+    }
+    if (!nullToAbsent || libraryId != null) {
+      map['library_id'] = Variable<String>(libraryId);
+    }
+    if (!nullToAbsent || libraryTitle != null) {
+      map['library_title'] = Variable<String>(libraryTitle);
     }
     return map;
   }
@@ -661,6 +759,9 @@ class DownloadedMediaItem extends DataClass
       videoFilePath: videoFilePath == null && nullToAbsent
           ? const Value.absent()
           : Value(videoFilePath),
+      additionalPartPaths: additionalPartPaths == null && nullToAbsent
+          ? const Value.absent()
+          : Value(additionalPartPaths),
       safRootUri: safRootUri == null && nullToAbsent
           ? const Value.absent()
           : Value(safRootUri),
@@ -681,6 +782,12 @@ class DownloadedMediaItem extends DataClass
       mediaSourceId: mediaSourceId == null && nullToAbsent
           ? const Value.absent()
           : Value(mediaSourceId),
+      libraryId: libraryId == null && nullToAbsent
+          ? const Value.absent()
+          : Value(libraryId),
+      libraryTitle: libraryTitle == null && nullToAbsent
+          ? const Value.absent()
+          : Value(libraryTitle),
     );
   }
 
@@ -705,6 +812,9 @@ class DownloadedMediaItem extends DataClass
       totalBytes: serializer.fromJson<int?>(json['totalBytes']),
       downloadedBytes: serializer.fromJson<int>(json['downloadedBytes']),
       videoFilePath: serializer.fromJson<String?>(json['videoFilePath']),
+      additionalPartPaths: serializer.fromJson<String?>(
+        json['additionalPartPaths'],
+      ),
       safRootUri: serializer.fromJson<String?>(json['safRootUri']),
       thumbPath: serializer.fromJson<String?>(json['thumbPath']),
       downloadedAt: serializer.fromJson<int?>(json['downloadedAt']),
@@ -713,6 +823,8 @@ class DownloadedMediaItem extends DataClass
       bgTaskId: serializer.fromJson<String?>(json['bgTaskId']),
       mediaIndex: serializer.fromJson<int>(json['mediaIndex']),
       mediaSourceId: serializer.fromJson<String?>(json['mediaSourceId']),
+      libraryId: serializer.fromJson<String?>(json['libraryId']),
+      libraryTitle: serializer.fromJson<String?>(json['libraryTitle']),
     );
   }
   @override
@@ -732,6 +844,7 @@ class DownloadedMediaItem extends DataClass
       'totalBytes': serializer.toJson<int?>(totalBytes),
       'downloadedBytes': serializer.toJson<int>(downloadedBytes),
       'videoFilePath': serializer.toJson<String?>(videoFilePath),
+      'additionalPartPaths': serializer.toJson<String?>(additionalPartPaths),
       'safRootUri': serializer.toJson<String?>(safRootUri),
       'thumbPath': serializer.toJson<String?>(thumbPath),
       'downloadedAt': serializer.toJson<int?>(downloadedAt),
@@ -740,6 +853,8 @@ class DownloadedMediaItem extends DataClass
       'bgTaskId': serializer.toJson<String?>(bgTaskId),
       'mediaIndex': serializer.toJson<int>(mediaIndex),
       'mediaSourceId': serializer.toJson<String?>(mediaSourceId),
+      'libraryId': serializer.toJson<String?>(libraryId),
+      'libraryTitle': serializer.toJson<String?>(libraryTitle),
     };
   }
 
@@ -757,6 +872,7 @@ class DownloadedMediaItem extends DataClass
     Value<int?> totalBytes = const Value.absent(),
     int? downloadedBytes,
     Value<String?> videoFilePath = const Value.absent(),
+    Value<String?> additionalPartPaths = const Value.absent(),
     Value<String?> safRootUri = const Value.absent(),
     Value<String?> thumbPath = const Value.absent(),
     Value<int?> downloadedAt = const Value.absent(),
@@ -765,6 +881,8 @@ class DownloadedMediaItem extends DataClass
     Value<String?> bgTaskId = const Value.absent(),
     int? mediaIndex,
     Value<String?> mediaSourceId = const Value.absent(),
+    Value<String?> libraryId = const Value.absent(),
+    Value<String?> libraryTitle = const Value.absent(),
   }) => DownloadedMediaItem(
     id: id ?? this.id,
     serverId: serverId ?? this.serverId,
@@ -787,6 +905,9 @@ class DownloadedMediaItem extends DataClass
     videoFilePath: videoFilePath.present
         ? videoFilePath.value
         : this.videoFilePath,
+    additionalPartPaths: additionalPartPaths.present
+        ? additionalPartPaths.value
+        : this.additionalPartPaths,
     safRootUri: safRootUri.present ? safRootUri.value : this.safRootUri,
     thumbPath: thumbPath.present ? thumbPath.value : this.thumbPath,
     downloadedAt: downloadedAt.present ? downloadedAt.value : this.downloadedAt,
@@ -797,6 +918,8 @@ class DownloadedMediaItem extends DataClass
     mediaSourceId: mediaSourceId.present
         ? mediaSourceId.value
         : this.mediaSourceId,
+    libraryId: libraryId.present ? libraryId.value : this.libraryId,
+    libraryTitle: libraryTitle.present ? libraryTitle.value : this.libraryTitle,
   );
   DownloadedMediaItem copyWithCompanion(DownloadedMediaCompanion data) {
     return DownloadedMediaItem(
@@ -825,6 +948,9 @@ class DownloadedMediaItem extends DataClass
       videoFilePath: data.videoFilePath.present
           ? data.videoFilePath.value
           : this.videoFilePath,
+      additionalPartPaths: data.additionalPartPaths.present
+          ? data.additionalPartPaths.value
+          : this.additionalPartPaths,
       safRootUri: data.safRootUri.present
           ? data.safRootUri.value
           : this.safRootUri,
@@ -845,6 +971,10 @@ class DownloadedMediaItem extends DataClass
       mediaSourceId: data.mediaSourceId.present
           ? data.mediaSourceId.value
           : this.mediaSourceId,
+      libraryId: data.libraryId.present ? data.libraryId.value : this.libraryId,
+      libraryTitle: data.libraryTitle.present
+          ? data.libraryTitle.value
+          : this.libraryTitle,
     );
   }
 
@@ -864,6 +994,7 @@ class DownloadedMediaItem extends DataClass
           ..write('totalBytes: $totalBytes, ')
           ..write('downloadedBytes: $downloadedBytes, ')
           ..write('videoFilePath: $videoFilePath, ')
+          ..write('additionalPartPaths: $additionalPartPaths, ')
           ..write('safRootUri: $safRootUri, ')
           ..write('thumbPath: $thumbPath, ')
           ..write('downloadedAt: $downloadedAt, ')
@@ -871,7 +1002,9 @@ class DownloadedMediaItem extends DataClass
           ..write('retryCount: $retryCount, ')
           ..write('bgTaskId: $bgTaskId, ')
           ..write('mediaIndex: $mediaIndex, ')
-          ..write('mediaSourceId: $mediaSourceId')
+          ..write('mediaSourceId: $mediaSourceId, ')
+          ..write('libraryId: $libraryId, ')
+          ..write('libraryTitle: $libraryTitle')
           ..write(')'))
         .toString();
   }
@@ -891,6 +1024,7 @@ class DownloadedMediaItem extends DataClass
     totalBytes,
     downloadedBytes,
     videoFilePath,
+    additionalPartPaths,
     safRootUri,
     thumbPath,
     downloadedAt,
@@ -899,6 +1033,8 @@ class DownloadedMediaItem extends DataClass
     bgTaskId,
     mediaIndex,
     mediaSourceId,
+    libraryId,
+    libraryTitle,
   ]);
   @override
   bool operator ==(Object other) =>
@@ -917,6 +1053,7 @@ class DownloadedMediaItem extends DataClass
           other.totalBytes == this.totalBytes &&
           other.downloadedBytes == this.downloadedBytes &&
           other.videoFilePath == this.videoFilePath &&
+          other.additionalPartPaths == this.additionalPartPaths &&
           other.safRootUri == this.safRootUri &&
           other.thumbPath == this.thumbPath &&
           other.downloadedAt == this.downloadedAt &&
@@ -924,7 +1061,9 @@ class DownloadedMediaItem extends DataClass
           other.retryCount == this.retryCount &&
           other.bgTaskId == this.bgTaskId &&
           other.mediaIndex == this.mediaIndex &&
-          other.mediaSourceId == this.mediaSourceId);
+          other.mediaSourceId == this.mediaSourceId &&
+          other.libraryId == this.libraryId &&
+          other.libraryTitle == this.libraryTitle);
 }
 
 class DownloadedMediaCompanion extends UpdateCompanion<DownloadedMediaItem> {
@@ -941,6 +1080,7 @@ class DownloadedMediaCompanion extends UpdateCompanion<DownloadedMediaItem> {
   final Value<int?> totalBytes;
   final Value<int> downloadedBytes;
   final Value<String?> videoFilePath;
+  final Value<String?> additionalPartPaths;
   final Value<String?> safRootUri;
   final Value<String?> thumbPath;
   final Value<int?> downloadedAt;
@@ -949,6 +1089,8 @@ class DownloadedMediaCompanion extends UpdateCompanion<DownloadedMediaItem> {
   final Value<String?> bgTaskId;
   final Value<int> mediaIndex;
   final Value<String?> mediaSourceId;
+  final Value<String?> libraryId;
+  final Value<String?> libraryTitle;
   const DownloadedMediaCompanion({
     this.id = const Value.absent(),
     this.serverId = const Value.absent(),
@@ -963,6 +1105,7 @@ class DownloadedMediaCompanion extends UpdateCompanion<DownloadedMediaItem> {
     this.totalBytes = const Value.absent(),
     this.downloadedBytes = const Value.absent(),
     this.videoFilePath = const Value.absent(),
+    this.additionalPartPaths = const Value.absent(),
     this.safRootUri = const Value.absent(),
     this.thumbPath = const Value.absent(),
     this.downloadedAt = const Value.absent(),
@@ -971,6 +1114,8 @@ class DownloadedMediaCompanion extends UpdateCompanion<DownloadedMediaItem> {
     this.bgTaskId = const Value.absent(),
     this.mediaIndex = const Value.absent(),
     this.mediaSourceId = const Value.absent(),
+    this.libraryId = const Value.absent(),
+    this.libraryTitle = const Value.absent(),
   });
   DownloadedMediaCompanion.insert({
     this.id = const Value.absent(),
@@ -986,6 +1131,7 @@ class DownloadedMediaCompanion extends UpdateCompanion<DownloadedMediaItem> {
     this.totalBytes = const Value.absent(),
     this.downloadedBytes = const Value.absent(),
     this.videoFilePath = const Value.absent(),
+    this.additionalPartPaths = const Value.absent(),
     this.safRootUri = const Value.absent(),
     this.thumbPath = const Value.absent(),
     this.downloadedAt = const Value.absent(),
@@ -994,6 +1140,8 @@ class DownloadedMediaCompanion extends UpdateCompanion<DownloadedMediaItem> {
     this.bgTaskId = const Value.absent(),
     this.mediaIndex = const Value.absent(),
     this.mediaSourceId = const Value.absent(),
+    this.libraryId = const Value.absent(),
+    this.libraryTitle = const Value.absent(),
   }) : serverId = Value(serverId),
        ratingKey = Value(ratingKey),
        globalKey = Value(globalKey),
@@ -1013,6 +1161,7 @@ class DownloadedMediaCompanion extends UpdateCompanion<DownloadedMediaItem> {
     Expression<int>? totalBytes,
     Expression<int>? downloadedBytes,
     Expression<String>? videoFilePath,
+    Expression<String>? additionalPartPaths,
     Expression<String>? safRootUri,
     Expression<String>? thumbPath,
     Expression<int>? downloadedAt,
@@ -1021,6 +1170,8 @@ class DownloadedMediaCompanion extends UpdateCompanion<DownloadedMediaItem> {
     Expression<String>? bgTaskId,
     Expression<int>? mediaIndex,
     Expression<String>? mediaSourceId,
+    Expression<String>? libraryId,
+    Expression<String>? libraryTitle,
   }) {
     return RawValuesInsertable({
       if (id != null) 'id': id,
@@ -1037,6 +1188,8 @@ class DownloadedMediaCompanion extends UpdateCompanion<DownloadedMediaItem> {
       if (totalBytes != null) 'total_bytes': totalBytes,
       if (downloadedBytes != null) 'downloaded_bytes': downloadedBytes,
       if (videoFilePath != null) 'video_file_path': videoFilePath,
+      if (additionalPartPaths != null)
+        'additional_part_paths': additionalPartPaths,
       if (safRootUri != null) 'saf_root_uri': safRootUri,
       if (thumbPath != null) 'thumb_path': thumbPath,
       if (downloadedAt != null) 'downloaded_at': downloadedAt,
@@ -1045,6 +1198,8 @@ class DownloadedMediaCompanion extends UpdateCompanion<DownloadedMediaItem> {
       if (bgTaskId != null) 'bg_task_id': bgTaskId,
       if (mediaIndex != null) 'media_index': mediaIndex,
       if (mediaSourceId != null) 'media_source_id': mediaSourceId,
+      if (libraryId != null) 'library_id': libraryId,
+      if (libraryTitle != null) 'library_title': libraryTitle,
     });
   }
 
@@ -1062,6 +1217,7 @@ class DownloadedMediaCompanion extends UpdateCompanion<DownloadedMediaItem> {
     Value<int?>? totalBytes,
     Value<int>? downloadedBytes,
     Value<String?>? videoFilePath,
+    Value<String?>? additionalPartPaths,
     Value<String?>? safRootUri,
     Value<String?>? thumbPath,
     Value<int?>? downloadedAt,
@@ -1070,6 +1226,8 @@ class DownloadedMediaCompanion extends UpdateCompanion<DownloadedMediaItem> {
     Value<String?>? bgTaskId,
     Value<int>? mediaIndex,
     Value<String?>? mediaSourceId,
+    Value<String?>? libraryId,
+    Value<String?>? libraryTitle,
   }) {
     return DownloadedMediaCompanion(
       id: id ?? this.id,
@@ -1085,6 +1243,7 @@ class DownloadedMediaCompanion extends UpdateCompanion<DownloadedMediaItem> {
       totalBytes: totalBytes ?? this.totalBytes,
       downloadedBytes: downloadedBytes ?? this.downloadedBytes,
       videoFilePath: videoFilePath ?? this.videoFilePath,
+      additionalPartPaths: additionalPartPaths ?? this.additionalPartPaths,
       safRootUri: safRootUri ?? this.safRootUri,
       thumbPath: thumbPath ?? this.thumbPath,
       downloadedAt: downloadedAt ?? this.downloadedAt,
@@ -1093,6 +1252,8 @@ class DownloadedMediaCompanion extends UpdateCompanion<DownloadedMediaItem> {
       bgTaskId: bgTaskId ?? this.bgTaskId,
       mediaIndex: mediaIndex ?? this.mediaIndex,
       mediaSourceId: mediaSourceId ?? this.mediaSourceId,
+      libraryId: libraryId ?? this.libraryId,
+      libraryTitle: libraryTitle ?? this.libraryTitle,
     );
   }
 
@@ -1140,6 +1301,11 @@ class DownloadedMediaCompanion extends UpdateCompanion<DownloadedMediaItem> {
     if (videoFilePath.present) {
       map['video_file_path'] = Variable<String>(videoFilePath.value);
     }
+    if (additionalPartPaths.present) {
+      map['additional_part_paths'] = Variable<String>(
+        additionalPartPaths.value,
+      );
+    }
     if (safRootUri.present) {
       map['saf_root_uri'] = Variable<String>(safRootUri.value);
     }
@@ -1164,6 +1330,12 @@ class DownloadedMediaCompanion extends UpdateCompanion<DownloadedMediaItem> {
     if (mediaSourceId.present) {
       map['media_source_id'] = Variable<String>(mediaSourceId.value);
     }
+    if (libraryId.present) {
+      map['library_id'] = Variable<String>(libraryId.value);
+    }
+    if (libraryTitle.present) {
+      map['library_title'] = Variable<String>(libraryTitle.value);
+    }
     return map;
   }
 
@@ -1183,6 +1355,7 @@ class DownloadedMediaCompanion extends UpdateCompanion<DownloadedMediaItem> {
           ..write('totalBytes: $totalBytes, ')
           ..write('downloadedBytes: $downloadedBytes, ')
           ..write('videoFilePath: $videoFilePath, ')
+          ..write('additionalPartPaths: $additionalPartPaths, ')
           ..write('safRootUri: $safRootUri, ')
           ..write('thumbPath: $thumbPath, ')
           ..write('downloadedAt: $downloadedAt, ')
@@ -1190,7 +1363,9 @@ class DownloadedMediaCompanion extends UpdateCompanion<DownloadedMediaItem> {
           ..write('retryCount: $retryCount, ')
           ..write('bgTaskId: $bgTaskId, ')
           ..write('mediaIndex: $mediaIndex, ')
-          ..write('mediaSourceId: $mediaSourceId')
+          ..write('mediaSourceId: $mediaSourceId, ')
+          ..write('libraryId: $libraryId, ')
+          ..write('libraryTitle: $libraryTitle')
           ..write(')'))
         .toString();
   }
@@ -2023,6 +2198,18 @@ class $ApiCacheTable extends ApiCache
     type: DriftSqlType.string,
     requiredDuringInsert: true,
   );
+  static const VerificationMeta _cachedAtMeta = const VerificationMeta(
+    'cachedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> cachedAt = GeneratedColumn<DateTime>(
+    'cached_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: false,
+    defaultValue: currentDateAndTime,
+  );
   static const VerificationMeta _pinnedMeta = const VerificationMeta('pinned');
   @override
   late final GeneratedColumn<bool> pinned = GeneratedColumn<bool>(
@@ -2036,20 +2223,8 @@ class $ApiCacheTable extends ApiCache
     ),
     defaultValue: const Constant(false),
   );
-  static const VerificationMeta _cachedAtMeta = const VerificationMeta(
-    'cachedAt',
-  );
   @override
-  late final GeneratedColumn<DateTime> cachedAt = GeneratedColumn<DateTime>(
-    'cached_at',
-    aliasedName,
-    false,
-    type: DriftSqlType.dateTime,
-    requiredDuringInsert: false,
-    defaultValue: currentDateAndTime,
-  );
-  @override
-  List<GeneratedColumn> get $columns => [cacheKey, data, pinned, cachedAt];
+  List<GeneratedColumn> get $columns => [cacheKey, data, cachedAt, pinned];
   @override
   String get aliasedName => _alias ?? actualTableName;
   @override
@@ -2078,16 +2253,16 @@ class $ApiCacheTable extends ApiCache
     } else if (isInserting) {
       context.missing(_dataMeta);
     }
-    if (data.containsKey('pinned')) {
-      context.handle(
-        _pinnedMeta,
-        pinned.isAcceptableOrUnknown(data['pinned']!, _pinnedMeta),
-      );
-    }
     if (data.containsKey('cached_at')) {
       context.handle(
         _cachedAtMeta,
         cachedAt.isAcceptableOrUnknown(data['cached_at']!, _cachedAtMeta),
+      );
+    }
+    if (data.containsKey('pinned')) {
+      context.handle(
+        _pinnedMeta,
+        pinned.isAcceptableOrUnknown(data['pinned']!, _pinnedMeta),
       );
     }
     return context;
@@ -2107,13 +2282,13 @@ class $ApiCacheTable extends ApiCache
         DriftSqlType.string,
         data['${effectivePrefix}data'],
       )!,
-      pinned: attachedDatabase.typeMapping.read(
-        DriftSqlType.bool,
-        data['${effectivePrefix}pinned'],
-      )!,
       cachedAt: attachedDatabase.typeMapping.read(
         DriftSqlType.dateTime,
         data['${effectivePrefix}cached_at'],
+      )!,
+      pinned: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}pinned'],
       )!,
     );
   }
@@ -2130,24 +2305,26 @@ class ApiCacheData extends DataClass implements Insertable<ApiCacheData> {
   final String cacheKey;
   final String data;
 
+  /// When the row was last written ([ApiCacheSingleton.put] stamps it on
+  /// every store). Read by the fresh-cache-first playback metadata gate,
+  /// [ApiCacheSingleton.getIfFresh].
+  final DateTime cachedAt;
+
   /// Whether this item is pinned for offline access
   final bool pinned;
-
-  /// Timestamp for cache invalidation (optional future use)
-  final DateTime cachedAt;
   const ApiCacheData({
     required this.cacheKey,
     required this.data,
-    required this.pinned,
     required this.cachedAt,
+    required this.pinned,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
     final map = <String, Expression>{};
     map['cache_key'] = Variable<String>(cacheKey);
     map['data'] = Variable<String>(data);
-    map['pinned'] = Variable<bool>(pinned);
     map['cached_at'] = Variable<DateTime>(cachedAt);
+    map['pinned'] = Variable<bool>(pinned);
     return map;
   }
 
@@ -2155,8 +2332,8 @@ class ApiCacheData extends DataClass implements Insertable<ApiCacheData> {
     return ApiCacheCompanion(
       cacheKey: Value(cacheKey),
       data: Value(data),
-      pinned: Value(pinned),
       cachedAt: Value(cachedAt),
+      pinned: Value(pinned),
     );
   }
 
@@ -2168,8 +2345,8 @@ class ApiCacheData extends DataClass implements Insertable<ApiCacheData> {
     return ApiCacheData(
       cacheKey: serializer.fromJson<String>(json['cacheKey']),
       data: serializer.fromJson<String>(json['data']),
-      pinned: serializer.fromJson<bool>(json['pinned']),
       cachedAt: serializer.fromJson<DateTime>(json['cachedAt']),
+      pinned: serializer.fromJson<bool>(json['pinned']),
     );
   }
   @override
@@ -2178,28 +2355,28 @@ class ApiCacheData extends DataClass implements Insertable<ApiCacheData> {
     return <String, dynamic>{
       'cacheKey': serializer.toJson<String>(cacheKey),
       'data': serializer.toJson<String>(data),
-      'pinned': serializer.toJson<bool>(pinned),
       'cachedAt': serializer.toJson<DateTime>(cachedAt),
+      'pinned': serializer.toJson<bool>(pinned),
     };
   }
 
   ApiCacheData copyWith({
     String? cacheKey,
     String? data,
-    bool? pinned,
     DateTime? cachedAt,
+    bool? pinned,
   }) => ApiCacheData(
     cacheKey: cacheKey ?? this.cacheKey,
     data: data ?? this.data,
-    pinned: pinned ?? this.pinned,
     cachedAt: cachedAt ?? this.cachedAt,
+    pinned: pinned ?? this.pinned,
   );
   ApiCacheData copyWithCompanion(ApiCacheCompanion data) {
     return ApiCacheData(
       cacheKey: data.cacheKey.present ? data.cacheKey.value : this.cacheKey,
       data: data.data.present ? data.data.value : this.data,
-      pinned: data.pinned.present ? data.pinned.value : this.pinned,
       cachedAt: data.cachedAt.present ? data.cachedAt.value : this.cachedAt,
+      pinned: data.pinned.present ? data.pinned.value : this.pinned,
     );
   }
 
@@ -2208,57 +2385,57 @@ class ApiCacheData extends DataClass implements Insertable<ApiCacheData> {
     return (StringBuffer('ApiCacheData(')
           ..write('cacheKey: $cacheKey, ')
           ..write('data: $data, ')
-          ..write('pinned: $pinned, ')
-          ..write('cachedAt: $cachedAt')
+          ..write('cachedAt: $cachedAt, ')
+          ..write('pinned: $pinned')
           ..write(')'))
         .toString();
   }
 
   @override
-  int get hashCode => Object.hash(cacheKey, data, pinned, cachedAt);
+  int get hashCode => Object.hash(cacheKey, data, cachedAt, pinned);
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
       (other is ApiCacheData &&
           other.cacheKey == this.cacheKey &&
           other.data == this.data &&
-          other.pinned == this.pinned &&
-          other.cachedAt == this.cachedAt);
+          other.cachedAt == this.cachedAt &&
+          other.pinned == this.pinned);
 }
 
 class ApiCacheCompanion extends UpdateCompanion<ApiCacheData> {
   final Value<String> cacheKey;
   final Value<String> data;
-  final Value<bool> pinned;
   final Value<DateTime> cachedAt;
+  final Value<bool> pinned;
   final Value<int> rowid;
   const ApiCacheCompanion({
     this.cacheKey = const Value.absent(),
     this.data = const Value.absent(),
-    this.pinned = const Value.absent(),
     this.cachedAt = const Value.absent(),
+    this.pinned = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   ApiCacheCompanion.insert({
     required String cacheKey,
     required String data,
-    this.pinned = const Value.absent(),
     this.cachedAt = const Value.absent(),
+    this.pinned = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : cacheKey = Value(cacheKey),
        data = Value(data);
   static Insertable<ApiCacheData> custom({
     Expression<String>? cacheKey,
     Expression<String>? data,
-    Expression<bool>? pinned,
     Expression<DateTime>? cachedAt,
+    Expression<bool>? pinned,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
       if (cacheKey != null) 'cache_key': cacheKey,
       if (data != null) 'data': data,
-      if (pinned != null) 'pinned': pinned,
       if (cachedAt != null) 'cached_at': cachedAt,
+      if (pinned != null) 'pinned': pinned,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -2266,15 +2443,15 @@ class ApiCacheCompanion extends UpdateCompanion<ApiCacheData> {
   ApiCacheCompanion copyWith({
     Value<String>? cacheKey,
     Value<String>? data,
-    Value<bool>? pinned,
     Value<DateTime>? cachedAt,
+    Value<bool>? pinned,
     Value<int>? rowid,
   }) {
     return ApiCacheCompanion(
       cacheKey: cacheKey ?? this.cacheKey,
       data: data ?? this.data,
-      pinned: pinned ?? this.pinned,
       cachedAt: cachedAt ?? this.cachedAt,
+      pinned: pinned ?? this.pinned,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -2288,11 +2465,11 @@ class ApiCacheCompanion extends UpdateCompanion<ApiCacheData> {
     if (data.present) {
       map['data'] = Variable<String>(data.value);
     }
-    if (pinned.present) {
-      map['pinned'] = Variable<bool>(pinned.value);
-    }
     if (cachedAt.present) {
       map['cached_at'] = Variable<DateTime>(cachedAt.value);
+    }
+    if (pinned.present) {
+      map['pinned'] = Variable<bool>(pinned.value);
     }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
@@ -2305,8 +2482,8 @@ class ApiCacheCompanion extends UpdateCompanion<ApiCacheData> {
     return (StringBuffer('ApiCacheCompanion(')
           ..write('cacheKey: $cacheKey, ')
           ..write('data: $data, ')
-          ..write('pinned: $pinned, ')
           ..write('cachedAt: $cachedAt, ')
+          ..write('pinned: $pinned, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -4287,6 +4464,662 @@ class SyncRuleDownloadsCompanion extends UpdateCompanion<SyncRuleDownloadItem> {
   }
 }
 
+class $DownloadCollectionsTable extends DownloadCollections
+    with TableInfo<$DownloadCollectionsTable, DownloadCollectionItem> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $DownloadCollectionsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _profileIdMeta = const VerificationMeta(
+    'profileId',
+  );
+  @override
+  late final GeneratedColumn<String> profileId = GeneratedColumn<String>(
+    'profile_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _serverIdMeta = const VerificationMeta(
+    'serverId',
+  );
+  @override
+  late final GeneratedColumn<String> serverId = GeneratedColumn<String>(
+    'server_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _collectionIdMeta = const VerificationMeta(
+    'collectionId',
+  );
+  @override
+  late final GeneratedColumn<String> collectionId = GeneratedColumn<String>(
+    'collection_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _memberIdsMeta = const VerificationMeta(
+    'memberIds',
+  );
+  @override
+  late final GeneratedColumn<String> memberIds = GeneratedColumn<String>(
+    'member_ids',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    profileId,
+    serverId,
+    collectionId,
+    memberIds,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'download_collections';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<DownloadCollectionItem> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('profile_id')) {
+      context.handle(
+        _profileIdMeta,
+        profileId.isAcceptableOrUnknown(data['profile_id']!, _profileIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_profileIdMeta);
+    }
+    if (data.containsKey('server_id')) {
+      context.handle(
+        _serverIdMeta,
+        serverId.isAcceptableOrUnknown(data['server_id']!, _serverIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_serverIdMeta);
+    }
+    if (data.containsKey('collection_id')) {
+      context.handle(
+        _collectionIdMeta,
+        collectionId.isAcceptableOrUnknown(
+          data['collection_id']!,
+          _collectionIdMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_collectionIdMeta);
+    }
+    if (data.containsKey('member_ids')) {
+      context.handle(
+        _memberIdsMeta,
+        memberIds.isAcceptableOrUnknown(data['member_ids']!, _memberIdsMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_memberIdsMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {profileId, serverId, collectionId};
+  @override
+  DownloadCollectionItem map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return DownloadCollectionItem(
+      profileId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}profile_id'],
+      )!,
+      serverId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}server_id'],
+      )!,
+      collectionId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}collection_id'],
+      )!,
+      memberIds: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}member_ids'],
+      )!,
+    );
+  }
+
+  @override
+  $DownloadCollectionsTable createAlias(String alias) {
+    return $DownloadCollectionsTable(attachedDatabase, alias);
+  }
+}
+
+class DownloadCollectionItem extends DataClass
+    implements Insertable<DownloadCollectionItem> {
+  final String profileId;
+  final String serverId;
+  final String collectionId;
+  final String memberIds;
+  const DownloadCollectionItem({
+    required this.profileId,
+    required this.serverId,
+    required this.collectionId,
+    required this.memberIds,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['profile_id'] = Variable<String>(profileId);
+    map['server_id'] = Variable<String>(serverId);
+    map['collection_id'] = Variable<String>(collectionId);
+    map['member_ids'] = Variable<String>(memberIds);
+    return map;
+  }
+
+  DownloadCollectionsCompanion toCompanion(bool nullToAbsent) {
+    return DownloadCollectionsCompanion(
+      profileId: Value(profileId),
+      serverId: Value(serverId),
+      collectionId: Value(collectionId),
+      memberIds: Value(memberIds),
+    );
+  }
+
+  factory DownloadCollectionItem.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return DownloadCollectionItem(
+      profileId: serializer.fromJson<String>(json['profileId']),
+      serverId: serializer.fromJson<String>(json['serverId']),
+      collectionId: serializer.fromJson<String>(json['collectionId']),
+      memberIds: serializer.fromJson<String>(json['memberIds']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'profileId': serializer.toJson<String>(profileId),
+      'serverId': serializer.toJson<String>(serverId),
+      'collectionId': serializer.toJson<String>(collectionId),
+      'memberIds': serializer.toJson<String>(memberIds),
+    };
+  }
+
+  DownloadCollectionItem copyWith({
+    String? profileId,
+    String? serverId,
+    String? collectionId,
+    String? memberIds,
+  }) => DownloadCollectionItem(
+    profileId: profileId ?? this.profileId,
+    serverId: serverId ?? this.serverId,
+    collectionId: collectionId ?? this.collectionId,
+    memberIds: memberIds ?? this.memberIds,
+  );
+  DownloadCollectionItem copyWithCompanion(DownloadCollectionsCompanion data) {
+    return DownloadCollectionItem(
+      profileId: data.profileId.present ? data.profileId.value : this.profileId,
+      serverId: data.serverId.present ? data.serverId.value : this.serverId,
+      collectionId: data.collectionId.present
+          ? data.collectionId.value
+          : this.collectionId,
+      memberIds: data.memberIds.present ? data.memberIds.value : this.memberIds,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('DownloadCollectionItem(')
+          ..write('profileId: $profileId, ')
+          ..write('serverId: $serverId, ')
+          ..write('collectionId: $collectionId, ')
+          ..write('memberIds: $memberIds')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(profileId, serverId, collectionId, memberIds);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is DownloadCollectionItem &&
+          other.profileId == this.profileId &&
+          other.serverId == this.serverId &&
+          other.collectionId == this.collectionId &&
+          other.memberIds == this.memberIds);
+}
+
+class DownloadCollectionsCompanion
+    extends UpdateCompanion<DownloadCollectionItem> {
+  final Value<String> profileId;
+  final Value<String> serverId;
+  final Value<String> collectionId;
+  final Value<String> memberIds;
+  final Value<int> rowid;
+  const DownloadCollectionsCompanion({
+    this.profileId = const Value.absent(),
+    this.serverId = const Value.absent(),
+    this.collectionId = const Value.absent(),
+    this.memberIds = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  DownloadCollectionsCompanion.insert({
+    required String profileId,
+    required String serverId,
+    required String collectionId,
+    required String memberIds,
+    this.rowid = const Value.absent(),
+  }) : profileId = Value(profileId),
+       serverId = Value(serverId),
+       collectionId = Value(collectionId),
+       memberIds = Value(memberIds);
+  static Insertable<DownloadCollectionItem> custom({
+    Expression<String>? profileId,
+    Expression<String>? serverId,
+    Expression<String>? collectionId,
+    Expression<String>? memberIds,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (profileId != null) 'profile_id': profileId,
+      if (serverId != null) 'server_id': serverId,
+      if (collectionId != null) 'collection_id': collectionId,
+      if (memberIds != null) 'member_ids': memberIds,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  DownloadCollectionsCompanion copyWith({
+    Value<String>? profileId,
+    Value<String>? serverId,
+    Value<String>? collectionId,
+    Value<String>? memberIds,
+    Value<int>? rowid,
+  }) {
+    return DownloadCollectionsCompanion(
+      profileId: profileId ?? this.profileId,
+      serverId: serverId ?? this.serverId,
+      collectionId: collectionId ?? this.collectionId,
+      memberIds: memberIds ?? this.memberIds,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (profileId.present) {
+      map['profile_id'] = Variable<String>(profileId.value);
+    }
+    if (serverId.present) {
+      map['server_id'] = Variable<String>(serverId.value);
+    }
+    if (collectionId.present) {
+      map['collection_id'] = Variable<String>(collectionId.value);
+    }
+    if (memberIds.present) {
+      map['member_ids'] = Variable<String>(memberIds.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('DownloadCollectionsCompanion(')
+          ..write('profileId: $profileId, ')
+          ..write('serverId: $serverId, ')
+          ..write('collectionId: $collectionId, ')
+          ..write('memberIds: $memberIds, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class $DownloadCollectionSyncsTable extends DownloadCollectionSyncs
+    with TableInfo<$DownloadCollectionSyncsTable, DownloadCollectionSyncItem> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $DownloadCollectionSyncsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _profileIdMeta = const VerificationMeta(
+    'profileId',
+  );
+  @override
+  late final GeneratedColumn<String> profileId = GeneratedColumn<String>(
+    'profile_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _serverIdMeta = const VerificationMeta(
+    'serverId',
+  );
+  @override
+  late final GeneratedColumn<String> serverId = GeneratedColumn<String>(
+    'server_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _syncedAtMeta = const VerificationMeta(
+    'syncedAt',
+  );
+  @override
+  late final GeneratedColumn<int> syncedAt = GeneratedColumn<int>(
+    'synced_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _checkedIdsMeta = const VerificationMeta(
+    'checkedIds',
+  );
+  @override
+  late final GeneratedColumn<String> checkedIds = GeneratedColumn<String>(
+    'checked_ids',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    profileId,
+    serverId,
+    syncedAt,
+    checkedIds,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'download_collection_syncs';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<DownloadCollectionSyncItem> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('profile_id')) {
+      context.handle(
+        _profileIdMeta,
+        profileId.isAcceptableOrUnknown(data['profile_id']!, _profileIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_profileIdMeta);
+    }
+    if (data.containsKey('server_id')) {
+      context.handle(
+        _serverIdMeta,
+        serverId.isAcceptableOrUnknown(data['server_id']!, _serverIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_serverIdMeta);
+    }
+    if (data.containsKey('synced_at')) {
+      context.handle(
+        _syncedAtMeta,
+        syncedAt.isAcceptableOrUnknown(data['synced_at']!, _syncedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_syncedAtMeta);
+    }
+    if (data.containsKey('checked_ids')) {
+      context.handle(
+        _checkedIdsMeta,
+        checkedIds.isAcceptableOrUnknown(data['checked_ids']!, _checkedIdsMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_checkedIdsMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {profileId, serverId};
+  @override
+  DownloadCollectionSyncItem map(
+    Map<String, dynamic> data, {
+    String? tablePrefix,
+  }) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return DownloadCollectionSyncItem(
+      profileId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}profile_id'],
+      )!,
+      serverId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}server_id'],
+      )!,
+      syncedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}synced_at'],
+      )!,
+      checkedIds: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}checked_ids'],
+      )!,
+    );
+  }
+
+  @override
+  $DownloadCollectionSyncsTable createAlias(String alias) {
+    return $DownloadCollectionSyncsTable(attachedDatabase, alias);
+  }
+}
+
+class DownloadCollectionSyncItem extends DataClass
+    implements Insertable<DownloadCollectionSyncItem> {
+  final String profileId;
+  final String serverId;
+  final int syncedAt;
+  final String checkedIds;
+  const DownloadCollectionSyncItem({
+    required this.profileId,
+    required this.serverId,
+    required this.syncedAt,
+    required this.checkedIds,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['profile_id'] = Variable<String>(profileId);
+    map['server_id'] = Variable<String>(serverId);
+    map['synced_at'] = Variable<int>(syncedAt);
+    map['checked_ids'] = Variable<String>(checkedIds);
+    return map;
+  }
+
+  DownloadCollectionSyncsCompanion toCompanion(bool nullToAbsent) {
+    return DownloadCollectionSyncsCompanion(
+      profileId: Value(profileId),
+      serverId: Value(serverId),
+      syncedAt: Value(syncedAt),
+      checkedIds: Value(checkedIds),
+    );
+  }
+
+  factory DownloadCollectionSyncItem.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return DownloadCollectionSyncItem(
+      profileId: serializer.fromJson<String>(json['profileId']),
+      serverId: serializer.fromJson<String>(json['serverId']),
+      syncedAt: serializer.fromJson<int>(json['syncedAt']),
+      checkedIds: serializer.fromJson<String>(json['checkedIds']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'profileId': serializer.toJson<String>(profileId),
+      'serverId': serializer.toJson<String>(serverId),
+      'syncedAt': serializer.toJson<int>(syncedAt),
+      'checkedIds': serializer.toJson<String>(checkedIds),
+    };
+  }
+
+  DownloadCollectionSyncItem copyWith({
+    String? profileId,
+    String? serverId,
+    int? syncedAt,
+    String? checkedIds,
+  }) => DownloadCollectionSyncItem(
+    profileId: profileId ?? this.profileId,
+    serverId: serverId ?? this.serverId,
+    syncedAt: syncedAt ?? this.syncedAt,
+    checkedIds: checkedIds ?? this.checkedIds,
+  );
+  DownloadCollectionSyncItem copyWithCompanion(
+    DownloadCollectionSyncsCompanion data,
+  ) {
+    return DownloadCollectionSyncItem(
+      profileId: data.profileId.present ? data.profileId.value : this.profileId,
+      serverId: data.serverId.present ? data.serverId.value : this.serverId,
+      syncedAt: data.syncedAt.present ? data.syncedAt.value : this.syncedAt,
+      checkedIds: data.checkedIds.present
+          ? data.checkedIds.value
+          : this.checkedIds,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('DownloadCollectionSyncItem(')
+          ..write('profileId: $profileId, ')
+          ..write('serverId: $serverId, ')
+          ..write('syncedAt: $syncedAt, ')
+          ..write('checkedIds: $checkedIds')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(profileId, serverId, syncedAt, checkedIds);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is DownloadCollectionSyncItem &&
+          other.profileId == this.profileId &&
+          other.serverId == this.serverId &&
+          other.syncedAt == this.syncedAt &&
+          other.checkedIds == this.checkedIds);
+}
+
+class DownloadCollectionSyncsCompanion
+    extends UpdateCompanion<DownloadCollectionSyncItem> {
+  final Value<String> profileId;
+  final Value<String> serverId;
+  final Value<int> syncedAt;
+  final Value<String> checkedIds;
+  final Value<int> rowid;
+  const DownloadCollectionSyncsCompanion({
+    this.profileId = const Value.absent(),
+    this.serverId = const Value.absent(),
+    this.syncedAt = const Value.absent(),
+    this.checkedIds = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  DownloadCollectionSyncsCompanion.insert({
+    required String profileId,
+    required String serverId,
+    required int syncedAt,
+    required String checkedIds,
+    this.rowid = const Value.absent(),
+  }) : profileId = Value(profileId),
+       serverId = Value(serverId),
+       syncedAt = Value(syncedAt),
+       checkedIds = Value(checkedIds);
+  static Insertable<DownloadCollectionSyncItem> custom({
+    Expression<String>? profileId,
+    Expression<String>? serverId,
+    Expression<int>? syncedAt,
+    Expression<String>? checkedIds,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (profileId != null) 'profile_id': profileId,
+      if (serverId != null) 'server_id': serverId,
+      if (syncedAt != null) 'synced_at': syncedAt,
+      if (checkedIds != null) 'checked_ids': checkedIds,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  DownloadCollectionSyncsCompanion copyWith({
+    Value<String>? profileId,
+    Value<String>? serverId,
+    Value<int>? syncedAt,
+    Value<String>? checkedIds,
+    Value<int>? rowid,
+  }) {
+    return DownloadCollectionSyncsCompanion(
+      profileId: profileId ?? this.profileId,
+      serverId: serverId ?? this.serverId,
+      syncedAt: syncedAt ?? this.syncedAt,
+      checkedIds: checkedIds ?? this.checkedIds,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (profileId.present) {
+      map['profile_id'] = Variable<String>(profileId.value);
+    }
+    if (serverId.present) {
+      map['server_id'] = Variable<String>(serverId.value);
+    }
+    if (syncedAt.present) {
+      map['synced_at'] = Variable<int>(syncedAt.value);
+    }
+    if (checkedIds.present) {
+      map['checked_ids'] = Variable<String>(checkedIds.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('DownloadCollectionSyncsCompanion(')
+          ..write('profileId: $profileId, ')
+          ..write('serverId: $serverId, ')
+          ..write('syncedAt: $syncedAt, ')
+          ..write('checkedIds: $checkedIds, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 class $ConnectionsTable extends Connections
     with TableInfo<$ConnectionsTable, ConnectionRow> {
   @override
@@ -4333,21 +5166,6 @@ class $ConnectionsTable extends Connections
     type: DriftSqlType.string,
     requiredDuringInsert: true,
   );
-  static const VerificationMeta _isDefaultMeta = const VerificationMeta(
-    'isDefault',
-  );
-  @override
-  late final GeneratedColumn<bool> isDefault = GeneratedColumn<bool>(
-    'is_default',
-    aliasedName,
-    false,
-    type: DriftSqlType.bool,
-    requiredDuringInsert: false,
-    defaultConstraints: GeneratedColumn.constraintIsAlways(
-      'CHECK ("is_default" IN (0, 1))',
-    ),
-    defaultValue: const Constant(false),
-  );
   static const VerificationMeta _createdAtMeta = const VerificationMeta(
     'createdAt',
   );
@@ -4375,7 +5193,6 @@ class $ConnectionsTable extends Connections
     kind,
     displayName,
     configJson,
-    isDefault,
     createdAt,
     lastAuthenticatedAt,
   ];
@@ -4423,12 +5240,6 @@ class $ConnectionsTable extends Connections
     } else if (isInserting) {
       context.missing(_configJsonMeta);
     }
-    if (data.containsKey('is_default')) {
-      context.handle(
-        _isDefaultMeta,
-        isDefault.isAcceptableOrUnknown(data['is_default']!, _isDefaultMeta),
-      );
-    }
     if (data.containsKey('created_at')) {
       context.handle(
         _createdAtMeta,
@@ -4471,10 +5282,6 @@ class $ConnectionsTable extends Connections
         DriftSqlType.string,
         data['${effectivePrefix}config_json'],
       )!,
-      isDefault: attachedDatabase.typeMapping.read(
-        DriftSqlType.bool,
-        data['${effectivePrefix}is_default'],
-      )!,
       createdAt: attachedDatabase.typeMapping.read(
         DriftSqlType.int,
         data['${effectivePrefix}created_at'],
@@ -4506,10 +5313,6 @@ class ConnectionRow extends DataClass implements Insertable<ConnectionRow> {
   /// Backend-specific config payload (token, baseUrl, profile id, …).
   final String configJson;
 
-  /// Whether this is the default connection used at app launch when only
-  /// one connection is present.
-  final bool isDefault;
-
   /// Timestamp this connection was added (milliseconds since epoch).
   final int createdAt;
 
@@ -4521,7 +5324,6 @@ class ConnectionRow extends DataClass implements Insertable<ConnectionRow> {
     required this.kind,
     required this.displayName,
     required this.configJson,
-    required this.isDefault,
     required this.createdAt,
     this.lastAuthenticatedAt,
   });
@@ -4532,7 +5334,6 @@ class ConnectionRow extends DataClass implements Insertable<ConnectionRow> {
     map['kind'] = Variable<String>(kind);
     map['display_name'] = Variable<String>(displayName);
     map['config_json'] = Variable<String>(configJson);
-    map['is_default'] = Variable<bool>(isDefault);
     map['created_at'] = Variable<int>(createdAt);
     if (!nullToAbsent || lastAuthenticatedAt != null) {
       map['last_authenticated_at'] = Variable<int>(lastAuthenticatedAt);
@@ -4546,7 +5347,6 @@ class ConnectionRow extends DataClass implements Insertable<ConnectionRow> {
       kind: Value(kind),
       displayName: Value(displayName),
       configJson: Value(configJson),
-      isDefault: Value(isDefault),
       createdAt: Value(createdAt),
       lastAuthenticatedAt: lastAuthenticatedAt == null && nullToAbsent
           ? const Value.absent()
@@ -4564,7 +5364,6 @@ class ConnectionRow extends DataClass implements Insertable<ConnectionRow> {
       kind: serializer.fromJson<String>(json['kind']),
       displayName: serializer.fromJson<String>(json['displayName']),
       configJson: serializer.fromJson<String>(json['configJson']),
-      isDefault: serializer.fromJson<bool>(json['isDefault']),
       createdAt: serializer.fromJson<int>(json['createdAt']),
       lastAuthenticatedAt: serializer.fromJson<int?>(
         json['lastAuthenticatedAt'],
@@ -4579,7 +5378,6 @@ class ConnectionRow extends DataClass implements Insertable<ConnectionRow> {
       'kind': serializer.toJson<String>(kind),
       'displayName': serializer.toJson<String>(displayName),
       'configJson': serializer.toJson<String>(configJson),
-      'isDefault': serializer.toJson<bool>(isDefault),
       'createdAt': serializer.toJson<int>(createdAt),
       'lastAuthenticatedAt': serializer.toJson<int?>(lastAuthenticatedAt),
     };
@@ -4590,7 +5388,6 @@ class ConnectionRow extends DataClass implements Insertable<ConnectionRow> {
     String? kind,
     String? displayName,
     String? configJson,
-    bool? isDefault,
     int? createdAt,
     Value<int?> lastAuthenticatedAt = const Value.absent(),
   }) => ConnectionRow(
@@ -4598,7 +5395,6 @@ class ConnectionRow extends DataClass implements Insertable<ConnectionRow> {
     kind: kind ?? this.kind,
     displayName: displayName ?? this.displayName,
     configJson: configJson ?? this.configJson,
-    isDefault: isDefault ?? this.isDefault,
     createdAt: createdAt ?? this.createdAt,
     lastAuthenticatedAt: lastAuthenticatedAt.present
         ? lastAuthenticatedAt.value
@@ -4614,7 +5410,6 @@ class ConnectionRow extends DataClass implements Insertable<ConnectionRow> {
       configJson: data.configJson.present
           ? data.configJson.value
           : this.configJson,
-      isDefault: data.isDefault.present ? data.isDefault.value : this.isDefault,
       createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
       lastAuthenticatedAt: data.lastAuthenticatedAt.present
           ? data.lastAuthenticatedAt.value
@@ -4629,7 +5424,6 @@ class ConnectionRow extends DataClass implements Insertable<ConnectionRow> {
           ..write('kind: $kind, ')
           ..write('displayName: $displayName, ')
           ..write('configJson: $configJson, ')
-          ..write('isDefault: $isDefault, ')
           ..write('createdAt: $createdAt, ')
           ..write('lastAuthenticatedAt: $lastAuthenticatedAt')
           ..write(')'))
@@ -4642,7 +5436,6 @@ class ConnectionRow extends DataClass implements Insertable<ConnectionRow> {
     kind,
     displayName,
     configJson,
-    isDefault,
     createdAt,
     lastAuthenticatedAt,
   );
@@ -4654,7 +5447,6 @@ class ConnectionRow extends DataClass implements Insertable<ConnectionRow> {
           other.kind == this.kind &&
           other.displayName == this.displayName &&
           other.configJson == this.configJson &&
-          other.isDefault == this.isDefault &&
           other.createdAt == this.createdAt &&
           other.lastAuthenticatedAt == this.lastAuthenticatedAt);
 }
@@ -4664,7 +5456,6 @@ class ConnectionsCompanion extends UpdateCompanion<ConnectionRow> {
   final Value<String> kind;
   final Value<String> displayName;
   final Value<String> configJson;
-  final Value<bool> isDefault;
   final Value<int> createdAt;
   final Value<int?> lastAuthenticatedAt;
   final Value<int> rowid;
@@ -4673,7 +5464,6 @@ class ConnectionsCompanion extends UpdateCompanion<ConnectionRow> {
     this.kind = const Value.absent(),
     this.displayName = const Value.absent(),
     this.configJson = const Value.absent(),
-    this.isDefault = const Value.absent(),
     this.createdAt = const Value.absent(),
     this.lastAuthenticatedAt = const Value.absent(),
     this.rowid = const Value.absent(),
@@ -4683,7 +5473,6 @@ class ConnectionsCompanion extends UpdateCompanion<ConnectionRow> {
     required String kind,
     required String displayName,
     required String configJson,
-    this.isDefault = const Value.absent(),
     required int createdAt,
     this.lastAuthenticatedAt = const Value.absent(),
     this.rowid = const Value.absent(),
@@ -4697,7 +5486,6 @@ class ConnectionsCompanion extends UpdateCompanion<ConnectionRow> {
     Expression<String>? kind,
     Expression<String>? displayName,
     Expression<String>? configJson,
-    Expression<bool>? isDefault,
     Expression<int>? createdAt,
     Expression<int>? lastAuthenticatedAt,
     Expression<int>? rowid,
@@ -4707,7 +5495,6 @@ class ConnectionsCompanion extends UpdateCompanion<ConnectionRow> {
       if (kind != null) 'kind': kind,
       if (displayName != null) 'display_name': displayName,
       if (configJson != null) 'config_json': configJson,
-      if (isDefault != null) 'is_default': isDefault,
       if (createdAt != null) 'created_at': createdAt,
       if (lastAuthenticatedAt != null)
         'last_authenticated_at': lastAuthenticatedAt,
@@ -4720,7 +5507,6 @@ class ConnectionsCompanion extends UpdateCompanion<ConnectionRow> {
     Value<String>? kind,
     Value<String>? displayName,
     Value<String>? configJson,
-    Value<bool>? isDefault,
     Value<int>? createdAt,
     Value<int?>? lastAuthenticatedAt,
     Value<int>? rowid,
@@ -4730,7 +5516,6 @@ class ConnectionsCompanion extends UpdateCompanion<ConnectionRow> {
       kind: kind ?? this.kind,
       displayName: displayName ?? this.displayName,
       configJson: configJson ?? this.configJson,
-      isDefault: isDefault ?? this.isDefault,
       createdAt: createdAt ?? this.createdAt,
       lastAuthenticatedAt: lastAuthenticatedAt ?? this.lastAuthenticatedAt,
       rowid: rowid ?? this.rowid,
@@ -4752,9 +5537,6 @@ class ConnectionsCompanion extends UpdateCompanion<ConnectionRow> {
     if (configJson.present) {
       map['config_json'] = Variable<String>(configJson.value);
     }
-    if (isDefault.present) {
-      map['is_default'] = Variable<bool>(isDefault.value);
-    }
     if (createdAt.present) {
       map['created_at'] = Variable<int>(createdAt.value);
     }
@@ -4774,7 +5556,6 @@ class ConnectionsCompanion extends UpdateCompanion<ConnectionRow> {
           ..write('kind: $kind, ')
           ..write('displayName: $displayName, ')
           ..write('configJson: $configJson, ')
-          ..write('isDefault: $isDefault, ')
           ..write('createdAt: $createdAt, ')
           ..write('lastAuthenticatedAt: $lastAuthenticatedAt, ')
           ..write('rowid: $rowid')
@@ -5819,6 +6600,647 @@ class ProfileConnectionsCompanion
   }
 }
 
+class $MusicSessionsTable extends MusicSessions
+    with TableInfo<$MusicSessionsTable, MusicSessionRow> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $MusicSessionsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _profileIdMeta = const VerificationMeta(
+    'profileId',
+  );
+  @override
+  late final GeneratedColumn<String> profileId = GeneratedColumn<String>(
+    'profile_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _queueJsonMeta = const VerificationMeta(
+    'queueJson',
+  );
+  @override
+  late final GeneratedColumn<String> queueJson = GeneratedColumn<String>(
+    'queue_json',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _orderJsonMeta = const VerificationMeta(
+    'orderJson',
+  );
+  @override
+  late final GeneratedColumn<String> orderJson = GeneratedColumn<String>(
+    'order_json',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _cursorMeta = const VerificationMeta('cursor');
+  @override
+  late final GeneratedColumn<int> cursor = GeneratedColumn<int>(
+    'cursor',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _shuffledMeta = const VerificationMeta(
+    'shuffled',
+  );
+  @override
+  late final GeneratedColumn<bool> shuffled = GeneratedColumn<bool>(
+    'shuffled',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("shuffled" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
+  static const VerificationMeta _repeatModeMeta = const VerificationMeta(
+    'repeatMode',
+  );
+  @override
+  late final GeneratedColumn<String> repeatMode = GeneratedColumn<String>(
+    'repeat_mode',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+    defaultValue: const Constant('off'),
+  );
+  static const VerificationMeta _contextTitleMeta = const VerificationMeta(
+    'contextTitle',
+  );
+  @override
+  late final GeneratedColumn<String> contextTitle = GeneratedColumn<String>(
+    'context_title',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _contextKindMeta = const VerificationMeta(
+    'contextKind',
+  );
+  @override
+  late final GeneratedColumn<String> contextKind = GeneratedColumn<String>(
+    'context_kind',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _positionMsMeta = const VerificationMeta(
+    'positionMs',
+  );
+  @override
+  late final GeneratedColumn<int> positionMs = GeneratedColumn<int>(
+    'position_ms',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(0),
+  );
+  static const VerificationMeta _updatedAtMeta = const VerificationMeta(
+    'updatedAt',
+  );
+  @override
+  late final GeneratedColumn<int> updatedAt = GeneratedColumn<int>(
+    'updated_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    profileId,
+    queueJson,
+    orderJson,
+    cursor,
+    shuffled,
+    repeatMode,
+    contextTitle,
+    contextKind,
+    positionMs,
+    updatedAt,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'music_sessions';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<MusicSessionRow> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('profile_id')) {
+      context.handle(
+        _profileIdMeta,
+        profileId.isAcceptableOrUnknown(data['profile_id']!, _profileIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_profileIdMeta);
+    }
+    if (data.containsKey('queue_json')) {
+      context.handle(
+        _queueJsonMeta,
+        queueJson.isAcceptableOrUnknown(data['queue_json']!, _queueJsonMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_queueJsonMeta);
+    }
+    if (data.containsKey('order_json')) {
+      context.handle(
+        _orderJsonMeta,
+        orderJson.isAcceptableOrUnknown(data['order_json']!, _orderJsonMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_orderJsonMeta);
+    }
+    if (data.containsKey('cursor')) {
+      context.handle(
+        _cursorMeta,
+        cursor.isAcceptableOrUnknown(data['cursor']!, _cursorMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_cursorMeta);
+    }
+    if (data.containsKey('shuffled')) {
+      context.handle(
+        _shuffledMeta,
+        shuffled.isAcceptableOrUnknown(data['shuffled']!, _shuffledMeta),
+      );
+    }
+    if (data.containsKey('repeat_mode')) {
+      context.handle(
+        _repeatModeMeta,
+        repeatMode.isAcceptableOrUnknown(data['repeat_mode']!, _repeatModeMeta),
+      );
+    }
+    if (data.containsKey('context_title')) {
+      context.handle(
+        _contextTitleMeta,
+        contextTitle.isAcceptableOrUnknown(
+          data['context_title']!,
+          _contextTitleMeta,
+        ),
+      );
+    }
+    if (data.containsKey('context_kind')) {
+      context.handle(
+        _contextKindMeta,
+        contextKind.isAcceptableOrUnknown(
+          data['context_kind']!,
+          _contextKindMeta,
+        ),
+      );
+    }
+    if (data.containsKey('position_ms')) {
+      context.handle(
+        _positionMsMeta,
+        positionMs.isAcceptableOrUnknown(data['position_ms']!, _positionMsMeta),
+      );
+    }
+    if (data.containsKey('updated_at')) {
+      context.handle(
+        _updatedAtMeta,
+        updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_updatedAtMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {profileId};
+  @override
+  MusicSessionRow map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return MusicSessionRow(
+      profileId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}profile_id'],
+      )!,
+      queueJson: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}queue_json'],
+      )!,
+      orderJson: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}order_json'],
+      )!,
+      cursor: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}cursor'],
+      )!,
+      shuffled: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}shuffled'],
+      )!,
+      repeatMode: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}repeat_mode'],
+      )!,
+      contextTitle: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}context_title'],
+      ),
+      contextKind: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}context_kind'],
+      ),
+      positionMs: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}position_ms'],
+      )!,
+      updatedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}updated_at'],
+      )!,
+    );
+  }
+
+  @override
+  $MusicSessionsTable createAlias(String alias) {
+    return $MusicSessionsTable(attachedDatabase, alias);
+  }
+}
+
+class MusicSessionRow extends DataClass implements Insertable<MusicSessionRow> {
+  /// Active Plezy profile that owns this session snapshot.
+  final String profileId;
+
+  /// Canonical queue tracks (insertion order) as a JSON array of MediaItem
+  /// JSON — self-contained so restore never depends on volatile cache rows.
+  final String queueJson;
+
+  /// Playback-order permutation into [queueJson] as a JSON int array
+  /// (identity while unshuffled).
+  final String orderJson;
+
+  /// Position of the current track within the playback order.
+  final int cursor;
+  final bool shuffled;
+
+  /// Stable repeat-mode id ('off' | 'all' | 'one') — not the enum `.name`.
+  final String repeatMode;
+
+  /// Play-context provenance ("Playing from …"); kind is a stable id.
+  final String? contextTitle;
+  final String? contextKind;
+
+  /// Playhead within the current track in milliseconds.
+  final int positionMs;
+
+  /// Timestamp of the last write (milliseconds since epoch).
+  final int updatedAt;
+  const MusicSessionRow({
+    required this.profileId,
+    required this.queueJson,
+    required this.orderJson,
+    required this.cursor,
+    required this.shuffled,
+    required this.repeatMode,
+    this.contextTitle,
+    this.contextKind,
+    required this.positionMs,
+    required this.updatedAt,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['profile_id'] = Variable<String>(profileId);
+    map['queue_json'] = Variable<String>(queueJson);
+    map['order_json'] = Variable<String>(orderJson);
+    map['cursor'] = Variable<int>(cursor);
+    map['shuffled'] = Variable<bool>(shuffled);
+    map['repeat_mode'] = Variable<String>(repeatMode);
+    if (!nullToAbsent || contextTitle != null) {
+      map['context_title'] = Variable<String>(contextTitle);
+    }
+    if (!nullToAbsent || contextKind != null) {
+      map['context_kind'] = Variable<String>(contextKind);
+    }
+    map['position_ms'] = Variable<int>(positionMs);
+    map['updated_at'] = Variable<int>(updatedAt);
+    return map;
+  }
+
+  MusicSessionsCompanion toCompanion(bool nullToAbsent) {
+    return MusicSessionsCompanion(
+      profileId: Value(profileId),
+      queueJson: Value(queueJson),
+      orderJson: Value(orderJson),
+      cursor: Value(cursor),
+      shuffled: Value(shuffled),
+      repeatMode: Value(repeatMode),
+      contextTitle: contextTitle == null && nullToAbsent
+          ? const Value.absent()
+          : Value(contextTitle),
+      contextKind: contextKind == null && nullToAbsent
+          ? const Value.absent()
+          : Value(contextKind),
+      positionMs: Value(positionMs),
+      updatedAt: Value(updatedAt),
+    );
+  }
+
+  factory MusicSessionRow.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return MusicSessionRow(
+      profileId: serializer.fromJson<String>(json['profileId']),
+      queueJson: serializer.fromJson<String>(json['queueJson']),
+      orderJson: serializer.fromJson<String>(json['orderJson']),
+      cursor: serializer.fromJson<int>(json['cursor']),
+      shuffled: serializer.fromJson<bool>(json['shuffled']),
+      repeatMode: serializer.fromJson<String>(json['repeatMode']),
+      contextTitle: serializer.fromJson<String?>(json['contextTitle']),
+      contextKind: serializer.fromJson<String?>(json['contextKind']),
+      positionMs: serializer.fromJson<int>(json['positionMs']),
+      updatedAt: serializer.fromJson<int>(json['updatedAt']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'profileId': serializer.toJson<String>(profileId),
+      'queueJson': serializer.toJson<String>(queueJson),
+      'orderJson': serializer.toJson<String>(orderJson),
+      'cursor': serializer.toJson<int>(cursor),
+      'shuffled': serializer.toJson<bool>(shuffled),
+      'repeatMode': serializer.toJson<String>(repeatMode),
+      'contextTitle': serializer.toJson<String?>(contextTitle),
+      'contextKind': serializer.toJson<String?>(contextKind),
+      'positionMs': serializer.toJson<int>(positionMs),
+      'updatedAt': serializer.toJson<int>(updatedAt),
+    };
+  }
+
+  MusicSessionRow copyWith({
+    String? profileId,
+    String? queueJson,
+    String? orderJson,
+    int? cursor,
+    bool? shuffled,
+    String? repeatMode,
+    Value<String?> contextTitle = const Value.absent(),
+    Value<String?> contextKind = const Value.absent(),
+    int? positionMs,
+    int? updatedAt,
+  }) => MusicSessionRow(
+    profileId: profileId ?? this.profileId,
+    queueJson: queueJson ?? this.queueJson,
+    orderJson: orderJson ?? this.orderJson,
+    cursor: cursor ?? this.cursor,
+    shuffled: shuffled ?? this.shuffled,
+    repeatMode: repeatMode ?? this.repeatMode,
+    contextTitle: contextTitle.present ? contextTitle.value : this.contextTitle,
+    contextKind: contextKind.present ? contextKind.value : this.contextKind,
+    positionMs: positionMs ?? this.positionMs,
+    updatedAt: updatedAt ?? this.updatedAt,
+  );
+  MusicSessionRow copyWithCompanion(MusicSessionsCompanion data) {
+    return MusicSessionRow(
+      profileId: data.profileId.present ? data.profileId.value : this.profileId,
+      queueJson: data.queueJson.present ? data.queueJson.value : this.queueJson,
+      orderJson: data.orderJson.present ? data.orderJson.value : this.orderJson,
+      cursor: data.cursor.present ? data.cursor.value : this.cursor,
+      shuffled: data.shuffled.present ? data.shuffled.value : this.shuffled,
+      repeatMode: data.repeatMode.present
+          ? data.repeatMode.value
+          : this.repeatMode,
+      contextTitle: data.contextTitle.present
+          ? data.contextTitle.value
+          : this.contextTitle,
+      contextKind: data.contextKind.present
+          ? data.contextKind.value
+          : this.contextKind,
+      positionMs: data.positionMs.present
+          ? data.positionMs.value
+          : this.positionMs,
+      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('MusicSessionRow(')
+          ..write('profileId: $profileId, ')
+          ..write('queueJson: $queueJson, ')
+          ..write('orderJson: $orderJson, ')
+          ..write('cursor: $cursor, ')
+          ..write('shuffled: $shuffled, ')
+          ..write('repeatMode: $repeatMode, ')
+          ..write('contextTitle: $contextTitle, ')
+          ..write('contextKind: $contextKind, ')
+          ..write('positionMs: $positionMs, ')
+          ..write('updatedAt: $updatedAt')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    profileId,
+    queueJson,
+    orderJson,
+    cursor,
+    shuffled,
+    repeatMode,
+    contextTitle,
+    contextKind,
+    positionMs,
+    updatedAt,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is MusicSessionRow &&
+          other.profileId == this.profileId &&
+          other.queueJson == this.queueJson &&
+          other.orderJson == this.orderJson &&
+          other.cursor == this.cursor &&
+          other.shuffled == this.shuffled &&
+          other.repeatMode == this.repeatMode &&
+          other.contextTitle == this.contextTitle &&
+          other.contextKind == this.contextKind &&
+          other.positionMs == this.positionMs &&
+          other.updatedAt == this.updatedAt);
+}
+
+class MusicSessionsCompanion extends UpdateCompanion<MusicSessionRow> {
+  final Value<String> profileId;
+  final Value<String> queueJson;
+  final Value<String> orderJson;
+  final Value<int> cursor;
+  final Value<bool> shuffled;
+  final Value<String> repeatMode;
+  final Value<String?> contextTitle;
+  final Value<String?> contextKind;
+  final Value<int> positionMs;
+  final Value<int> updatedAt;
+  final Value<int> rowid;
+  const MusicSessionsCompanion({
+    this.profileId = const Value.absent(),
+    this.queueJson = const Value.absent(),
+    this.orderJson = const Value.absent(),
+    this.cursor = const Value.absent(),
+    this.shuffled = const Value.absent(),
+    this.repeatMode = const Value.absent(),
+    this.contextTitle = const Value.absent(),
+    this.contextKind = const Value.absent(),
+    this.positionMs = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  MusicSessionsCompanion.insert({
+    required String profileId,
+    required String queueJson,
+    required String orderJson,
+    required int cursor,
+    this.shuffled = const Value.absent(),
+    this.repeatMode = const Value.absent(),
+    this.contextTitle = const Value.absent(),
+    this.contextKind = const Value.absent(),
+    this.positionMs = const Value.absent(),
+    required int updatedAt,
+    this.rowid = const Value.absent(),
+  }) : profileId = Value(profileId),
+       queueJson = Value(queueJson),
+       orderJson = Value(orderJson),
+       cursor = Value(cursor),
+       updatedAt = Value(updatedAt);
+  static Insertable<MusicSessionRow> custom({
+    Expression<String>? profileId,
+    Expression<String>? queueJson,
+    Expression<String>? orderJson,
+    Expression<int>? cursor,
+    Expression<bool>? shuffled,
+    Expression<String>? repeatMode,
+    Expression<String>? contextTitle,
+    Expression<String>? contextKind,
+    Expression<int>? positionMs,
+    Expression<int>? updatedAt,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (profileId != null) 'profile_id': profileId,
+      if (queueJson != null) 'queue_json': queueJson,
+      if (orderJson != null) 'order_json': orderJson,
+      if (cursor != null) 'cursor': cursor,
+      if (shuffled != null) 'shuffled': shuffled,
+      if (repeatMode != null) 'repeat_mode': repeatMode,
+      if (contextTitle != null) 'context_title': contextTitle,
+      if (contextKind != null) 'context_kind': contextKind,
+      if (positionMs != null) 'position_ms': positionMs,
+      if (updatedAt != null) 'updated_at': updatedAt,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  MusicSessionsCompanion copyWith({
+    Value<String>? profileId,
+    Value<String>? queueJson,
+    Value<String>? orderJson,
+    Value<int>? cursor,
+    Value<bool>? shuffled,
+    Value<String>? repeatMode,
+    Value<String?>? contextTitle,
+    Value<String?>? contextKind,
+    Value<int>? positionMs,
+    Value<int>? updatedAt,
+    Value<int>? rowid,
+  }) {
+    return MusicSessionsCompanion(
+      profileId: profileId ?? this.profileId,
+      queueJson: queueJson ?? this.queueJson,
+      orderJson: orderJson ?? this.orderJson,
+      cursor: cursor ?? this.cursor,
+      shuffled: shuffled ?? this.shuffled,
+      repeatMode: repeatMode ?? this.repeatMode,
+      contextTitle: contextTitle ?? this.contextTitle,
+      contextKind: contextKind ?? this.contextKind,
+      positionMs: positionMs ?? this.positionMs,
+      updatedAt: updatedAt ?? this.updatedAt,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (profileId.present) {
+      map['profile_id'] = Variable<String>(profileId.value);
+    }
+    if (queueJson.present) {
+      map['queue_json'] = Variable<String>(queueJson.value);
+    }
+    if (orderJson.present) {
+      map['order_json'] = Variable<String>(orderJson.value);
+    }
+    if (cursor.present) {
+      map['cursor'] = Variable<int>(cursor.value);
+    }
+    if (shuffled.present) {
+      map['shuffled'] = Variable<bool>(shuffled.value);
+    }
+    if (repeatMode.present) {
+      map['repeat_mode'] = Variable<String>(repeatMode.value);
+    }
+    if (contextTitle.present) {
+      map['context_title'] = Variable<String>(contextTitle.value);
+    }
+    if (contextKind.present) {
+      map['context_kind'] = Variable<String>(contextKind.value);
+    }
+    if (positionMs.present) {
+      map['position_ms'] = Variable<int>(positionMs.value);
+    }
+    if (updatedAt.present) {
+      map['updated_at'] = Variable<int>(updatedAt.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('MusicSessionsCompanion(')
+          ..write('profileId: $profileId, ')
+          ..write('queueJson: $queueJson, ')
+          ..write('orderJson: $orderJson, ')
+          ..write('cursor: $cursor, ')
+          ..write('shuffled: $shuffled, ')
+          ..write('repeatMode: $repeatMode, ')
+          ..write('contextTitle: $contextTitle, ')
+          ..write('contextKind: $contextKind, ')
+          ..write('positionMs: $positionMs, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$AppDatabase extends GeneratedDatabase {
   _$AppDatabase(QueryExecutor e) : super(e);
   $AppDatabaseManager get managers => $AppDatabaseManager(this);
@@ -5833,10 +7255,15 @@ abstract class _$AppDatabase extends GeneratedDatabase {
   late final $SyncRulesTable syncRules = $SyncRulesTable(this);
   late final $SyncRuleDownloadsTable syncRuleDownloads =
       $SyncRuleDownloadsTable(this);
+  late final $DownloadCollectionsTable downloadCollections =
+      $DownloadCollectionsTable(this);
+  late final $DownloadCollectionSyncsTable downloadCollectionSyncs =
+      $DownloadCollectionSyncsTable(this);
   late final $ConnectionsTable connections = $ConnectionsTable(this);
   late final $ProfilesTable profiles = $ProfilesTable(this);
   late final $ProfileConnectionsTable profileConnections =
       $ProfileConnectionsTable(this);
+  late final $MusicSessionsTable musicSessions = $MusicSessionsTable(this);
   late final Index idxDownloadedMediaStatus = Index(
     'idx_downloaded_media_status',
     'CREATE INDEX idx_downloaded_media_status ON downloaded_media (status)',
@@ -5905,9 +7332,12 @@ abstract class _$AppDatabase extends GeneratedDatabase {
     offlineWatchProgress,
     syncRules,
     syncRuleDownloads,
+    downloadCollections,
+    downloadCollectionSyncs,
     connections,
     profiles,
     profileConnections,
+    musicSessions,
     idxDownloadedMediaStatus,
     idxDownloadedMediaServer,
     idxDownloadedMediaParent,
@@ -5957,6 +7387,7 @@ typedef $$DownloadedMediaTableCreateCompanionBuilder =
       Value<int?> totalBytes,
       Value<int> downloadedBytes,
       Value<String?> videoFilePath,
+      Value<String?> additionalPartPaths,
       Value<String?> safRootUri,
       Value<String?> thumbPath,
       Value<int?> downloadedAt,
@@ -5965,6 +7396,8 @@ typedef $$DownloadedMediaTableCreateCompanionBuilder =
       Value<String?> bgTaskId,
       Value<int> mediaIndex,
       Value<String?> mediaSourceId,
+      Value<String?> libraryId,
+      Value<String?> libraryTitle,
     });
 typedef $$DownloadedMediaTableUpdateCompanionBuilder =
     DownloadedMediaCompanion Function({
@@ -5981,6 +7414,7 @@ typedef $$DownloadedMediaTableUpdateCompanionBuilder =
       Value<int?> totalBytes,
       Value<int> downloadedBytes,
       Value<String?> videoFilePath,
+      Value<String?> additionalPartPaths,
       Value<String?> safRootUri,
       Value<String?> thumbPath,
       Value<int?> downloadedAt,
@@ -5989,6 +7423,8 @@ typedef $$DownloadedMediaTableUpdateCompanionBuilder =
       Value<String?> bgTaskId,
       Value<int> mediaIndex,
       Value<String?> mediaSourceId,
+      Value<String?> libraryId,
+      Value<String?> libraryTitle,
     });
 
 class $$DownloadedMediaTableFilterComposer
@@ -6065,6 +7501,11 @@ class $$DownloadedMediaTableFilterComposer
     builder: (column) => ColumnFilters(column),
   );
 
+  ColumnFilters<String> get additionalPartPaths => $composableBuilder(
+    column: $table.additionalPartPaths,
+    builder: (column) => ColumnFilters(column),
+  );
+
   ColumnFilters<String> get safRootUri => $composableBuilder(
     column: $table.safRootUri,
     builder: (column) => ColumnFilters(column),
@@ -6102,6 +7543,16 @@ class $$DownloadedMediaTableFilterComposer
 
   ColumnFilters<String> get mediaSourceId => $composableBuilder(
     column: $table.mediaSourceId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get libraryId => $composableBuilder(
+    column: $table.libraryId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get libraryTitle => $composableBuilder(
+    column: $table.libraryTitle,
     builder: (column) => ColumnFilters(column),
   );
 }
@@ -6180,6 +7631,11 @@ class $$DownloadedMediaTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<String> get additionalPartPaths => $composableBuilder(
+    column: $table.additionalPartPaths,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<String> get safRootUri => $composableBuilder(
     column: $table.safRootUri,
     builder: (column) => ColumnOrderings(column),
@@ -6217,6 +7673,16 @@ class $$DownloadedMediaTableOrderingComposer
 
   ColumnOrderings<String> get mediaSourceId => $composableBuilder(
     column: $table.mediaSourceId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get libraryId => $composableBuilder(
+    column: $table.libraryId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get libraryTitle => $composableBuilder(
+    column: $table.libraryTitle,
     builder: (column) => ColumnOrderings(column),
   );
 }
@@ -6281,6 +7747,11 @@ class $$DownloadedMediaTableAnnotationComposer
     builder: (column) => column,
   );
 
+  GeneratedColumn<String> get additionalPartPaths => $composableBuilder(
+    column: $table.additionalPartPaths,
+    builder: (column) => column,
+  );
+
   GeneratedColumn<String> get safRootUri => $composableBuilder(
     column: $table.safRootUri,
     builder: (column) => column,
@@ -6314,6 +7785,14 @@ class $$DownloadedMediaTableAnnotationComposer
 
   GeneratedColumn<String> get mediaSourceId => $composableBuilder(
     column: $table.mediaSourceId,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get libraryId =>
+      $composableBuilder(column: $table.libraryId, builder: (column) => column);
+
+  GeneratedColumn<String> get libraryTitle => $composableBuilder(
+    column: $table.libraryTitle,
     builder: (column) => column,
   );
 }
@@ -6368,6 +7847,7 @@ class $$DownloadedMediaTableTableManager
                 Value<int?> totalBytes = const Value.absent(),
                 Value<int> downloadedBytes = const Value.absent(),
                 Value<String?> videoFilePath = const Value.absent(),
+                Value<String?> additionalPartPaths = const Value.absent(),
                 Value<String?> safRootUri = const Value.absent(),
                 Value<String?> thumbPath = const Value.absent(),
                 Value<int?> downloadedAt = const Value.absent(),
@@ -6376,6 +7856,8 @@ class $$DownloadedMediaTableTableManager
                 Value<String?> bgTaskId = const Value.absent(),
                 Value<int> mediaIndex = const Value.absent(),
                 Value<String?> mediaSourceId = const Value.absent(),
+                Value<String?> libraryId = const Value.absent(),
+                Value<String?> libraryTitle = const Value.absent(),
               }) => DownloadedMediaCompanion(
                 id: id,
                 serverId: serverId,
@@ -6390,6 +7872,7 @@ class $$DownloadedMediaTableTableManager
                 totalBytes: totalBytes,
                 downloadedBytes: downloadedBytes,
                 videoFilePath: videoFilePath,
+                additionalPartPaths: additionalPartPaths,
                 safRootUri: safRootUri,
                 thumbPath: thumbPath,
                 downloadedAt: downloadedAt,
@@ -6398,6 +7881,8 @@ class $$DownloadedMediaTableTableManager
                 bgTaskId: bgTaskId,
                 mediaIndex: mediaIndex,
                 mediaSourceId: mediaSourceId,
+                libraryId: libraryId,
+                libraryTitle: libraryTitle,
               ),
           createCompanionCallback:
               ({
@@ -6414,6 +7899,7 @@ class $$DownloadedMediaTableTableManager
                 Value<int?> totalBytes = const Value.absent(),
                 Value<int> downloadedBytes = const Value.absent(),
                 Value<String?> videoFilePath = const Value.absent(),
+                Value<String?> additionalPartPaths = const Value.absent(),
                 Value<String?> safRootUri = const Value.absent(),
                 Value<String?> thumbPath = const Value.absent(),
                 Value<int?> downloadedAt = const Value.absent(),
@@ -6422,6 +7908,8 @@ class $$DownloadedMediaTableTableManager
                 Value<String?> bgTaskId = const Value.absent(),
                 Value<int> mediaIndex = const Value.absent(),
                 Value<String?> mediaSourceId = const Value.absent(),
+                Value<String?> libraryId = const Value.absent(),
+                Value<String?> libraryTitle = const Value.absent(),
               }) => DownloadedMediaCompanion.insert(
                 id: id,
                 serverId: serverId,
@@ -6436,6 +7924,7 @@ class $$DownloadedMediaTableTableManager
                 totalBytes: totalBytes,
                 downloadedBytes: downloadedBytes,
                 videoFilePath: videoFilePath,
+                additionalPartPaths: additionalPartPaths,
                 safRootUri: safRootUri,
                 thumbPath: thumbPath,
                 downloadedAt: downloadedAt,
@@ -6444,6 +7933,8 @@ class $$DownloadedMediaTableTableManager
                 bgTaskId: bgTaskId,
                 mediaIndex: mediaIndex,
                 mediaSourceId: mediaSourceId,
+                libraryId: libraryId,
+                libraryTitle: libraryTitle,
               ),
           withReferenceMapper: (p0) => p0
               .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
@@ -6909,16 +8400,16 @@ typedef $$ApiCacheTableCreateCompanionBuilder =
     ApiCacheCompanion Function({
       required String cacheKey,
       required String data,
-      Value<bool> pinned,
       Value<DateTime> cachedAt,
+      Value<bool> pinned,
       Value<int> rowid,
     });
 typedef $$ApiCacheTableUpdateCompanionBuilder =
     ApiCacheCompanion Function({
       Value<String> cacheKey,
       Value<String> data,
-      Value<bool> pinned,
       Value<DateTime> cachedAt,
+      Value<bool> pinned,
       Value<int> rowid,
     });
 
@@ -6941,13 +8432,13 @@ class $$ApiCacheTableFilterComposer
     builder: (column) => ColumnFilters(column),
   );
 
-  ColumnFilters<bool> get pinned => $composableBuilder(
-    column: $table.pinned,
+  ColumnFilters<DateTime> get cachedAt => $composableBuilder(
+    column: $table.cachedAt,
     builder: (column) => ColumnFilters(column),
   );
 
-  ColumnFilters<DateTime> get cachedAt => $composableBuilder(
-    column: $table.cachedAt,
+  ColumnFilters<bool> get pinned => $composableBuilder(
+    column: $table.pinned,
     builder: (column) => ColumnFilters(column),
   );
 }
@@ -6971,13 +8462,13 @@ class $$ApiCacheTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
-  ColumnOrderings<bool> get pinned => $composableBuilder(
-    column: $table.pinned,
+  ColumnOrderings<DateTime> get cachedAt => $composableBuilder(
+    column: $table.cachedAt,
     builder: (column) => ColumnOrderings(column),
   );
 
-  ColumnOrderings<DateTime> get cachedAt => $composableBuilder(
-    column: $table.cachedAt,
+  ColumnOrderings<bool> get pinned => $composableBuilder(
+    column: $table.pinned,
     builder: (column) => ColumnOrderings(column),
   );
 }
@@ -6997,11 +8488,11 @@ class $$ApiCacheTableAnnotationComposer
   GeneratedColumn<String> get data =>
       $composableBuilder(column: $table.data, builder: (column) => column);
 
-  GeneratedColumn<bool> get pinned =>
-      $composableBuilder(column: $table.pinned, builder: (column) => column);
-
   GeneratedColumn<DateTime> get cachedAt =>
       $composableBuilder(column: $table.cachedAt, builder: (column) => column);
+
+  GeneratedColumn<bool> get pinned =>
+      $composableBuilder(column: $table.pinned, builder: (column) => column);
 }
 
 class $$ApiCacheTableTableManager
@@ -7037,28 +8528,28 @@ class $$ApiCacheTableTableManager
               ({
                 Value<String> cacheKey = const Value.absent(),
                 Value<String> data = const Value.absent(),
-                Value<bool> pinned = const Value.absent(),
                 Value<DateTime> cachedAt = const Value.absent(),
+                Value<bool> pinned = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => ApiCacheCompanion(
                 cacheKey: cacheKey,
                 data: data,
-                pinned: pinned,
                 cachedAt: cachedAt,
+                pinned: pinned,
                 rowid: rowid,
               ),
           createCompanionCallback:
               ({
                 required String cacheKey,
                 required String data,
-                Value<bool> pinned = const Value.absent(),
                 Value<DateTime> cachedAt = const Value.absent(),
+                Value<bool> pinned = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => ApiCacheCompanion.insert(
                 cacheKey: cacheKey,
                 data: data,
-                pinned: pinned,
                 cachedAt: cachedAt,
+                pinned: pinned,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0
@@ -8263,13 +9754,413 @@ typedef $$SyncRuleDownloadsTableProcessedTableManager =
       SyncRuleDownloadItem,
       PrefetchHooks Function({bool syncRuleId})
     >;
+typedef $$DownloadCollectionsTableCreateCompanionBuilder =
+    DownloadCollectionsCompanion Function({
+      required String profileId,
+      required String serverId,
+      required String collectionId,
+      required String memberIds,
+      Value<int> rowid,
+    });
+typedef $$DownloadCollectionsTableUpdateCompanionBuilder =
+    DownloadCollectionsCompanion Function({
+      Value<String> profileId,
+      Value<String> serverId,
+      Value<String> collectionId,
+      Value<String> memberIds,
+      Value<int> rowid,
+    });
+
+class $$DownloadCollectionsTableFilterComposer
+    extends Composer<_$AppDatabase, $DownloadCollectionsTable> {
+  $$DownloadCollectionsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get profileId => $composableBuilder(
+    column: $table.profileId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get serverId => $composableBuilder(
+    column: $table.serverId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get collectionId => $composableBuilder(
+    column: $table.collectionId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get memberIds => $composableBuilder(
+    column: $table.memberIds,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$DownloadCollectionsTableOrderingComposer
+    extends Composer<_$AppDatabase, $DownloadCollectionsTable> {
+  $$DownloadCollectionsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get profileId => $composableBuilder(
+    column: $table.profileId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get serverId => $composableBuilder(
+    column: $table.serverId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get collectionId => $composableBuilder(
+    column: $table.collectionId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get memberIds => $composableBuilder(
+    column: $table.memberIds,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$DownloadCollectionsTableAnnotationComposer
+    extends Composer<_$AppDatabase, $DownloadCollectionsTable> {
+  $$DownloadCollectionsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get profileId =>
+      $composableBuilder(column: $table.profileId, builder: (column) => column);
+
+  GeneratedColumn<String> get serverId =>
+      $composableBuilder(column: $table.serverId, builder: (column) => column);
+
+  GeneratedColumn<String> get collectionId => $composableBuilder(
+    column: $table.collectionId,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get memberIds =>
+      $composableBuilder(column: $table.memberIds, builder: (column) => column);
+}
+
+class $$DownloadCollectionsTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $DownloadCollectionsTable,
+          DownloadCollectionItem,
+          $$DownloadCollectionsTableFilterComposer,
+          $$DownloadCollectionsTableOrderingComposer,
+          $$DownloadCollectionsTableAnnotationComposer,
+          $$DownloadCollectionsTableCreateCompanionBuilder,
+          $$DownloadCollectionsTableUpdateCompanionBuilder,
+          (
+            DownloadCollectionItem,
+            BaseReferences<
+              _$AppDatabase,
+              $DownloadCollectionsTable,
+              DownloadCollectionItem
+            >,
+          ),
+          DownloadCollectionItem,
+          PrefetchHooks Function()
+        > {
+  $$DownloadCollectionsTableTableManager(
+    _$AppDatabase db,
+    $DownloadCollectionsTable table,
+  ) : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$DownloadCollectionsTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$DownloadCollectionsTableOrderingComposer(
+                $db: db,
+                $table: table,
+              ),
+          createComputedFieldComposer: () =>
+              $$DownloadCollectionsTableAnnotationComposer(
+                $db: db,
+                $table: table,
+              ),
+          updateCompanionCallback:
+              ({
+                Value<String> profileId = const Value.absent(),
+                Value<String> serverId = const Value.absent(),
+                Value<String> collectionId = const Value.absent(),
+                Value<String> memberIds = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => DownloadCollectionsCompanion(
+                profileId: profileId,
+                serverId: serverId,
+                collectionId: collectionId,
+                memberIds: memberIds,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String profileId,
+                required String serverId,
+                required String collectionId,
+                required String memberIds,
+                Value<int> rowid = const Value.absent(),
+              }) => DownloadCollectionsCompanion.insert(
+                profileId: profileId,
+                serverId: serverId,
+                collectionId: collectionId,
+                memberIds: memberIds,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$DownloadCollectionsTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $DownloadCollectionsTable,
+      DownloadCollectionItem,
+      $$DownloadCollectionsTableFilterComposer,
+      $$DownloadCollectionsTableOrderingComposer,
+      $$DownloadCollectionsTableAnnotationComposer,
+      $$DownloadCollectionsTableCreateCompanionBuilder,
+      $$DownloadCollectionsTableUpdateCompanionBuilder,
+      (
+        DownloadCollectionItem,
+        BaseReferences<
+          _$AppDatabase,
+          $DownloadCollectionsTable,
+          DownloadCollectionItem
+        >,
+      ),
+      DownloadCollectionItem,
+      PrefetchHooks Function()
+    >;
+typedef $$DownloadCollectionSyncsTableCreateCompanionBuilder =
+    DownloadCollectionSyncsCompanion Function({
+      required String profileId,
+      required String serverId,
+      required int syncedAt,
+      required String checkedIds,
+      Value<int> rowid,
+    });
+typedef $$DownloadCollectionSyncsTableUpdateCompanionBuilder =
+    DownloadCollectionSyncsCompanion Function({
+      Value<String> profileId,
+      Value<String> serverId,
+      Value<int> syncedAt,
+      Value<String> checkedIds,
+      Value<int> rowid,
+    });
+
+class $$DownloadCollectionSyncsTableFilterComposer
+    extends Composer<_$AppDatabase, $DownloadCollectionSyncsTable> {
+  $$DownloadCollectionSyncsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get profileId => $composableBuilder(
+    column: $table.profileId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get serverId => $composableBuilder(
+    column: $table.serverId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get syncedAt => $composableBuilder(
+    column: $table.syncedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get checkedIds => $composableBuilder(
+    column: $table.checkedIds,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$DownloadCollectionSyncsTableOrderingComposer
+    extends Composer<_$AppDatabase, $DownloadCollectionSyncsTable> {
+  $$DownloadCollectionSyncsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get profileId => $composableBuilder(
+    column: $table.profileId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get serverId => $composableBuilder(
+    column: $table.serverId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get syncedAt => $composableBuilder(
+    column: $table.syncedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get checkedIds => $composableBuilder(
+    column: $table.checkedIds,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$DownloadCollectionSyncsTableAnnotationComposer
+    extends Composer<_$AppDatabase, $DownloadCollectionSyncsTable> {
+  $$DownloadCollectionSyncsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get profileId =>
+      $composableBuilder(column: $table.profileId, builder: (column) => column);
+
+  GeneratedColumn<String> get serverId =>
+      $composableBuilder(column: $table.serverId, builder: (column) => column);
+
+  GeneratedColumn<int> get syncedAt =>
+      $composableBuilder(column: $table.syncedAt, builder: (column) => column);
+
+  GeneratedColumn<String> get checkedIds => $composableBuilder(
+    column: $table.checkedIds,
+    builder: (column) => column,
+  );
+}
+
+class $$DownloadCollectionSyncsTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $DownloadCollectionSyncsTable,
+          DownloadCollectionSyncItem,
+          $$DownloadCollectionSyncsTableFilterComposer,
+          $$DownloadCollectionSyncsTableOrderingComposer,
+          $$DownloadCollectionSyncsTableAnnotationComposer,
+          $$DownloadCollectionSyncsTableCreateCompanionBuilder,
+          $$DownloadCollectionSyncsTableUpdateCompanionBuilder,
+          (
+            DownloadCollectionSyncItem,
+            BaseReferences<
+              _$AppDatabase,
+              $DownloadCollectionSyncsTable,
+              DownloadCollectionSyncItem
+            >,
+          ),
+          DownloadCollectionSyncItem,
+          PrefetchHooks Function()
+        > {
+  $$DownloadCollectionSyncsTableTableManager(
+    _$AppDatabase db,
+    $DownloadCollectionSyncsTable table,
+  ) : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$DownloadCollectionSyncsTableFilterComposer(
+                $db: db,
+                $table: table,
+              ),
+          createOrderingComposer: () =>
+              $$DownloadCollectionSyncsTableOrderingComposer(
+                $db: db,
+                $table: table,
+              ),
+          createComputedFieldComposer: () =>
+              $$DownloadCollectionSyncsTableAnnotationComposer(
+                $db: db,
+                $table: table,
+              ),
+          updateCompanionCallback:
+              ({
+                Value<String> profileId = const Value.absent(),
+                Value<String> serverId = const Value.absent(),
+                Value<int> syncedAt = const Value.absent(),
+                Value<String> checkedIds = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => DownloadCollectionSyncsCompanion(
+                profileId: profileId,
+                serverId: serverId,
+                syncedAt: syncedAt,
+                checkedIds: checkedIds,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String profileId,
+                required String serverId,
+                required int syncedAt,
+                required String checkedIds,
+                Value<int> rowid = const Value.absent(),
+              }) => DownloadCollectionSyncsCompanion.insert(
+                profileId: profileId,
+                serverId: serverId,
+                syncedAt: syncedAt,
+                checkedIds: checkedIds,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$DownloadCollectionSyncsTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $DownloadCollectionSyncsTable,
+      DownloadCollectionSyncItem,
+      $$DownloadCollectionSyncsTableFilterComposer,
+      $$DownloadCollectionSyncsTableOrderingComposer,
+      $$DownloadCollectionSyncsTableAnnotationComposer,
+      $$DownloadCollectionSyncsTableCreateCompanionBuilder,
+      $$DownloadCollectionSyncsTableUpdateCompanionBuilder,
+      (
+        DownloadCollectionSyncItem,
+        BaseReferences<
+          _$AppDatabase,
+          $DownloadCollectionSyncsTable,
+          DownloadCollectionSyncItem
+        >,
+      ),
+      DownloadCollectionSyncItem,
+      PrefetchHooks Function()
+    >;
 typedef $$ConnectionsTableCreateCompanionBuilder =
     ConnectionsCompanion Function({
       required String id,
       required String kind,
       required String displayName,
       required String configJson,
-      Value<bool> isDefault,
       required int createdAt,
       Value<int?> lastAuthenticatedAt,
       Value<int> rowid,
@@ -8280,7 +10171,6 @@ typedef $$ConnectionsTableUpdateCompanionBuilder =
       Value<String> kind,
       Value<String> displayName,
       Value<String> configJson,
-      Value<bool> isDefault,
       Value<int> createdAt,
       Value<int?> lastAuthenticatedAt,
       Value<int> rowid,
@@ -8341,11 +10231,6 @@ class $$ConnectionsTableFilterComposer
 
   ColumnFilters<String> get configJson => $composableBuilder(
     column: $table.configJson,
-    builder: (column) => ColumnFilters(column),
-  );
-
-  ColumnFilters<bool> get isDefault => $composableBuilder(
-    column: $table.isDefault,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -8414,11 +10299,6 @@ class $$ConnectionsTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
-  ColumnOrderings<bool> get isDefault => $composableBuilder(
-    column: $table.isDefault,
-    builder: (column) => ColumnOrderings(column),
-  );
-
   ColumnOrderings<int> get createdAt => $composableBuilder(
     column: $table.createdAt,
     builder: (column) => ColumnOrderings(column),
@@ -8454,9 +10334,6 @@ class $$ConnectionsTableAnnotationComposer
     column: $table.configJson,
     builder: (column) => column,
   );
-
-  GeneratedColumn<bool> get isDefault =>
-      $composableBuilder(column: $table.isDefault, builder: (column) => column);
 
   GeneratedColumn<int> get createdAt =>
       $composableBuilder(column: $table.createdAt, builder: (column) => column);
@@ -8525,7 +10402,6 @@ class $$ConnectionsTableTableManager
                 Value<String> kind = const Value.absent(),
                 Value<String> displayName = const Value.absent(),
                 Value<String> configJson = const Value.absent(),
-                Value<bool> isDefault = const Value.absent(),
                 Value<int> createdAt = const Value.absent(),
                 Value<int?> lastAuthenticatedAt = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
@@ -8534,7 +10410,6 @@ class $$ConnectionsTableTableManager
                 kind: kind,
                 displayName: displayName,
                 configJson: configJson,
-                isDefault: isDefault,
                 createdAt: createdAt,
                 lastAuthenticatedAt: lastAuthenticatedAt,
                 rowid: rowid,
@@ -8545,7 +10420,6 @@ class $$ConnectionsTableTableManager
                 required String kind,
                 required String displayName,
                 required String configJson,
-                Value<bool> isDefault = const Value.absent(),
                 required int createdAt,
                 Value<int?> lastAuthenticatedAt = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
@@ -8554,7 +10428,6 @@ class $$ConnectionsTableTableManager
                 kind: kind,
                 displayName: displayName,
                 configJson: configJson,
-                isDefault: isDefault,
                 createdAt: createdAt,
                 lastAuthenticatedAt: lastAuthenticatedAt,
                 rowid: rowid,
@@ -9259,6 +11132,309 @@ typedef $$ProfileConnectionsTableProcessedTableManager =
       ProfileConnectionRow,
       PrefetchHooks Function({bool connectionId})
     >;
+typedef $$MusicSessionsTableCreateCompanionBuilder =
+    MusicSessionsCompanion Function({
+      required String profileId,
+      required String queueJson,
+      required String orderJson,
+      required int cursor,
+      Value<bool> shuffled,
+      Value<String> repeatMode,
+      Value<String?> contextTitle,
+      Value<String?> contextKind,
+      Value<int> positionMs,
+      required int updatedAt,
+      Value<int> rowid,
+    });
+typedef $$MusicSessionsTableUpdateCompanionBuilder =
+    MusicSessionsCompanion Function({
+      Value<String> profileId,
+      Value<String> queueJson,
+      Value<String> orderJson,
+      Value<int> cursor,
+      Value<bool> shuffled,
+      Value<String> repeatMode,
+      Value<String?> contextTitle,
+      Value<String?> contextKind,
+      Value<int> positionMs,
+      Value<int> updatedAt,
+      Value<int> rowid,
+    });
+
+class $$MusicSessionsTableFilterComposer
+    extends Composer<_$AppDatabase, $MusicSessionsTable> {
+  $$MusicSessionsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get profileId => $composableBuilder(
+    column: $table.profileId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get queueJson => $composableBuilder(
+    column: $table.queueJson,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get orderJson => $composableBuilder(
+    column: $table.orderJson,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get cursor => $composableBuilder(
+    column: $table.cursor,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get shuffled => $composableBuilder(
+    column: $table.shuffled,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get repeatMode => $composableBuilder(
+    column: $table.repeatMode,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get contextTitle => $composableBuilder(
+    column: $table.contextTitle,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get contextKind => $composableBuilder(
+    column: $table.contextKind,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get positionMs => $composableBuilder(
+    column: $table.positionMs,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$MusicSessionsTableOrderingComposer
+    extends Composer<_$AppDatabase, $MusicSessionsTable> {
+  $$MusicSessionsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get profileId => $composableBuilder(
+    column: $table.profileId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get queueJson => $composableBuilder(
+    column: $table.queueJson,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get orderJson => $composableBuilder(
+    column: $table.orderJson,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get cursor => $composableBuilder(
+    column: $table.cursor,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<bool> get shuffled => $composableBuilder(
+    column: $table.shuffled,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get repeatMode => $composableBuilder(
+    column: $table.repeatMode,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get contextTitle => $composableBuilder(
+    column: $table.contextTitle,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get contextKind => $composableBuilder(
+    column: $table.contextKind,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get positionMs => $composableBuilder(
+    column: $table.positionMs,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$MusicSessionsTableAnnotationComposer
+    extends Composer<_$AppDatabase, $MusicSessionsTable> {
+  $$MusicSessionsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get profileId =>
+      $composableBuilder(column: $table.profileId, builder: (column) => column);
+
+  GeneratedColumn<String> get queueJson =>
+      $composableBuilder(column: $table.queueJson, builder: (column) => column);
+
+  GeneratedColumn<String> get orderJson =>
+      $composableBuilder(column: $table.orderJson, builder: (column) => column);
+
+  GeneratedColumn<int> get cursor =>
+      $composableBuilder(column: $table.cursor, builder: (column) => column);
+
+  GeneratedColumn<bool> get shuffled =>
+      $composableBuilder(column: $table.shuffled, builder: (column) => column);
+
+  GeneratedColumn<String> get repeatMode => $composableBuilder(
+    column: $table.repeatMode,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get contextTitle => $composableBuilder(
+    column: $table.contextTitle,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get contextKind => $composableBuilder(
+    column: $table.contextKind,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get positionMs => $composableBuilder(
+    column: $table.positionMs,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<int> get updatedAt =>
+      $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+}
+
+class $$MusicSessionsTableTableManager
+    extends
+        RootTableManager<
+          _$AppDatabase,
+          $MusicSessionsTable,
+          MusicSessionRow,
+          $$MusicSessionsTableFilterComposer,
+          $$MusicSessionsTableOrderingComposer,
+          $$MusicSessionsTableAnnotationComposer,
+          $$MusicSessionsTableCreateCompanionBuilder,
+          $$MusicSessionsTableUpdateCompanionBuilder,
+          (
+            MusicSessionRow,
+            BaseReferences<_$AppDatabase, $MusicSessionsTable, MusicSessionRow>,
+          ),
+          MusicSessionRow,
+          PrefetchHooks Function()
+        > {
+  $$MusicSessionsTableTableManager(_$AppDatabase db, $MusicSessionsTable table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$MusicSessionsTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$MusicSessionsTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$MusicSessionsTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> profileId = const Value.absent(),
+                Value<String> queueJson = const Value.absent(),
+                Value<String> orderJson = const Value.absent(),
+                Value<int> cursor = const Value.absent(),
+                Value<bool> shuffled = const Value.absent(),
+                Value<String> repeatMode = const Value.absent(),
+                Value<String?> contextTitle = const Value.absent(),
+                Value<String?> contextKind = const Value.absent(),
+                Value<int> positionMs = const Value.absent(),
+                Value<int> updatedAt = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => MusicSessionsCompanion(
+                profileId: profileId,
+                queueJson: queueJson,
+                orderJson: orderJson,
+                cursor: cursor,
+                shuffled: shuffled,
+                repeatMode: repeatMode,
+                contextTitle: contextTitle,
+                contextKind: contextKind,
+                positionMs: positionMs,
+                updatedAt: updatedAt,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String profileId,
+                required String queueJson,
+                required String orderJson,
+                required int cursor,
+                Value<bool> shuffled = const Value.absent(),
+                Value<String> repeatMode = const Value.absent(),
+                Value<String?> contextTitle = const Value.absent(),
+                Value<String?> contextKind = const Value.absent(),
+                Value<int> positionMs = const Value.absent(),
+                required int updatedAt,
+                Value<int> rowid = const Value.absent(),
+              }) => MusicSessionsCompanion.insert(
+                profileId: profileId,
+                queueJson: queueJson,
+                orderJson: orderJson,
+                cursor: cursor,
+                shuffled: shuffled,
+                repeatMode: repeatMode,
+                contextTitle: contextTitle,
+                contextKind: contextKind,
+                positionMs: positionMs,
+                updatedAt: updatedAt,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$MusicSessionsTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDatabase,
+      $MusicSessionsTable,
+      MusicSessionRow,
+      $$MusicSessionsTableFilterComposer,
+      $$MusicSessionsTableOrderingComposer,
+      $$MusicSessionsTableAnnotationComposer,
+      $$MusicSessionsTableCreateCompanionBuilder,
+      $$MusicSessionsTableUpdateCompanionBuilder,
+      (
+        MusicSessionRow,
+        BaseReferences<_$AppDatabase, $MusicSessionsTable, MusicSessionRow>,
+      ),
+      MusicSessionRow,
+      PrefetchHooks Function()
+    >;
 
 class $AppDatabaseManager {
   final _$AppDatabase _db;
@@ -9277,10 +11453,19 @@ class $AppDatabaseManager {
       $$SyncRulesTableTableManager(_db, _db.syncRules);
   $$SyncRuleDownloadsTableTableManager get syncRuleDownloads =>
       $$SyncRuleDownloadsTableTableManager(_db, _db.syncRuleDownloads);
+  $$DownloadCollectionsTableTableManager get downloadCollections =>
+      $$DownloadCollectionsTableTableManager(_db, _db.downloadCollections);
+  $$DownloadCollectionSyncsTableTableManager get downloadCollectionSyncs =>
+      $$DownloadCollectionSyncsTableTableManager(
+        _db,
+        _db.downloadCollectionSyncs,
+      );
   $$ConnectionsTableTableManager get connections =>
       $$ConnectionsTableTableManager(_db, _db.connections);
   $$ProfilesTableTableManager get profiles =>
       $$ProfilesTableTableManager(_db, _db.profiles);
   $$ProfileConnectionsTableTableManager get profileConnections =>
       $$ProfileConnectionsTableTableManager(_db, _db.profileConnections);
+  $$MusicSessionsTableTableManager get musicSessions =>
+      $$MusicSessionsTableTableManager(_db, _db.musicSessions);
 }

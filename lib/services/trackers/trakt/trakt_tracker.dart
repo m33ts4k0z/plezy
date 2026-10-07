@@ -1,6 +1,5 @@
 import 'package:http/http.dart' as http;
 
-import '../../../media/media_kind.dart';
 import '../../../models/trackers/tracker_context.dart';
 import '../../../models/trakt/trakt_ids.dart';
 import '../../../models/trakt/trakt_scrobble_request.dart';
@@ -9,6 +8,7 @@ import '../../../utils/json_utils.dart';
 import '../../settings_service.dart';
 import '../tracker.dart';
 import '../tracker_constants.dart';
+import '../tracker_history_body.dart';
 import '../tracker_id_resolver.dart';
 import '../tracker_rating_match.dart';
 import '../tracker_session.dart';
@@ -45,11 +45,6 @@ class TraktTracker extends TrackerBase
 
   /// Trakt counts a `/scrobble/stop` as a watch from this progress upwards.
   static const double _scrobbleWatchedPercent = 80.0;
-
-  /// The bound client is replaced on every session rebind, so its identity is
-  /// the account identity.
-  @override
-  Object? get scrobbleBinding => client;
 
   @override
   bool get canReportPlayback => isEnabledWithSession;
@@ -104,30 +99,26 @@ class TraktTracker extends TrackerBase
   @override
   String? historyRowIdentity(TrackerContext ctx) => trackerExternalRowIdentity(ctx.external);
 
-  /// Push a rotated token pair into the live client instead of rebuilding it —
-  /// a second client would race the next refresh.
-  void updateSession(TrackerSession session) => client?.updateSession(session);
+  @override
+  Future<void> markWatched(TrackerContext ctx, {DateTime? watchedAt}) =>
+      writeHistory([(ctx: ctx, watchedAt: watchedAt)], watched: true);
 
   @override
-  Future<void> markWatched(TrackerContext ctx, {DateTime? watchedAt}) async {
-    final client = this.client;
-    if (client == null || !canWriteWatched) return;
-    final body = _requestFor(ctx);
-    if (body == null) return;
-
-    await client.addToHistory(body, watchedAt: watchedAt?.toUtc().toIso8601String());
-    appLogger.d('Trakt: marked watched (${ctx.ratingKey}, isMovie=${ctx.isMovie})');
-  }
+  Future<void> markUnwatched(TrackerContext ctx) => writeHistory([(ctx: ctx, watchedAt: null)], watched: false);
 
   @override
-  Future<void> markUnwatched(TrackerContext ctx) async {
+  Future<void> writeHistory(List<TrackerHistoryEntry> entries, {required bool watched}) async {
     final client = this.client;
     if (client == null || !canWriteWatched) return;
-    final body = _requestFor(ctx);
+    final body = trackerHistoryBody(
+      entries,
+      idsFor: (ctx) => TraktIds.fromExternal(ctx.external).toJson(),
+      includeWatchedAt: watched,
+    );
     if (body == null) return;
 
-    await client.removeFromHistory(body);
-    appLogger.d('Trakt: marked unwatched (${ctx.ratingKey}, isMovie=${ctx.isMovie})');
+    await (watched ? client.addToHistory(body) : client.removeFromHistory(body));
+    appLogger.d('Trakt: marked ${entries.length} item(s) ${watched ? 'watched' : 'unwatched'}');
   }
 
   @override
@@ -184,10 +175,10 @@ class TraktTracker extends TrackerBase
     final localIds = TraktIds.fromExternal(ctx.ids.external).toJson();
     if (localIds.isEmpty) throw const TrackerRatingUnavailableException('Trakt');
 
-    final entries = await client.getRatings(_ratingType(ctx));
+    final entries = await client.getRatings(trackerRatingType(ctx, 'Trakt'));
     for (final entry in entries) {
       if (entry is! Map) continue;
-      if (!_ratingEntryMatches(ctx, entry.cast<String, dynamic>(), localIds)) continue;
+      if (!trackerRatingEntryMatches(ctx, entry.cast<String, dynamic>(), localIds)) continue;
       final rating = flexibleInt(entry['rating']);
       return rating != null && rating > 0 ? rating.clamp(1, 10).toInt() : null;
     }
@@ -208,77 +199,6 @@ class TraktTracker extends TrackerBase
     await client.removeRatings(_ratingBody(ctx));
   }
 
-  String _ratingType(TrackerRatingContext ctx) => switch (ctx.kind) {
-    MediaKind.movie => 'movies',
-    MediaKind.show => 'shows',
-    MediaKind.season => 'seasons',
-    MediaKind.episode => 'episodes',
-    _ => throw const TrackerRatingUnavailableException('Trakt'),
-  };
-
-  bool _ratingEntryMatches(TrackerRatingContext ctx, Map<String, dynamic> entry, Map<String, dynamic> localIds) {
-    final show = entry['show'];
-    final movie = entry['movie'];
-    return switch (ctx.kind) {
-      MediaKind.movie => trackerIdsMatch(trackerNestedIds(movie), localIds),
-      MediaKind.show => trackerIdsMatch(trackerNestedIds(show), localIds),
-      MediaKind.season =>
-        trackerIdsMatch(trackerNestedIds(show), localIds) && _numberMatches(entry['season'], ctx.season),
-      MediaKind.episode =>
-        trackerIdsMatch(trackerNestedIds(show), localIds) &&
-            _numberMatches(entry['episode'], ctx.episodeNumber) &&
-            _seasonMatches(entry['episode'], ctx.season),
-      _ => false,
-    };
-  }
-
-  bool _numberMatches(Object? value, int? expected) {
-    if (expected == null || value is! Map) return false;
-    return flexibleInt(value['number']) == expected;
-  }
-
-  bool _seasonMatches(Object? value, int? expected) {
-    if (expected == null || value is! Map) return false;
-    return flexibleInt(value['season']) == expected;
-  }
-
-  Map<String, dynamic> _ratingBody(TrackerRatingContext ctx, {int? rating}) {
-    final ids = TraktIds.fromExternal(ctx.ids.external).toJson();
-    final item = {'ids': ids, 'rating': ?rating};
-
-    return switch (ctx.kind) {
-      MediaKind.movie => {
-        'movies': [item],
-      },
-      MediaKind.show => {
-        'shows': [item],
-      },
-      MediaKind.season => {
-        'shows': [
-          {
-            'ids': ids,
-            'seasons': [
-              {'number': ctx.season, 'rating': ?rating},
-            ],
-          },
-        ],
-      },
-      MediaKind.episode => {
-        'shows': [
-          {
-            'ids': ids,
-            'seasons': [
-              {
-                'number': ctx.season,
-                'episodes': [
-                  {'number': ctx.episodeNumber, 'rating': ?rating},
-                ],
-              },
-            ],
-          },
-        ],
-      },
-      _ => throw const TrackerRatingUnavailableException('Trakt'),
-    };
-  }
+  Map<String, dynamic> _ratingBody(TrackerRatingContext ctx, {int? rating}) =>
+      trackerRatingBody(ctx, TraktIds.fromExternal(ctx.ids.external).toJson(), 'Trakt', rating: rating);
 }

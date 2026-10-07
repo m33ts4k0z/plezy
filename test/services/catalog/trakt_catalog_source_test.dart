@@ -19,7 +19,6 @@ TrackerSession _session() {
     accessToken: 'access',
     refreshToken: 'refresh',
     expiresAt: now + 86400,
-    scope: 'public',
     createdAt: now - 3600,
     username: 'alice',
   );
@@ -186,6 +185,18 @@ void main() {
         ],
       });
       expect(source.isOnWatchlist(MediaKind.show, const CatalogItemIds(tmdb: 1396)), isTrue);
+    });
+
+    test('a successful mutation notifies once the service has it', () async {
+      // No snapshot loaded, so there is no optimistic flip to announce — the
+      // Watchlist row must still hear that the list changed.
+      final notifiedAfterRequest = <bool>[];
+      source.watchlistChanges.addListener(() => notifiedAfterRequest.add(requests.isNotEmpty));
+      handlers.add((request) => http.Response('{"added":{"shows":1}}', 201));
+
+      await source.addToWatchlist(MediaKind.show, const CatalogItemIds(tmdb: 1396));
+
+      expect(notifiedAfterRequest, [true]);
     });
 
     test('fetchDetail appends bounded guest stars and maps cast metadata, crew, and related titles', () async {

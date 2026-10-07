@@ -11,9 +11,20 @@ sealed class BufferRange with _$BufferRange {
 final RegExp _httpStatusPattern = RegExp(r'\b(?:HTTP error |Response code: )(\d{3})\b');
 
 /// Server statuses that end playback outright: nothing client-side recovers a
-/// transcoding-limit rejection or a file the server cannot read. Everything
-/// else (notably the 503 the reconnect path retries) is transient.
-const Set<int> fatalPlaybackHttpStatuses = {404, 500};
+/// refusal of this account or connection, a transcoding-limit rejection, or a
+/// file the server cannot read. Everything else is transient — notably 503,
+/// which the reconnect path retries mid-stream (#1520) and the player screen's
+/// open-phase watchdog bounds at open time instead of latching here (#1830).
+const Set<int> fatalPlaybackHttpStatuses = {403, 404, 500};
+
+/// The native player core failed to come up. Carries no message: the UI
+/// owns the wording so `lib/mpv` stays free of user-facing copy.
+class PlayerInitializationException implements Exception {
+  const PlayerInitializationException();
+
+  @override
+  String toString() => 'PlayerInitializationException';
+}
 
 /// [cause] is an optional machine-readable tag (e.g. `server-http-500`),
 /// letting the UI branch without parsing [message].
@@ -32,6 +43,39 @@ sealed class PlayerError with _$PlayerError {
   /// on unavailable storage), so no retry or backend switch can recover it.
   static const String serverHttp404 = 'server-http-404';
 
+  /// Cause tag for a persistent HTTP 503 on the media stream during the open
+  /// phase. Mid-stream 503 is transient — ffmpeg reconnects through server
+  /// restarts (#1520) — so this tag is never derived from a raw status: only
+  /// the player screen's open-phase watchdog synthesizes it, after a refused
+  /// open has produced no frame for the whole patience window (#1830).
+  static const String serverHttp503 = 'server-http-503';
+
+  /// Cause tag for a failed native core start. The accompanying [message] is
+  /// the raw thrown error, kept for diagnostics only; the UI picks localized
+  /// copy from this tag instead of parsing it.
+  static const String playerInitFailed = 'player-init-failed';
+
+  /// Cause tag for an open the backend started and then neither loaded,
+  /// failed, nor died within the attempt's deadline. Synthesized by the
+  /// player screen; the backend raised nothing, so the localized copy is the
+  /// headline and the last error line mpv logged, if any, is the detail.
+  static const String openTimedOut = 'open-timed-out';
+
+  /// Cause tag for a stream mpv gave up on while opening: its `error_on_track`
+  /// deselected the audio or video track after the chain failed to initialize
+  /// (decoder, filter output conversion, `--vo`). The other stream may keep the
+  /// file alive, so no `end-file` follows; the player screen synthesizes this
+  /// from the log line mpv emits just before deselecting, and that line is the
+  /// error's message.
+  static const String streamInitFailed = 'stream-init-failed';
+
+  /// Cause tag for an audio device that stopped taking audio (or never
+  /// could) after the native core's own bounded recovery. A device fault, not
+  /// a stream fault: no stream retry, quality change, or backend switch can
+  /// recover it, so it is terminal on live TV too. Keep in sync with
+  /// MpvEndFileDiagnostics.CAUSE_AUDIO_OUTPUT_FAILED on Android.
+  static const String audioOutputFailed = 'audio-output-failed';
+
   /// HTTP status [logText] reports, or null when it names none.
   ///
   /// A [PlayerError] carries no status field: mpv only ever tells us the
@@ -48,7 +92,7 @@ sealed class PlayerError with _$PlayerError {
   String toString() => message;
 }
 
-enum PlayerLogLevel { none, fatal, error, warn, info, verbose, debug, trace }
+enum PlayerLogLevel { fatal, error, warn, info, verbose, debug, trace }
 
 @freezed
 sealed class AudioTrack with _$AudioTrack {

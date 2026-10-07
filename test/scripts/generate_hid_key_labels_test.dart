@@ -3,7 +3,8 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 
-import '../../scripts/generate_hid_key_labels.dart';
+import '../../scripts/codegen/atomic_file.dart';
+import '../../scripts/codegen/generate_hid_key_labels.dart';
 
 void main() {
   late String validSource;

@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:plezy/mpv/mpv.dart';
-import 'package:plezy/services/ambient_lighting_service.dart';
 import 'package:plezy/services/video_filter_manager.dart';
 
 void main() {
@@ -77,6 +76,29 @@ void main() {
     expect(player.writes.single.value, VideoFilterManager.videoZoomPropertyForScale(1.5).toString());
   });
 
+  test('native zoom keeps mpv video-zoom at zero and forwards the scale', () async {
+    final player = _RecordingPlayer();
+    final manager = VideoFilterManager(player: player, nativeVideoZoom: true);
+    addTearDown(manager.dispose);
+
+    await manager.updateVideoFilter();
+    player.clearRecords();
+
+    manager.setZoomScale(1.5);
+    await Future<void>.delayed(Duration.zero);
+
+    // The native layer gets the real scale; mpv must never see a nonzero
+    // video-zoom — on vo_avfoundation it would trigger the Core Image
+    // re-render that destroys HDR/Dolby Vision passthrough.
+    expect(player.zoomCalls, [1.5]);
+    expect(player.writes.where((write) => write.key == 'video-zoom'), isEmpty);
+
+    // Margin forcing still follows the zoom state.
+    final marginWrites = player.writes.where((write) => write.key == 'sub-ass-force-margins').toList();
+    expect(marginWrites, hasLength(1));
+    expect(marginWrites.single.value, 'yes');
+  });
+
   test('repeated run with unchanged state writes nothing', () async {
     final player = _RecordingPlayer();
     final manager = VideoFilterManager(player: player);
@@ -107,26 +129,6 @@ void main() {
     expect(player.writes.where((write) => write.key == 'panscan'), hasLength(1));
     expect(player.writes.where((write) => write.key == 'sub-ass-force-margins'), hasLength(1));
     expect(player.zoomCalls, [1.0, 0.8]);
-  });
-
-  test('ambient-active run leaves aspect-override unknown', () async {
-    final player = _RecordingPlayer();
-    final ambient = _FakeAmbientLightingService(player);
-    final manager = VideoFilterManager(player: player)..ambientLightingService = ambient;
-    addTearDown(manager.dispose);
-
-    await manager.updateVideoFilter();
-    player.clearRecords();
-
-    ambient.fakeEnabled = true;
-    await manager.updateVideoFilter();
-    expect(player.writes.where((write) => write.key == 'video-aspect-override'), isEmpty);
-
-    ambient.fakeEnabled = false;
-    await manager.updateVideoFilter();
-    final aspectWrites = player.writes.where((write) => write.key == 'video-aspect-override').toList();
-    expect(aspectWrites, hasLength(1));
-    expect(aspectWrites.single.value, 'no');
   });
 
   test('fill mode rewrites aspect on player size change', () async {
@@ -220,13 +222,4 @@ class _SlowRecordingPlayer extends _RecordingPlayer {
     await super.setProperty(name, value);
     await Future<void>.delayed(const Duration(milliseconds: 2));
   }
-}
-
-class _FakeAmbientLightingService extends AmbientLightingService {
-  _FakeAmbientLightingService(super.player);
-
-  bool fakeEnabled = false;
-
-  @override
-  bool get isEnabled => fakeEnabled;
 }

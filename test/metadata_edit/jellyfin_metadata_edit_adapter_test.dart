@@ -11,6 +11,7 @@ import 'package:plezy/metadata_edit/jellyfin_metadata_edit_adapter.dart';
 import 'package:plezy/metadata_edit/metadata_edit_models.dart';
 import 'package:plezy/services/jellyfin_client.dart';
 import 'package:plezy/utils/media_image_helper.dart';
+import '../test_helpers/backend_client_fixtures.dart';
 import '../test_helpers/media_items.dart';
 
 void main() {
@@ -103,21 +104,124 @@ void main() {
 
     expect(body['Taglines'], ['Updated tagline', 'Second tagline']);
   });
+
+  test('release date edit synchronizes ProductionYear with the new year', () async {
+    // The full-DTO re-post would otherwise re-send the stale ProductionYear —
+    // the field MediaItem.year (every card and detail line) is mapped from.
+    final body = await _savedDtoAfterDateEdit('2001-07-14');
+
+    expect(body['PremiereDate'], '2001-07-14');
+    expect(body['ProductionYear'], 2001);
+  });
+
+  test('clearing the release date also clears ProductionYear', () async {
+    final body = await _savedDtoAfterDateEdit('');
+
+    expect(body['PremiereDate'], isNull);
+    expect(body['ProductionYear'], isNull);
+  });
+
+  test('label suggestions come from the server-wide Tags facet', () async {
+    Uri? filtersUri;
+    final client = JellyfinClient.forTesting(
+      connection: _connection(),
+      httpClient: MockClient((request) async {
+        if (request.url.path == '/Items/Filters') {
+          filtersUri = request.url;
+          return http.Response(
+            jsonEncode({
+              'Genres': ['Drama'],
+              'Tags': ['kids', 'horror'],
+              'Years': [2020],
+            }),
+            200,
+            headers: {'content-type': 'application/json'},
+          );
+        }
+        return http.Response('unexpected ${request.url}', 500);
+      }),
+    );
+    addTearDown(client.close);
+
+    final adapter = JellyfinMetadataEditAdapter(client);
+    final item = testMediaItem(id: 'item-1', backend: MediaBackend.jellyfin, kind: MediaKind.movie);
+    final draft = MetadataEditDraft(sourceItem: item, currentItem: item, values: {});
+    final labelField = adapter.buildSchema(draft).expand((s) => s.fields).singleWhere((f) => f.id == 'label');
+
+    expect(await adapter.fetchTagSuggestions(draft, labelField), ['kids', 'horror']);
+    // Item DTOs carry no library id, so the facet must be server-wide.
+    expect(filtersUri!.queryParameters.containsKey('ParentId'), isFalse);
+  });
+
+  test('fields without a server facet return no suggestions without a request', () async {
+    var called = false;
+    final client = JellyfinClient.forTesting(
+      connection: _connection(),
+      httpClient: MockClient((request) async {
+        called = true;
+        return http.Response('', 500);
+      }),
+    );
+    addTearDown(client.close);
+
+    final adapter = JellyfinMetadataEditAdapter(client);
+    final item = testMediaItem(id: 'item-1', backend: MediaBackend.jellyfin, kind: MediaKind.movie);
+    final draft = MetadataEditDraft(sourceItem: item, currentItem: item, values: {});
+    final directorField = adapter.buildSchema(draft).expand((s) => s.fields).singleWhere((f) => f.id == 'director');
+
+    expect(await adapter.fetchTagSuggestions(draft, directorField), isEmpty);
+    expect(called, isFalse);
+  });
+
+  test('a facet failure yields empty suggestions instead of throwing', () async {
+    final client = JellyfinClient.forTesting(
+      connection: _connection(),
+      httpClient: MockClient((request) async => http.Response('boom', 500)),
+    );
+    addTearDown(client.close);
+
+    final adapter = JellyfinMetadataEditAdapter(client);
+    final item = testMediaItem(id: 'item-1', backend: MediaBackend.jellyfin, kind: MediaKind.movie);
+    final draft = MetadataEditDraft(sourceItem: item, currentItem: item, values: {});
+    final labelField = adapter.buildSchema(draft).expand((s) => s.fields).singleWhere((f) => f.id == 'label');
+
+    expect(await adapter.fetchTagSuggestions(draft, labelField), isEmpty);
+  });
 }
 
-JellyfinConnection _connection() {
-  return JellyfinConnection(
-    id: 'srv-1/user-1',
-    baseUrl: 'https://jf.example.com',
-    serverName: 'Home',
-    serverMachineId: 'srv-1',
-    userId: 'user-1',
-    userName: 'edde',
-    accessToken: 'tok',
-    deviceId: 'dev',
-    isAdministrator: true,
-    createdAt: DateTime.fromMillisecondsSinceEpoch(0),
+JellyfinConnection _connection() => testJellyfinConnection(
+  userName: 'edde',
+  accessToken: 'tok',
+  deviceId: 'dev',
+  isAdministrator: true,
+  createdAt: DateTime.fromMillisecondsSinceEpoch(0),
+);
+
+/// Loads the editable movie, edits only the release date to [newDate], saves,
+/// and returns the DTO posted to the server.
+Future<Map<String, dynamic>> _savedDtoAfterDateEdit(String newDate) async {
+  String? capturedBody;
+  final client = JellyfinClient.forTesting(
+    connection: _connection(),
+    httpClient: MockClient((request) async {
+      if (request.url.path == '/Users/user-1/Items/item-1') {
+        return http.Response(jsonEncode(_editableMovie()), 200, headers: {'content-type': 'application/json'});
+      }
+      if (request.url.path == '/Items/item-1') {
+        capturedBody = request.body;
+        return http.Response('', 204);
+      }
+      return http.Response('unexpected ${request.url}', 500);
+    }),
   );
+  addTearDown(client.close);
+
+  final adapter = JellyfinMetadataEditAdapter(client);
+  final item = testMediaItem(id: 'item-1', backend: MediaBackend.jellyfin, kind: MediaKind.movie);
+  final draft = await adapter.load(item);
+  draft.setValue('originallyAvailableAt', newDate);
+  expect(await adapter.save(draft), isTrue);
+  return jsonDecode(capturedBody!) as Map<String, dynamic>;
 }
 
 Map<String, dynamic> _editableMovie() {
@@ -149,6 +253,7 @@ Map<String, dynamic> _editableMovie() {
     'LockedFields': ['Overview'],
     'LockData': true,
     'PremiereDate': '2020-01-01T00:00:00.0000000Z',
+    'ProductionYear': 1999,
     'Trickplay': {'1': {}},
   };
 }

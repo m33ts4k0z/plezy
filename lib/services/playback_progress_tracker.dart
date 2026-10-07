@@ -1,6 +1,7 @@
 import 'dart:async';
-import '../media/ids.dart';
+
 import '../exceptions/media_server_exceptions.dart';
+import '../media/ids.dart';
 
 import '../mpv/mpv.dart';
 
@@ -35,7 +36,6 @@ class PlaybackProgressTracker {
   /// and are queued/dropped rather than re-routed.
   final MediaServerClient? client;
 
-  /// Metadata of the media being played
   final MediaItem metadata;
 
   /// Video player instance
@@ -98,6 +98,12 @@ class PlaybackProgressTracker {
   /// (#1785). Callers default to deliberate.
   final bool Function()? subtitleOffIsDeliberate;
 
+  /// The source subtitle stream the server is burning into the picture, if
+  /// any. A burned subtitle is pixels, not an engine track, so the engine
+  /// reads as off while the viewer watches with subtitles on; reporting that
+  /// as `-1` would make Jellyfin remember "off" for the item.
+  final int? Function()? burnedSubtitleStreamIndex;
+
   /// Timer for periodic progress updates
   Timer? _progressTimer;
 
@@ -150,6 +156,30 @@ class PlaybackProgressTracker {
   /// The post-watch hook has run; it fires at most once per tracker.
   bool _scrobbledHookRan = false;
 
+  /// Delivery provenance keyed by the exact snapshot handed to
+  /// [PlaybackReportSession]. Acceptance alone cannot identify delivery
+  /// because startup heartbeats may be dropped while still completing true.
+  final Map<PlaybackReportSnapshot, bool> _deliveredProgressAcknowledgements = Map.identity();
+
+  /// Whether this backend reporting session has successfully opened.
+  bool _hasDeliveredStart = false;
+
+  /// Whether a delivered stopped report reached a backend session able to act
+  /// on it. MediaBrowser drops a stop for a session it never opened, so both
+  /// the position it would persist and the watch it would record are lost.
+  bool _stoppedReportActedOn = false;
+
+  /// Whether the delivered stopped report persisted its position.
+  bool _stoppedProgressServerAcknowledged = false;
+
+  /// Allows the first persisted Progress after a MediaBrowser Started to
+  /// upgrade local provenance even when the position delta is throttled.
+  bool _lastProgressNotificationServerAcknowledged = false;
+
+  /// The exact report-derived watched patch that a settled server-side watch
+  /// can promote. Cleared once promoted so promotion happens at most once.
+  WatchPatchId? _watchedPatchId;
+
   /// Whether the final stopped progress event was already emitted locally.
   bool _stopProgressNotified = false;
 
@@ -179,6 +209,7 @@ class PlaybackProgressTracker {
     this.canReportPlayback,
     this.hasRenderedPlayback,
     this.subtitleOffIsDeliberate,
+    this.burnedSubtitleStreamIndex,
     this.updateInterval = const Duration(seconds: 10),
   }) : assert(!isOffline || offlineWatchService != null, 'offlineWatchService is required when isOffline is true'),
        assert(isOffline || client != null, 'client is required when isOffline is false') {
@@ -194,7 +225,17 @@ class PlaybackProgressTracker {
           );
   }
 
-  void startTracking() {
+  /// Starts the periodic report timer and sends the initial report.
+  ///
+  /// [initialPosition] and [initialDuration] override the live player state
+  /// for that initial report only. Music binds a new tracker the instant a
+  /// gapless advance is announced, when `player.state.position`/`duration`
+  /// still hold the *outgoing* track's values — reporting those told Plex the
+  /// new track was already at ~100%, which recorded a play (and a Last.fm
+  /// scrobble) at track start on top of the real one (#1849). Callers that
+  /// know where the item truly starts pass it here; timer ticks always read
+  /// live state.
+  void startTracking({Duration? initialPosition, Duration? initialDuration}) {
     if (_progressTimer != null) {
       appLogger.w('Progress tracking already started');
       return;
@@ -210,7 +251,7 @@ class PlaybackProgressTracker {
 
     // Send initial progress immediately (don't wait for first timer tick)
     if (player.state.isActive) {
-      _sendProgress('playing');
+      _sendProgress('playing', positionOverride: initialPosition, durationOverride: initialDuration);
     }
 
     _progressTimer = Timer.periodic(updateInterval, (timer) {
@@ -226,7 +267,9 @@ class PlaybackProgressTracker {
         // Report every tick while paused too — official clients do the
         // same (~10s); the timeline heartbeat is what keeps the server
         // session and its transcoder from being reaped during a long
-        // pause (#1520).
+        // pause (#1520). A server-side termination stops this timer
+        // outright (see [_handleTermination]), so no tick reaches the
+        // reaped transcoder.
         _sendProgress('paused');
         final keepalive = onPausedKeepalive;
         if (keepalive != null) unawaited(keepalive());
@@ -244,9 +287,12 @@ class PlaybackProgressTracker {
     appLogger.d('Stopped progress tracking');
   }
 
-  /// [state] can be 'playing', 'paused', or 'stopped'.
-  Future<void> sendProgress(String state, {Duration? positionOverride}) async {
-    await _sendProgress(state, positionOverride: positionOverride);
+  /// [state] can be 'playing', 'paused', or 'stopped'. The overrides exist
+  /// for reports that must not read live player state — a terminal report
+  /// retried after stop() has released the native pipeline would otherwise
+  /// read a reset position/duration (see the zero-duration guard below).
+  Future<void> sendProgress(String state, {Duration? positionOverride, Duration? durationOverride}) async {
+    await _sendProgress(state, positionOverride: positionOverride, durationOverride: durationOverride);
   }
 
   Future<void> sendStoppedProgressOnce({Duration? positionOverride}) {
@@ -257,8 +303,29 @@ class PlaybackProgressTracker {
     return future;
   }
 
+  /// Whether the terminal stopped report actually reached the backend.
+  ///
+  /// [sendStoppedProgressOnce] resolving is not delivery — the report is
+  /// best-effort and its transport errors are swallowed. Callers that must
+  /// retry a failed terminal report (the TV background suspend, whose whole
+  /// purpose is closing the server session, #1911) key on this instead.
+  /// Offline trackers have no backend session and report `true`.
+  bool get stoppedReportDelivered => _reportSession?.isStopped ?? true;
+
+  /// The server ended this item's session ([onTerminated] has fired and the
+  /// player is being stopped). Playback may still be draining its buffer
+  /// until then; callers must not start anything on the viewer's behalf from
+  /// here — no auto-advance to the next item, no automatic rebuild of a stream
+  /// the stop cut off.
+  bool get stoppedByServer => _terminated;
+
   void resumeAfterStoppedReport() {
     _stoppedProgressFuture = null;
+    _resetReportSession();
+  }
+
+  /// Let the backend reporting session open again after a stopped report.
+  void _resetReportSession() {
     _reportSession?.resetAfterStop();
     // A re-armed session is a new server-side session: backends only act on a
     // threshold crossing observed within one, so it must earn its own
@@ -266,9 +333,12 @@ class PlaybackProgressTracker {
     _deliveredBelow = false;
     _serverObservedCrossing = false;
     _sessionEnded = false;
+    _hasDeliveredStart = false;
+    _stoppedReportActedOn = false;
+    _stoppedProgressServerAcknowledged = false;
   }
 
-  Future<void> _sendProgress(String state, {Duration? positionOverride}) async {
+  Future<void> _sendProgress(String state, {Duration? positionOverride, Duration? durationOverride}) async {
     if (_terminated) return;
     Duration? attemptedPosition;
     Duration? attemptedDuration;
@@ -277,7 +347,7 @@ class PlaybackProgressTracker {
       final hasRenderedOutput = hasRenderedPlayback?.call() ?? canReport;
       if (state != 'stopped' && !canReport) return;
       final isSuppressedStop = state == 'stopped' && !canReport;
-      final duration = player.state.duration;
+      final duration = durationOverride ?? player.state.duration;
       final positionSource = isSuppressedStop
           ? _lastReportablePosition ?? Duration(milliseconds: metadata.viewOffsetMs ?? 0)
           : positionOverride ?? player.state.position;
@@ -298,7 +368,7 @@ class PlaybackProgressTracker {
         // nothing.
         if (!canCommitStoppedProgress) return;
         await _sendOfflineProgress(position, duration);
-        _notifyProgressIfNeeded(position, duration, force: state == 'stopped');
+        _notifyProgressIfNeeded(position, duration, force: state == 'stopped', serverAcknowledged: false);
       } else if (state == 'stopped') {
         // Stopped must complete before disposal. When reporting was disabled
         // by a fatal error, use the last position captured while output was
@@ -310,17 +380,19 @@ class PlaybackProgressTracker {
         await _pendingSettle;
         _resetBackoff();
         if (accepted && canCommitStoppedProgress) {
-          _notifyProgressIfNeeded(position, duration, force: true);
+          _notifyProgressIfNeeded(
+            position,
+            duration,
+            force: true,
+            serverAcknowledged: _stoppedProgressServerAcknowledged,
+          );
         }
       } else {
         // Fire-and-forget for playing/paused — avoid blocking the Dart event loop
         unawaited(
           _sendOnlineProgress(state, position, duration)
-              .then((accepted) {
+              .then((_) {
                 _resetBackoff();
-                if (accepted) {
-                  _notifyProgressIfNeeded(position, duration);
-                }
               })
               .catchError((Object e) {
                 if (e is PlaybackTerminatedException) {
@@ -390,7 +462,12 @@ class PlaybackProgressTracker {
     }
   }
 
-  void _notifyProgressIfNeeded(Duration position, Duration duration, {bool force = false}) {
+  void _notifyProgressIfNeeded(
+    Duration position,
+    Duration duration, {
+    bool force = false,
+    required bool serverAcknowledged,
+  }) {
     if (_scrobbled) return;
     if (position.inMilliseconds <= 0 || duration.inMilliseconds <= 0) return;
     if (force) {
@@ -398,16 +475,20 @@ class PlaybackProgressTracker {
       _stopProgressNotified = true;
     } else {
       final last = _lastProgressNotifiedPosition;
-      if (last != null && (position - last).abs() < _progressNotifyDelta) return;
+      if (last != null && (position - last).abs() < _progressNotifyDelta) {
+        if (!serverAcknowledged || _lastProgressNotificationServerAcknowledged) return;
+      }
     }
 
     _lastProgressNotifiedPosition = position;
+    _lastProgressNotificationServerAcknowledged = serverAcknowledged;
     WatchStateNotifier().notifyProgress(
       item: metadata,
       cacheServerId: client?.cacheServerId,
       viewOffset: position.inMilliseconds,
       duration: duration.inMilliseconds,
       watchedThreshold: client?.watchedThreshold ?? 0.9,
+      serverAcknowledged: serverAcknowledged,
     );
   }
 
@@ -423,26 +504,25 @@ class PlaybackProgressTracker {
     final session = _reportSession;
     if (c == null || session == null) return false;
 
-    final accepted = await session.report(
-      PlaybackReportSnapshot(
-        state: state,
-        position: position,
-        duration: duration,
-        resolveStreamSelection: state == 'stopped'
-            ? _currentStreamSelectionForStopped
-            : _currentStreamSelectionForProgress,
-      ),
+    final snapshot = PlaybackReportSnapshot(
+      state: state,
+      position: position,
+      duration: duration,
+      resolveStreamSelection: _currentStreamSelection,
     );
+    final accepted = await session.report(snapshot);
 
     if (accepted && allowScrobble) {
       await _maybeScrobble(c, position, duration);
     }
-    return accepted;
-  }
 
-  PlaybackStreamSelection _currentStreamSelectionForStopped() {
-    final info = mediaInfo;
-    return info == null ? PlaybackStreamSelection.none : PlaybackStreamSelection(mediaSourceId: info.mediaSourceId);
+    if (!snapshot.isStopped) {
+      final serverAcknowledged = _deliveredProgressAcknowledgements.remove(snapshot);
+      if (serverAcknowledged != null) {
+        _notifyProgressIfNeeded(position, duration, serverAcknowledged: serverAcknowledged);
+      }
+    }
+    return accepted;
   }
 
   /// Records what the backend actually received, then re-evaluates whether the
@@ -454,7 +534,31 @@ class PlaybackProgressTracker {
   /// whose every report sits above the threshold, or one resuming past it, is
   /// never marked server-side.
   void _onReportDelivered(PlaybackReportSnapshot snapshot) {
-    final threshold = client?.watchedThreshold;
+    final c = client;
+    // The same backend as the client's, but read from the item so the
+    // classification matches the pattern already used for track selection
+    // below and does not depend on a client method.
+    final persistsPositionOnEveryReport = !metadata.backend.usesMediaBrowserApi;
+    if (snapshot.isStopped) {
+      // MediaBrowser needs a successfully opened session before Stopped can
+      // persist position or record the watch; Plex timeline reports are
+      // independent.
+      _stoppedReportActedOn = persistsPositionOnEveryReport || _hasDeliveredStart;
+      _stoppedProgressServerAcknowledged = _stoppedReportActedOn;
+      // A backend that marks played from the stop has now done so, so a
+      // crossing latched earlier this session is no longer a write owed to
+      // it. Ordering runs both ways -- the crossing can latch before this
+      // stop or from it -- so _settleServerMark promotes on the other path.
+      if (_stoppedReportActedOn && (c?.marksWatchedOnPlaybackStopped ?? false)) _promoteWatchedPatch();
+    } else {
+      final isStarted = !_hasDeliveredStart;
+      _hasDeliveredStart = true;
+      // A MediaBrowser `Started` saves play count and last-played date but
+      // deliberately not the position, so it cannot acknowledge an offset.
+      _deliveredProgressAcknowledgements[snapshot] = !isStarted || persistsPositionOnEveryReport;
+    }
+
+    final threshold = c?.watchedThreshold;
     // isWatchedProgress reports false for an unknown duration; treating that as
     // a below-threshold report would wrongly arm the crossing.
     if (threshold == null || snapshot.duration.inMilliseconds <= 0) return;
@@ -489,6 +593,10 @@ class PlaybackProgressTracker {
     // double-scrobble through the Jellyfin Trakt plugin (#1287).
     if (c.marksWatchedOnPlaybackStopped) {
       _serverMarkSettled = true;
+      // Only once the stop actually reached an open session: settling happens
+      // when the crossing latches, which can be before the stop is sent, and
+      // until it lands the watch is still owed to the server.
+      if (_stoppedReportActedOn) _promoteWatchedPatch();
       await _runScrobbledHook();
       return;
     }
@@ -496,6 +604,9 @@ class PlaybackProgressTracker {
     // again records the same watch twice (#1740).
     if (_serverObservedCrossing) {
       _serverMarkSettled = true;
+      // Delivery is proven: the crossing was assembled from two delivered
+      // reports, so nothing is owed.
+      _promoteWatchedPatch();
       await _runScrobbledHook();
       return;
     }
@@ -523,7 +634,23 @@ class PlaybackProgressTracker {
       _serverMarkSettled = false; // Retry on the next delivered report.
       return;
     }
+    _promoteWatchedPatch();
     await _runScrobbledHook();
+  }
+
+  /// Settle the report-derived watched patch: the server has taken this watch,
+  /// so the overlay entry is no longer a write owed to it and a later
+  /// authoritative read may supersede it.
+  ///
+  /// Without this a crossing pins `watched` for the whole session — the read
+  /// that would clear it cannot, because an unacknowledged patch is never
+  /// suppressed. Idempotent: the id is cleared so repeated settle paths and
+  /// the delivery callback cannot promote twice.
+  void _promoteWatchedPatch() {
+    final patchId = _watchedPatchId;
+    if (patchId == null) return;
+    _watchedPatchId = null;
+    WatchPatchPromotionNotifier().promote(patchId);
   }
 
   /// Runs the post-watch hook once, after the item's own watched state is
@@ -560,7 +687,7 @@ class PlaybackProgressTracker {
     // Local state flips on the observed crossing, whether or not the backend
     // received that particular report. The server-side mark is a separate
     // question, answered by _settleServerMark once delivery is known.
-    c.notifyWatchedFromPlaybackSession(metadata);
+    _watchedPatchId = c.notifyWatchedFromPlaybackSession(metadata);
     appLogger.d(
       'Watched ${metadata.id} (${(percent * 100).toStringAsFixed(0)}% >= ${(threshold * 100).toStringAsFixed(0)}%)',
     );
@@ -569,7 +696,12 @@ class PlaybackProgressTracker {
     await _settleServerMark(c);
   }
 
-  Future<PlaybackStreamSelection> _currentStreamSelectionForProgress() async {
+  /// The engine's current selection, resolved for every report state.
+  ///
+  /// The terminal report carries the indexes too: MediaBrowser backends only
+  /// learn a track pick from a report body, and [updateInterval] means a pick
+  /// made just before exit has no progress ping left to ride.
+  Future<PlaybackStreamSelection> _currentStreamSelection() async {
     final info = mediaInfo;
     if (info == null) {
       return PlaybackStreamSelection.none;
@@ -589,7 +721,9 @@ class PlaybackProgressTracker {
   Future<bool> _shouldReportTrackSelections() async {
     try {
       final settings = await SettingsService.getInstance();
-      return settings.read(SettingsService.rememberTrackSelections);
+      // Explicit type argument: the async return context would otherwise
+      // infer T = FutureOr and trip UNAWAITED_RETURN_IN_TRY_BLOCK; read is sync.
+      return settings.read<bool>(SettingsService.rememberTrackSelections);
     } catch (e) {
       appLogger.d('Could not read track-selection persistence setting; reporting selected streams', error: e);
       return true;
@@ -604,19 +738,11 @@ class PlaybackProgressTracker {
       if (selectedSourceTrack != null) return selectedSourceTrack.id;
     }
 
-    final track = player.state.track.audio;
-    if (track == null) return null;
-
-    final ordinal = playerAudioTracks.indexOf(track);
-    if (ordinal >= 0 && ordinal < info.audioTracks.length) return info.audioTracks[ordinal].id;
-
-    final matched = findPlexTrackForMpvAudio(track, info.audioTracks, allMpvTracks: player.state.tracks.audio);
-    if (matched != null) return matched.id;
-
-    final parsedId = int.tryParse(track.id);
-    if (parsedId != null && info.audioTracks.any((t) => t.id == parsedId)) return parsedId;
-
-    return null;
+    return playingSourceAudioTrack(
+      selectedMpvTrack: player.state.track.audio,
+      mpvTracks: player.state.tracks.audio,
+      sourceTracks: info.audioTracks,
+    )?.id;
   }
 
   MediaAudioTrack? _selectedSourceAudioTrack(MediaSourceInfo info) {
@@ -634,6 +760,8 @@ class PlaybackProgressTracker {
   int? _currentSubtitleStreamIndex(MediaSourceInfo info) {
     final track = player.state.track.subtitle;
     if (track == null || track.id == 'no') {
+      final burned = burnedSubtitleStreamIndex?.call();
+      if (burned != null) return burned;
       // An off that merely fell out of a declined carry is withheld rather
       // than persisted as an explicit -1 (see [subtitleOffIsDeliberate]).
       return (subtitleOffIsDeliberate?.call() ?? true) ? -1 : null;
@@ -648,16 +776,12 @@ class PlaybackProgressTracker {
       }
     }
 
-    final ordinal = player.state.tracks.subtitle.where((t) => t.id != 'auto' && t.id != 'no').toList().indexOf(track);
-    if (ordinal >= 0 && ordinal < info.subtitleTracks.length) return info.subtitleTracks[ordinal].id;
-
-    final matched = findPlexTrackForMpvSubtitle(track, info.subtitleTracks, allMpvTracks: player.state.tracks.subtitle);
-    if (matched != null) return matched.id;
-
-    final parsedId = int.tryParse(track.id);
-    if (parsedId != null && info.subtitleTracks.any((t) => t.id == parsedId)) return parsedId;
-
-    return null;
+    // Identity, never position: the two catalogs are ordered independently
+    // (Jellyfin lists external files first, the engine its embedded tracks),
+    // and a native track id is the engine's own ordinal, so neither the n-th
+    // row nor the row whose stream index happens to equal the native id is
+    // this track. An unmatched track is withheld rather than guessed.
+    return findPlexTrackForMpvSubtitle(track, info.subtitleTracks, allMpvTracks: player.state.tracks.subtitle)?.id;
   }
 
   /// Queue progress update locally (offline mode)

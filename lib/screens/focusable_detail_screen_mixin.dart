@@ -7,7 +7,6 @@ import '../media/media_item.dart';
 import '../mixins/grid_focus_node_mixin.dart';
 import '../services/settings_service.dart';
 import '../utils/platform_detector.dart';
-import '../widgets/ios_status_bar_tap_scroll_to_top.dart';
 import '../widgets/settings_builder.dart';
 import '../widgets/focusable_media_card.dart';
 import '../widgets/media_card_sliver_layout.dart';
@@ -26,8 +25,8 @@ mixin FocusableDetailScreenMixin<T extends StatefulWidget> on State<T>, GridFocu
   // Action bar key for accessing focus nodes
   final GlobalKey<FocusableActionBarState> actionBarKey = GlobalKey<FocusableActionBarState>();
 
-  // Grid item focus
-  final FocusNode firstItemFocusNode = FocusNode(debugLabel: 'detail_first_item');
+  // The first item shares grid ownership and can move to another index.
+  FocusNode get firstItemFocusNode => getGridItemFocusNode(0, debugLabel: 'detail_first_item');
 
   // App bar focus state
   bool isAppBarFocused = false;
@@ -38,13 +37,11 @@ mixin FocusableDetailScreenMixin<T extends StatefulWidget> on State<T>, GridFocu
   /// Called when items are available and we want to check if focus should be set
   bool get hasItems;
 
-  /// Called to get the list of app bar action configurations
   List<FocusableAction> getAppBarActions();
 
   /// Dispose focus-related resources. Call this from your dispose() method.
   void disposeFocusResources() {
     scrollController.dispose();
-    firstItemFocusNode.dispose();
     disposeGridFocusNodes();
   }
 
@@ -85,29 +82,38 @@ mixin FocusableDetailScreenMixin<T extends StatefulWidget> on State<T>, GridFocu
 
   /// Wrap [slivers] in the standard detail-screen scaffold — an overlay-sheet
   /// host that defers route back to [handleBackNavigation], plus a Scaffold
-  /// with a CustomScrollView bound as the primary scroll view. Callers build
+  /// with a CustomScrollView bound as the primary scroll view. The
+  /// [PrimaryScrollController] wrapper is what lets the Scaffold find the
+  /// scroll view for the iOS status-bar scroll-to-top tap. Callers build
   /// the slivers themselves (typically
   /// `[appBar, ...header, ...buildStateSlivers(), grid]`); a trailing
   /// [SliverSystemBottomInset] is appended so the last row clears the system
   /// navigation bar. Screens that add their own trailing spacer (the music
   /// detail screens reserve the floating mini-player) stack on top of it.
-  Widget buildDetailScaffold({required List<Widget> slivers}) {
+  ///
+  /// [behind] and [above] are painted in a Stack under and over the scroll
+  /// view — artwork that must be taller than the header sliver, or chrome
+  /// pinned to the viewport. Both are usually [Positioned].
+  Widget buildDetailScaffold({
+    required List<Widget> slivers,
+    List<Widget> behind = const [],
+    List<Widget> above = const [],
+  }) {
+    Widget body = CustomScrollView(primary: true, slivers: [...slivers, const SliverSystemBottomInset()]);
+    if (behind.isNotEmpty || above.isNotEmpty) {
+      body = Stack(children: [...behind, body, ...above]);
+    }
     return PrimaryScrollController(
       controller: scrollController,
-      child: IosStatusBarTapScrollToTop(
-        controller: scrollController,
-        child: OverlaySheetHost(
-          canPop: PlatformDetector.isHandheldIOS(context),
-          onSystemBack: () {
-            if (BackKeyCoordinator.consumeIfHandled()) return;
-            if (handleBackNavigation() && mounted) {
-              Navigator.pop(context);
-            }
-          },
-          child: Scaffold(
-            body: CustomScrollView(primary: true, slivers: [...slivers, const SliverSystemBottomInset()]),
-          ),
-        ),
+      child: OverlaySheetHost(
+        canPop: PlatformDetector.isHandheldIOS(context),
+        onSystemBack: () {
+          if (BackKeyCoordinator.consumeIfHandled()) return;
+          if (handleBackNavigation() && mounted) {
+            Navigator.pop(context);
+          }
+        },
+        child: Scaffold(body: body),
       ),
     );
   }
@@ -170,6 +176,7 @@ mixin FocusableDetailScreenMixin<T extends StatefulWidget> on State<T>, GridFocu
     String? collectionId,
     VoidCallback? onListRefresh,
     CardShape? shape,
+    int indexOffset = 0,
   }) {
     return buildSparseFocusableGrid(
       totalItems: items.length,
@@ -178,6 +185,7 @@ mixin FocusableDetailScreenMixin<T extends StatefulWidget> on State<T>, GridFocu
       collectionId: collectionId,
       onListRefresh: onListRefresh,
       shape: shape,
+      indexOffset: indexOffset,
     );
   }
 
@@ -185,6 +193,15 @@ mixin FocusableDetailScreenMixin<T extends StatefulWidget> on State<T>, GridFocu
   /// slots; for each, [itemAt] returns the loaded item or null if not yet
   /// fetched. Null slots render a skeleton and invoke [onSkeletonVisible] so
   /// the caller can kick off a page fetch containing that index.
+  ///
+  /// [indexOffset] shifts this grid's slots into the screen-global focus
+  /// index space (focus nodes and [lastFocusedGridIndex] are keyed 0..n-1
+  /// across every grid on the screen). Screens that stack several titled
+  /// grids pass the running total; single-grid screens keep the default 0.
+  /// With an offset, up-navigation from this grid's first row falls through
+  /// to framework traversal (crossing into the previous section's grid)
+  /// instead of jumping to the app bar. [isOffline] renders downloaded items
+  /// from local artwork and opens them offline.
   Widget buildSparseFocusableGrid({
     required int totalItems,
     required MediaItem? Function(int index) itemAt,
@@ -193,6 +210,8 @@ mixin FocusableDetailScreenMixin<T extends StatefulWidget> on State<T>, GridFocu
     String? collectionId,
     VoidCallback? onListRefresh,
     CardShape? shape,
+    int indexOffset = 0,
+    bool isOffline = false,
   }) {
     return SettingsBuilder(
       prefs: const [SettingsService.viewMode, SettingsService.libraryDensity, SettingsService.tvFullCardLayout],
@@ -205,12 +224,13 @@ mixin FocusableDetailScreenMixin<T extends StatefulWidget> on State<T>, GridFocu
 
         Widget buildTile(MediaCardSliverPosition position) {
           final index = position.index;
+          final globalIndex = index + indexOffset;
           final item = itemAt(index);
           if (item == null) {
             onSkeletonVisible?.call(index);
             return const SkeletonMediaCard();
           }
-          final focusNode = _focusNodeForIndex(index);
+          final focusNode = _focusNodeForIndex(globalIndex);
           return FocusableMediaCard(
             key: Key(item.id),
             item: item,
@@ -220,11 +240,15 @@ mixin FocusableDetailScreenMixin<T extends StatefulWidget> on State<T>, GridFocu
             onRefresh: onRefresh,
             collectionId: collectionId,
             onListRefresh: onListRefresh,
+            isOffline: isOffline,
             fullBleedImage: useFullCardLayout && position.isGrid,
             cardShapeOverride: shape,
-            onNavigateUp: position.isFirstRow ? navigateToAppBar : null,
+            // The first section's first row reaches the app bar; later
+            // sections fall through to traversal, which enters the previous
+            // section's grid.
+            onNavigateUp: position.isFirstRow && indexOffset == 0 ? navigateToAppBar : null,
             onBack: handleBackFromContent,
-            onFocusChange: (hasFocus) => trackGridItemFocus(index, hasFocus),
+            onFocusChange: (hasFocus) => trackGridItemFocus(globalIndex, hasFocus),
           );
         }
 

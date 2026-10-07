@@ -7,6 +7,7 @@ import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
 import 'package:plezy/database/app_database.dart';
+import 'package:plezy/database/download_operations.dart';
 import 'package:plezy/media/media_backend.dart';
 
 import 'package:plezy/media/media_kind.dart';
@@ -19,11 +20,13 @@ import 'package:plezy/services/jellyfin_media_info_mapper.dart';
 import 'package:plezy/services/playback_initialization_service.dart';
 import 'package:plezy/services/plex_api_cache.dart';
 import 'package:plezy/services/plex_mappers.dart';
+import 'package:plezy/services/saf_storage_service.dart';
 import 'package:plezy/services/settings_service.dart';
 
 import '../test_helpers/io_fakes.dart';
 import '../test_helpers/prefs.dart';
 import '../test_helpers/media_items.dart';
+import '../test_helpers/saf_fakes.dart';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -36,6 +39,10 @@ void main() {
     resetSharedPreferencesForTest();
     SettingsService.resetForTesting();
     DownloadStorageService.resetForTesting();
+    // Downloaded rows below store SAF content:// URIs. Playback resolution
+    // confirms such a copy is still reachable before preferring it over
+    // streaming (issue #2101), so report them as present.
+    SafStorageService.setOpsForTesting(FakeSafStorage());
     tmpRoot = await Directory.systemTemp.createTemp('playback_init_test_');
     previousPathProvider = PathProviderPlatform.instance;
     PathProviderPlatform.instance = FakePathProvider(tmpRoot);
@@ -47,9 +54,9 @@ void main() {
   tearDown(() async {
     await db.close();
     DownloadStorageService.resetForTesting();
+    SafStorageService.setOpsForTesting(null);
     SettingsService.resetForTesting();
     PathProviderPlatform.instance = previousPathProvider;
-    expect(PathProviderPlatform.instance, same(previousPathProvider));
     if (await tmpRoot.exists()) {
       await tmpRoot.delete(recursive: true);
     }
@@ -80,6 +87,82 @@ void main() {
     expect(result.isOffline, isTrue);
     expect(result.videoUrl, 'content://offline/movie-1');
     expect(result.mediaInfo?.audioTracks.single.languageCode, 'eng');
+  });
+
+  group('a download of a stacked item', () {
+    // Two files: 50 and 40 minutes.
+    Map<String, dynamic> stackedEnvelope() => {
+      'MediaContainer': {
+        'Metadata': [
+          {
+            'ratingKey': 'movie-1',
+            'type': 'movie',
+            'title': 'Movie',
+            'duration': 5400000,
+            'Media': [
+              {
+                'id': 1,
+                'Part': [
+                  {'id': 11, 'duration': 3000000},
+                  {'id': 12, 'duration': 2400000},
+                ],
+              },
+            ],
+          },
+        ],
+      },
+    };
+
+    Future<PlaybackInitializationResult> playFrom(Duration? startPosition, {MediaServerClient? client}) {
+      return PlaybackInitializationService(client: client, database: db).getPlaybackData(
+        PlaybackInitializationOptions(
+          metadata: testMediaItem(id: 'movie-1', backend: MediaBackend.plex, kind: MediaKind.movie, serverId: 'srv-1'),
+          selectedMediaIndex: 0,
+          startPosition: startPosition,
+        ),
+        preferOffline: true,
+      );
+    }
+
+    setUp(() => PlexApiCache.instance.put(ServerId('srv-1'), '/library/metadata/movie-1', stackedEnvelope()));
+
+    test('plays the downloaded file holding the start position', () async {
+      await _insertDownloaded(
+        db,
+        serverId: ServerId('srv-1'),
+        ratingKey: 'movie-1',
+        videoFilePath: 'content://offline/movie-1',
+        additionalPartPaths: const ['content://offline/movie-1 - part2'],
+      );
+
+      final first = await playFrom(const Duration(minutes: 10));
+      expect(first.videoUrl, 'content://offline/movie-1');
+      expect(first.mediaInfo?.partTimeline?.currentIndex, 0);
+
+      final second = await playFrom(const Duration(minutes: 55));
+      expect(second.isOffline, isTrue);
+      expect(second.videoUrl, 'content://offline/movie-1 - part2');
+      expect(second.mediaInfo?.partTimeline?.current.start, const Duration(minutes: 50));
+    });
+
+    test('a copy holding only the first file streams the rest, or fails when it must stay offline', () async {
+      await _insertDownloaded(
+        db,
+        serverId: ServerId('srv-1'),
+        ratingKey: 'movie-1',
+        videoFilePath: 'content://offline/movie-1',
+      );
+
+      final client = _StreamingPlaybackClient(serverId: ServerId('srv-1'));
+      final streamed = await playFrom(const Duration(minutes: 55), client: client);
+      expect(streamed.isOffline, isFalse);
+      expect(client.playbackInitializationCalls, 1);
+
+      await expectLater(
+        playFrom(const Duration(minutes: 55)),
+        throwsA(isA<PlaybackException>().having((e) => e.reason, 'reason', PlaybackFailureReason.noPlayableSource)),
+      );
+    });
   });
 
   test('downloaded track resolves to its local file through the offline path', () async {
@@ -356,6 +439,11 @@ void main() {
     expect(result.videoUrl, 'content://offline/movie-1');
     expect(result.externalSubtitles, hasLength(1));
     expect(result.externalSubtitles.single.uri, Uri.file(subtitlePath).toString());
+    expect(
+      result.subtitleSidecars.single.preload,
+      isTrue,
+      reason: 'local sidecars load with the media so they stay selectable as secondary subtitles (#1860)',
+    );
   });
 
   test('cache-only playback extras fills missing Plex marker types from chapters', () async {
@@ -514,6 +602,7 @@ Future<void> _insertDownloaded(
   String? clientScopeId,
   required String ratingKey,
   required String videoFilePath,
+  List<String>? additionalPartPaths,
   String type = 'movie',
   int mediaIndex = 0,
   String? mediaSourceId,
@@ -529,6 +618,7 @@ Future<void> _insertDownloaded(
           type: type,
           status: DownloadStatus.completed.index,
           videoFilePath: Value(videoFilePath),
+          additionalPartPaths: Value(encodeAdditionalPartPaths(additionalPartPaths)),
           mediaIndex: Value(mediaIndex),
           mediaSourceId: Value(mediaSourceId),
         ),

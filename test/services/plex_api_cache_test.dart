@@ -54,16 +54,19 @@ void main() {
     },
   };
 
-  // ============================================================
-  // Singleton
-  // ============================================================
-
   group('singleton', () {
-    test('initialize swaps the underlying database', () async {
+    test('initialize routes reads and writes to the new database', () async {
+      await cache.put(ServerId('srv'), '/old', {'value': 1});
+
       final newDb = AppDatabase.forTesting(NativeDatabase.memory());
       PlexApiCache.initialize(newDb);
-      expect(identical(PlexApiCache.instance.database, newDb), isTrue);
-      await newDb.close();
+      addTearDown(newDb.close);
+
+      expect(await PlexApiCache.instance.get(ServerId('srv'), '/old'), isNull);
+
+      await PlexApiCache.instance.put(ServerId('srv'), '/new', {'value': 2});
+      expect(await newDb.select(newDb.apiCache).get(), hasLength(1));
+      expect(await cache.get(ServerId('srv'), '/new'), isNull, reason: 'old database is no longer written');
     });
 
     test('registered cleanup ignores backend initialization order and preserves pinned rows', () async {
@@ -112,10 +115,6 @@ void main() {
       expect(decoded['last']?.id, 'last');
     });
   });
-
-  // ============================================================
-  // get / put — cache hit and miss
-  // ============================================================
 
   group('get / put', () {
     test('miss returns null for an unknown key', () async {
@@ -177,28 +176,43 @@ void main() {
       expect(((a!['MediaContainer'] as Map)['Metadata'] as List).first['ratingKey'], 'A');
       expect(((b!['MediaContainer'] as Map)['Metadata'] as List).first['ratingKey'], 'B');
     });
-
-    test('put writes a fresh cachedAt timestamp on overwrite', () async {
-      await cache.put(ServerId('srv'), '/library/metadata/1', mediaContainer());
-      final firstRow = await (db.select(
-        db.apiCache,
-      )..where((t) => t.cacheKey.equals('srv:/library/metadata/1'))).getSingle();
-
-      // Wait one tick so DateTime.now() advances.
-      await Future<void>.delayed(const Duration(milliseconds: 5));
-
-      await cache.put(ServerId('srv'), '/library/metadata/1', mediaContainer(title: 'Updated'));
-      final secondRow = await (db.select(
-        db.apiCache,
-      )..where((t) => t.cacheKey.equals('srv:/library/metadata/1'))).getSingle();
-
-      expect(secondRow.cachedAt.isAfter(firstRow.cachedAt) || secondRow.cachedAt == firstRow.cachedAt, isTrue);
-    });
   });
 
-  // ============================================================
-  // deleteForServer / deleteForItem / clearAll
-  // ============================================================
+  group('getIfFresh', () {
+    Future<void> backdate(String cacheKey, Duration age) async {
+      await (db.update(db.apiCache)..where((t) => t.cacheKey.equals(cacheKey))).write(
+        ApiCacheCompanion(cachedAt: Value(DateTime.now().subtract(age))),
+      );
+    }
+
+    test('returns null for an unknown key', () async {
+      expect(
+        await cache.getIfFresh(ServerId('srv'), '/library/metadata/1', maxAge: const Duration(minutes: 5)),
+        isNull,
+      );
+    });
+
+    test('decodes a row written within maxAge', () async {
+      final payload = mediaContainer(ratingKey: '1', title: 'Fresh');
+      await cache.put(ServerId('srv'), '/library/metadata/1', payload);
+
+      final hit = await cache.getIfFresh(ServerId('srv'), '/library/metadata/1', maxAge: const Duration(minutes: 5));
+      expect(hit, equals(payload));
+    });
+
+    test('returns null for a row older than maxAge while get still serves it', () async {
+      await cache.put(ServerId('srv'), '/library/metadata/1', mediaContainer(ratingKey: '1', title: 'Old'));
+      await backdate('srv:/library/metadata/1', const Duration(minutes: 10));
+
+      expect(
+        await cache.getIfFresh(ServerId('srv'), '/library/metadata/1', maxAge: const Duration(minutes: 5)),
+        isNull,
+      );
+      // Staleness only gates the freshness-checked read; the offline-fallback
+      // read must keep serving the row.
+      expect(await cache.get(ServerId('srv'), '/library/metadata/1'), isNotNull);
+    });
+  });
 
   group('deletion', () {
     test('deleteForServer wipes only the targeted serverId', () async {
@@ -247,36 +261,25 @@ void main() {
     });
   });
 
-  // ============================================================
-  // Pinning
-  // ============================================================
-
   group('pinning', () {
     test('isPinned defaults to false for a freshly cached item', () async {
       await cache.put(ServerId('srv'), '/library/metadata/1', mediaContainer());
-      expect(await cache.isPinnedRatingKey(ServerId('srv'), '1'), isFalse);
+      expect(await cache.isPinned(ServerId('srv'), '/library/metadata/1'), isFalse);
     });
 
     test('isPinned returns false when the item is not cached at all', () async {
-      expect(await cache.isPinnedRatingKey(ServerId('srv'), 'missing'), isFalse);
+      expect(await cache.isPinned(ServerId('srv'), '/library/metadata/missing'), isFalse);
     });
 
     test('pinForOffline marks the row as pinned', () async {
       await cache.put(ServerId('srv'), '/library/metadata/1', mediaContainer());
       await cache.pinForOffline(ServerId('srv'), '1');
-      expect(await cache.isPinnedRatingKey(ServerId('srv'), '1'), isTrue);
-    });
-
-    test('unpinForOffline reverts the pin', () async {
-      await cache.put(ServerId('srv'), '/library/metadata/1', mediaContainer());
-      await cache.pinForOffline(ServerId('srv'), '1');
-      await cache.unpinForOffline(ServerId('srv'), '1');
-      expect(await cache.isPinnedRatingKey(ServerId('srv'), '1'), isFalse);
+      expect(await cache.isPinned(ServerId('srv'), '/library/metadata/1'), isTrue);
     });
 
     test('pinForOffline on missing row is a no-op (no insert, no throw)', () async {
       await cache.pinForOffline(ServerId('srv'), 'missing');
-      expect(await cache.isPinnedRatingKey(ServerId('srv'), 'missing'), isFalse);
+      expect(await cache.isPinned(ServerId('srv'), '/library/metadata/missing'), isFalse);
     });
 
     test('getPinnedKeys extracts ratingKeys from pinned rows for the server', () async {
@@ -315,10 +318,6 @@ void main() {
       expect(keys, equals({'abc-123'}));
     });
   });
-
-  // ============================================================
-  // getMetadata / getAllPinnedMetadata
-  // ============================================================
 
   group('metadata extraction', () {
     test('getMetadata returns null when the key is not cached', () async {
@@ -485,14 +484,13 @@ void main() {
       await cache.clearVolatile();
       expect(await cache.getMetadata(scopeA, ratingKey), isNotNull);
       expect(await cache.getMetadata(scopeB, ratingKey), isNotNull);
-      expect(await cache.isPinnedRatingKey(scopeA, ratingKey), isTrue);
-      expect(await cache.isPinnedRatingKey(scopeB, ratingKey), isTrue);
+      expect(await cache.isPinned(scopeA, '/library/metadata/$ratingKey'), isTrue);
+      expect(await cache.isPinned(scopeB, '/library/metadata/$ratingKey'), isTrue);
 
-      await cache.unpinForOffline(scopeA, ratingKey);
       await cache.deleteForItem(scopeA, ratingKey);
       expect(await cache.getMetadata(scopeA, ratingKey), isNull);
       expect(await cache.getMetadata(scopeB, ratingKey), isNotNull);
-      expect(await cache.isPinnedRatingKey(scopeB, ratingKey), isTrue);
+      expect(await cache.isPinned(scopeB, '/library/metadata/$ratingKey'), isTrue);
     });
   });
 }

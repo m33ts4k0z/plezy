@@ -175,14 +175,108 @@ void main() {
 
     harness.serverA.schedule.complete(1, 'Obsolete');
     await tester.pump();
+    await tester.pump();
+    // In-session reloads keep the guide mounted: the indicator is the
+    // lightweight overlay rather than a full-screen spinner, and the guide
+    // Focus + day chip stay in the tree so D-pad navigation survives.
     expect(find.byType(CircularProgressIndicator), findsOneWidget);
+    expect(
+      find.byWidgetPredicate((widget) => widget is Focus && widget.focusNode?.debugLabel == 'guide_tab'),
+      findsOneWidget,
+    );
+    expect(
+      find.byWidgetPredicate((widget) => widget is AppIcon && widget.icon == Symbols.arrow_drop_down_rounded),
+      findsOneWidget,
+    );
     expect(find.text('Obsolete'), findsNothing);
+  });
 
-    harness.serverA.schedule.complete(2, 'Current');
+  testWidgets('picking a day applies it immediately and slot-menu dismissal keeps it', (tester) async {
+    final harness = _GuideHarness.oneServer();
+    addTearDown(harness.dispose);
+    await harness.pump(tester);
+    await harness.completeInitial(tester);
+
+    _guideTabFocusNode(tester).requestFocus();
+    await tester.pump();
+
+    await _openDayPicker(tester);
+    // The day menu labels tomorrow via the translation.
+    expect(find.text(t.liveTv.tomorrow), findsOneWidget);
+    await _selectTomorrowInDayMenu(tester);
+
+    // The picked day is applied right away: a fetch for it already went out,
+    // keeping the current window's time-of-day.
+    final requests = harness.serverA.schedule.requests;
+    expect(requests, hasLength(2));
+    final first = requests[0];
+    final dayRequest = requests[1];
+    final gridStartLocal = first.from.toLocal();
+    final now = DateTime.now();
+    final tomorrow = DateTime(now.year, now.month, now.day).add(const Duration(days: 1));
+    final expectedFrom = DateTime(
+      tomorrow.year,
+      tomorrow.month,
+      tomorrow.day,
+      gridStartLocal.hour,
+      gridStartLocal.minute,
+    ).toUtc();
+    expect(dayRequest.from, expectedFrom);
+    expect(dayRequest.to, expectedFrom.add(const Duration(hours: 6)));
+
+    // Dismissing the refinement menu keeps the already-applied day, and the
+    // day chip renders the picked day via the translation too.
+    await tester.tapAt(const Offset(1270, 700));
+    await _pumpMenuTransition(tester);
+    expect(harness.serverA.schedule.requests, hasLength(2));
+    expect(find.text(t.liveTv.tomorrow), findsOneWidget);
+  });
+
+  testWidgets('picking a slot after the day refines the window to that slot', (tester) async {
+    final harness = _GuideHarness.oneServer();
+    addTearDown(harness.dispose);
+    await harness.pump(tester);
+    await harness.completeInitial(tester);
+
+    _guideTabFocusNode(tester).requestFocus();
+    await tester.pump();
+    await _openDayPicker(tester);
+    await _selectTomorrowInDayMenu(tester);
+    expect(harness.serverA.schedule.requests, hasLength(2));
+
+    await tester.tap(find.text(t.liveTv.morning));
+    await _pumpMenuTransition(tester);
+
+    final requests = harness.serverA.schedule.requests;
+    expect(requests, hasLength(3));
+    final now = DateTime.now();
+    final tomorrow = DateTime(now.year, now.month, now.day).add(const Duration(days: 1));
+    final expectedFrom = DateTime(tomorrow.year, tomorrow.month, tomorrow.day, 6).toUtc();
+    expect(requests[2].from, expectedFrom);
+    expect(requests[2].to, expectedFrom.add(const Duration(hours: 6)));
+  });
+
+  testWidgets('after a day change completes the guide keeps D-pad focus', (tester) async {
+    final harness = _GuideHarness.oneServer();
+    addTearDown(harness.dispose);
+    await harness.pump(tester);
+    await harness.completeInitial(tester);
+
+    _guideTabFocusNode(tester).requestFocus();
+    await tester.pump();
+    await _openDayPicker(tester);
+    await _selectTomorrowInDayMenu(tester);
+
+    // Dismiss the refinement menu without picking: focus returns to the guide.
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await _pumpMenuTransition(tester);
+    expect(_guideTabFocusNode(tester).hasFocus, isTrue);
+
+    // Completing the day fetch must not drop focus (the remote stays alive).
+    harness.serverA.schedule.complete(1, 'Tomorrow Programs');
     await tester.pumpAndSettle();
-    expect(find.byType(CircularProgressIndicator), findsNothing);
-    expect(find.text('Current'), findsOneWidget);
-    expect(find.text('Obsolete'), findsNothing);
+    expect(_guideTabFocusNode(tester).hasFocus, isTrue);
+    expect(find.text('Tomorrow Programs'), findsOneWidget);
   });
 
   testWidgets('horizontal guide virtualization keeps the D-pad focus target rendered', (tester) async {
@@ -215,11 +309,285 @@ void main() {
     expect(find.text('Slot 12'), findsOneWidget);
     expect(find.ancestor(of: find.text('Slot 12'), matching: focusedMaterial), findsOneWidget);
   });
+
+  testWidgets('vertical navigation follows displayed source-group order, not flat channel order', (tester) async {
+    // Flat list mirrors live_tv_screen ordering: number-sorted across servers,
+    // which interleaves the two source groups when numbers overlap.
+    final harness = _GuideHarness.twoServersWithChannels([
+      _guideChannel(serverId: 'server-a', stationId: 'st-a1', callSign: 'A1', number: '1'),
+      _guideChannel(serverId: 'server-a', stationId: 'st-a2', callSign: 'A2', number: '2'),
+      _guideChannel(serverId: 'server-b', stationId: 'st-b21', callSign: 'B21', number: '2.1'),
+      _guideChannel(serverId: 'server-a', stationId: 'st-a3', callSign: 'A3', number: '3'),
+      _guideChannel(serverId: 'server-a', stationId: 'st-a4', callSign: 'A4', number: '4'),
+      _guideChannel(serverId: 'server-b', stationId: 'st-b41', callSign: 'B41', number: '4.1'),
+      _guideChannel(serverId: 'server-b', stationId: 'st-b43', callSign: 'B43', number: '4.3'),
+      _guideChannel(serverId: 'server-b', stationId: 'st-b44', callSign: 'B44', number: '4.4'),
+      _guideChannel(serverId: 'server-a', stationId: 'st-a5', callSign: 'A5', number: '5'),
+      _guideChannel(serverId: 'server-b', stationId: 'st-b51', callSign: 'B51', number: '5.1'),
+    ]);
+    addTearDown(harness.dispose);
+    await harness.pump(tester);
+    await harness.completeInitialEmpty(tester);
+
+    await _focusGrid(tester);
+    _expectFocusedChannel(tester, 'A1');
+
+    const displayOrder = ['A1', 'A2', 'A3', 'A4', 'A5', 'B21', 'B41', 'B43', 'B44', 'B51'];
+    for (final callSign in displayOrder.skip(1)) {
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+      await tester.pumpAndSettle();
+      _expectFocusedChannel(tester, callSign);
+    }
+
+    // Down on the last displayed row is a no-op.
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pumpAndSettle();
+    _expectFocusedChannel(tester, 'B51');
+
+    for (final callSign in displayOrder.reversed.skip(1)) {
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+      await tester.pumpAndSettle();
+      _expectFocusedChannel(tester, callSign);
+    }
+  });
+
+  testWidgets('down reaches the last displayed row when the flat-last channel sits mid-guide', (tester) async {
+    // Flat order: 1 (A), 2 (B), 10 (A). Displayed order groups by source:
+    // A1, A10, then B2 — the flat-last channel is not the displayed-last row.
+    final harness = _GuideHarness.twoServersWithChannels([
+      _guideChannel(serverId: 'server-a', stationId: 'st-a1', callSign: 'A1', number: '1'),
+      _guideChannel(serverId: 'server-b', stationId: 'st-b2', callSign: 'B2', number: '2'),
+      _guideChannel(serverId: 'server-a', stationId: 'st-a10', callSign: 'A10', number: '10'),
+    ]);
+    addTearDown(harness.dispose);
+    await harness.pump(tester);
+    await harness.completeInitialEmpty(tester);
+
+    await _focusGrid(tester);
+    _expectFocusedChannel(tester, 'A1');
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pumpAndSettle();
+    _expectFocusedChannel(tester, 'A10');
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pumpAndSettle();
+    _expectFocusedChannel(tester, 'B2');
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pumpAndSettle();
+    _expectFocusedChannel(tester, 'B2');
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+    await tester.pumpAndSettle();
+    _expectFocusedChannel(tester, 'A10');
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+    await tester.pumpAndSettle();
+    _expectFocusedChannel(tester, 'A1');
+
+    // Up on the first displayed row exits the grid to the time navigation.
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+    await tester.pumpAndSettle();
+    expect(_focusedCellFinder(tester), findsNothing);
+  });
+
+  testWidgets('up/down in the program column keeps the focused time', (tester) async {
+    final harness = _GuideHarness.twoServers();
+    addTearDown(harness.dispose);
+    await harness.pump(tester);
+    harness.serverA.schedule.completeSlots(0, 12);
+    await tester.pump();
+    harness.serverB!.schedule.completeSlots(0, 12);
+    await tester.pumpAndSettle();
+
+    await _focusGrid(tester);
+    _expectFocusedChannel(tester, 'A');
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+    await tester.pumpAndSettle();
+    // The window opens an hour before the current half-hour, so what airs
+    // now is always the third slot.
+    expect(find.ancestor(of: find.text('Slot 3'), matching: _focusedCellFinder(tester)), findsOneWidget);
+    for (var i = 0; i < 5; i++) {
+      await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+      await tester.pumpAndSettle();
+    }
+    expect(find.ancestor(of: find.text('Slot 8'), matching: _focusedCellFinder(tester)), findsOneWidget);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pumpAndSettle();
+
+    final focusedSlot8 = find.ancestor(of: find.text('Slot 8'), matching: _focusedCellFinder(tester));
+    expect(focusedSlot8, findsOneWidget);
+    // It is channel B's block, and it was scrolled into view.
+    expect(tester.getCenter(focusedSlot8).dy, closeTo(tester.getCenter(find.text('B')).dy, 20));
+    expect(tester.getRect(focusedSlot8).overlaps(tester.getRect(find.byType(GuideTab))), isTrue);
+  });
+
+  testWidgets('moving into a row with no programs focuses its channel cell', (tester) async {
+    final harness = _GuideHarness.twoServers();
+    addTearDown(harness.dispose);
+    await harness.pump(tester);
+    harness.serverA.schedule.completeSlots(0, 12);
+    await tester.pump();
+    harness.serverB!.schedule.completeEmpty(0);
+    await tester.pumpAndSettle();
+
+    await _focusGrid(tester);
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+    await tester.pumpAndSettle();
+    expect(find.ancestor(of: find.text('Slot 3'), matching: _focusedCellFinder(tester)), findsOneWidget);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pumpAndSettle();
+    _expectFocusedChannel(tester, 'B');
+  });
+
+  testWidgets('the context-menu key toggles the focused channel favorite once per press', (tester) async {
+    final toggled = <String?>[];
+    final harness = _GuideHarness.oneServer();
+    addTearDown(harness.dispose);
+    await harness.pump(tester, onToggleFavorite: (channel) => toggled.add(channel.callSign));
+    await harness.completeInitialEmpty(tester);
+
+    await _focusGrid(tester);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.gameButtonX);
+    await tester.sendKeyRepeatEvent(LogicalKeyboardKey.gameButtonX);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.gameButtonX);
+    await tester.pump();
+
+    expect(toggled, ['A']);
+  });
+
+  testWidgets('on TV a SELECT hold on a channel cell toggles its favorite', (tester) async {
+    TvDetectionService.debugSetAppleTVOverride(true);
+    final toggled = <String?>[];
+    final harness = _GuideHarness.oneServer();
+    addTearDown(harness.dispose);
+    await harness.pump(tester, onToggleFavorite: (channel) => toggled.add(channel.callSign));
+    await harness.completeInitialEmpty(tester);
+
+    await _focusGrid(tester);
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.select);
+    await tester.pump(const Duration(milliseconds: 600));
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.select);
+    await tester.pumpAndSettle();
+
+    expect(toggled, ['A']);
+  });
+
+  testWidgets('guide-search jump during load is stashed, wins over default anchoring, and lands focus', (tester) async {
+    final harness = _GuideHarness.twoServers();
+    addTearDown(harness.dispose);
+    await harness.pump(tester);
+
+    // Keyboard mode while the initial load is still in flight; the jump is
+    // stashed and replayed once the load commits.
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pump();
+    tester.state<GuideTabState>(find.byType(GuideTab)).jumpToChannel(harness.channels[1]);
+
+    await harness.completeInitialEmpty(tester);
+
+    _expectFocusedChannel(tester, 'B');
+  });
+
+  testWidgets('jumpToProgram shifts the guide window to the airing and lands focus on its block', (tester) async {
+    final harness = _GuideHarness.oneServer();
+    addTearDown(harness.dispose);
+    await harness.pump(tester);
+    await harness.completeInitial(tester);
+
+    await _focusGrid(tester);
+    _expectFocusedChannel(tester, 'A');
+
+    // An airing 8 hours past the window start, outside the visible 6 hours.
+    final initial = harness.serverA.schedule.requests[0];
+    final beginEpoch = initial.from.millisecondsSinceEpoch ~/ 1000 + 8 * 3600;
+    final target = LiveTvProgram(
+      ratingKey: 'search-target',
+      title: 'Search Target',
+      beginsAt: beginEpoch,
+      endsAt: beginEpoch + 1800,
+      channelIdentifier: 'station-a',
+      serverId: 'server-a',
+    );
+
+    final state = tester.state<GuideTabState>(find.byType(GuideTab));
+    unawaited(state.jumpToProgram(harness.channels.single, target));
+    await tester.pump();
+
+    // A fresh 6-hour window anchored one slot before the airing was requested.
+    expect(harness.serverA.schedule.requests, hasLength(2));
+    final shifted = harness.serverA.schedule.requests[1];
+    final expectedFrom = DateTime.fromMillisecondsSinceEpoch((beginEpoch - 1800) * 1000, isUtc: true);
+    expect(shifted.from, expectedFrom);
+    expect(shifted.to, expectedFrom.add(const Duration(hours: 6)));
+
+    // Slot 2 of the completed window begins exactly at the airing's start, so
+    // the jump re-resolves onto it and lands D-pad focus on the block.
+    harness.serverA.schedule.completeSlots(1, 2);
+    await tester.pumpAndSettle();
+    expect(find.ancestor(of: find.text('Slot 2'), matching: _focusedCellFinder(tester)), findsOneWidget);
+  });
 }
 
 Finder _rightTimeButton() {
   final icon = find.byWidgetPredicate((widget) => widget is AppIcon && widget.icon == Symbols.chevron_right_rounded);
   return find.ancestor(of: icon, matching: find.byType(IconButton));
+}
+
+Future<void> _focusGrid(WidgetTester tester) async {
+  final guideFocus = tester.widget<Focus>(
+    find.byWidgetPredicate((widget) => widget is Focus && widget.focusNode?.debugLabel == 'guide_tab'),
+  );
+  guideFocus.focusNode!.requestFocus();
+  await tester.pump();
+  // Enters the grid from the time navigation zone.
+  await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+  await tester.pumpAndSettle();
+}
+
+Finder _focusedCellFinder(WidgetTester tester) {
+  final primary = Theme.of(tester.element(find.byType(GuideTab))).colorScheme.primary;
+  return find.byWidgetPredicate((widget) => widget is Material && widget.color == primary);
+}
+
+void _expectFocusedChannel(WidgetTester tester, String callSign) {
+  expect(
+    find.ancestor(of: find.text(callSign), matching: _focusedCellFinder(tester)),
+    findsOneWidget,
+    reason: 'expected focused channel $callSign',
+  );
+}
+
+FocusNode _guideTabFocusNode(WidgetTester tester) {
+  final guideFocus = tester.widget<Focus>(
+    find.byWidgetPredicate((widget) => widget is Focus && widget.focusNode?.debugLabel == 'guide_tab'),
+  );
+  return guideFocus.focusNode!;
+}
+
+/// Opens the day picker menu via SELECT on the focused time-nav day chip.
+Future<void> _openDayPicker(WidgetTester tester) async {
+  await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+  await tester.pumpAndSettle();
+}
+
+/// Selects 'Tomorrow' in the open day menu by tapping its entry; the slot
+/// refinement menu opens on top. The keyboard open/close paths are covered by
+/// the focus test; menu entry taps keep this selection deterministic.
+Future<void> _selectTomorrowInDayMenu(WidgetTester tester) async {
+  await tester.tap(find.text(t.liveTv.tomorrow));
+  await _pumpMenuTransition(tester);
+}
+
+/// Pumps through a menu open/close transition (120ms). Cannot pumpAndSettle:
+/// while a guide load is in flight the overlay's indeterminate spinner keeps
+/// scheduling frames forever.
+Future<void> _pumpMenuTransition(WidgetTester tester) async {
+  await tester.pump();
+  await tester.pump(const Duration(milliseconds: 200));
 }
 
 final class _GuideHarness {
@@ -229,7 +597,10 @@ final class _GuideHarness {
 
   factory _GuideHarness.twoServers() => _GuideHarness._create(includeServerB: true);
 
-  factory _GuideHarness._create({required bool includeServerB}) {
+  factory _GuideHarness.twoServersWithChannels(List<LiveTvChannel> channels) =>
+      _GuideHarness._create(includeServerB: true, channels: channels);
+
+  factory _GuideHarness._create({required bool includeServerB, List<LiveTvChannel>? channels}) {
     final serverA = _FakeMediaServerClient(serverId: 'server-a', stationId: 'station-a');
     final serverB = includeServerB ? _FakeMediaServerClient(serverId: 'server-b', stationId: 'station-b') : null;
     final manager = MultiServerManager()..debugRegisterClientForTesting(serverA);
@@ -243,10 +614,12 @@ final class _GuideHarness {
       serverA: serverA,
       serverB: serverB,
       provider: provider,
-      channels: [
-        _guideChannel(serverId: 'server-a', stationId: 'station-a', callSign: 'A'),
-        if (serverB != null) _guideChannel(serverId: 'server-b', stationId: 'station-b', callSign: 'B'),
-      ],
+      channels:
+          channels ??
+          [
+            _guideChannel(serverId: 'server-a', stationId: 'station-a', callSign: 'A'),
+            if (serverB != null) _guideChannel(serverId: 'server-b', stationId: 'station-b', callSign: 'B'),
+          ],
     );
   }
 
@@ -255,7 +628,7 @@ final class _GuideHarness {
   final MultiServerProvider provider;
   final List<LiveTvChannel> channels;
 
-  Future<void> pump(WidgetTester tester) async {
+  Future<void> pump(WidgetTester tester, {void Function(LiveTvChannel)? onToggleFavorite}) async {
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = const Size(1280, 720);
     addTearDown(() {
@@ -270,7 +643,9 @@ final class _GuideHarness {
             value: provider,
             child: MaterialApp(
               theme: monoTheme(dark: true),
-              home: Scaffold(body: GuideTab(channels: channels)),
+              home: Scaffold(
+                body: GuideTab(channels: channels, onToggleFavorite: onToggleFavorite),
+              ),
             ),
           ),
         ),
@@ -292,17 +667,33 @@ final class _GuideHarness {
     if (serverB != null) expect(find.text('Initial B'), findsOneWidget);
   }
 
+  Future<void> completeInitialEmpty(WidgetTester tester) async {
+    serverA.schedule.completeEmpty(0);
+    await tester.pump();
+    final serverB = this.serverB;
+    if (serverB != null) {
+      expect(serverB.schedule.requests, hasLength(1));
+      serverB.schedule.completeEmpty(0);
+    }
+    await tester.pumpAndSettle();
+  }
+
   void dispose() => provider.dispose();
 }
 
-LiveTvChannel _guideChannel({required String serverId, required String stationId, required String callSign}) =>
-    LiveTvChannel(
-      key: 'channel-$stationId',
-      identifier: stationId,
-      callSign: callSign,
-      serverId: serverId,
-      liveDvrKey: 'dvr-$serverId',
-    );
+LiveTvChannel _guideChannel({
+  required String serverId,
+  required String stationId,
+  required String callSign,
+  String? number,
+}) => LiveTvChannel(
+  key: 'channel-$stationId',
+  identifier: stationId,
+  callSign: callSign,
+  serverId: serverId,
+  liveDvrKey: 'dvr-$serverId',
+  number: number,
+);
 
 final class _FakeMediaServerClient implements MediaServerClient {
   _FakeMediaServerClient({required String serverId, required String stationId})
@@ -360,6 +751,8 @@ final class _ControllableLiveTvSupport implements LiveTvSupport {
       ),
     ]);
   }
+
+  void completeEmpty(int index) => requests[index].completer.complete(const []);
 
   void completeSlots(int index, int count) {
     final request = requests[index];

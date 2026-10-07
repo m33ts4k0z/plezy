@@ -6,7 +6,7 @@ enum SessionRole { host, guest }
 
 enum ControlMode { hostOnly, anyone }
 
-enum SessionState { disconnected, connecting, connected, error }
+enum SessionState { connecting, connected, error }
 
 @freezed
 sealed class Participant with _$Participant {
@@ -14,7 +14,6 @@ sealed class Participant with _$Participant {
     required String peerId,
     required String displayName,
     required bool isHost,
-    @Default(Duration.zero) Duration lastKnownPosition,
     @Default(false) bool isBuffering,
   }) = _Participant;
 }
@@ -39,7 +38,6 @@ sealed class WatchSession with _$WatchSession {
 
   bool get isConnected => state == SessionState.connected;
 
-  /// Create a new session as host
   factory WatchSession.createAsHost({
     required String sessionId,
     required String hostPeerId,

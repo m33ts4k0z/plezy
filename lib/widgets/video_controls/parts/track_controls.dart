@@ -12,15 +12,35 @@ extension _PlexVideoControlsTrackMethods on _PlexVideoControlsState {
       return;
     }
 
+    // A burned-in subtitle is pixels rather than a track: there is nothing selected to hide, and
+    // `setSubtitleVisibility` could not remove painted pixels anyway. Only a new negotiation can,
+    // and that is a real subtitle *choice* - it re-encodes the stream and the server remembers it.
+    // Doing that behind a transient visibility shortcut would silently overwrite the viewer's saved
+    // selection with Off, so the shortcut says where the control actually lives instead of
+    // pretending to work or doing nothing at all.
+    if (_hasBurnedSourceSubtitle()) {
+      showAppSnackBar(context, t.messages.burnedSubtitlesUseMenu);
+      return;
+    }
+
     final currentTrack = widget.player.state.track.subtitle;
-    // Nothing to hide when no subtitle track is selected.
     if (currentTrack == null || currentTrack.id == SubtitleTrack.off.id) return;
 
     _setSubtitleVisibility(false);
   }
 
+  /// The same question [TrackControlsState.burnsSelectedSubtitle] answers, but
+  /// asked of the raw inputs: the state object drops the selection when source
+  /// switching is unavailable, while this hint is about what is on screen.
+  bool _hasBurnedSourceSubtitle() => PlaybackSubtitleResolver.burnsCurrentSelection(
+    isTranscoding: widget.isTranscoding,
+    isLive: widget.isLive,
+    choice: widget.selectedSubtitleChoice,
+    sidecars: widget.sourceSubtitleSidecars,
+    transcodeEmbedsSubtitles: widget.transcodeEmbedsSubtitles,
+  );
+
   void _onSubtitleTrackChanged(SubtitleTrack track) {
-    // Reset visibility when user explicitly picks a new subtitle track
     if (track.id != 'no' && !_subtitlesVisible) {
       _setSubtitleVisibility(true);
     }
@@ -69,9 +89,13 @@ extension _PlexVideoControlsTrackMethods on _PlexVideoControlsState {
     if (shaderService == null || !shaderService.isSupported) return;
 
     final shaderProvider = context.read<ShaderProvider>();
+    // The restore target honors the configured persistence scope, so toggling
+    // back on inside an Anime4K library restores that library's preset rather
+    // than the global one.
+    final savedPresetId = ScopedPlayerPrefs.resolve(ScopedPlayerPrefs.shaderPreset, widget.metadata);
     final targetPreset = resolveShaderTogglePreset(
       currentPreset: shaderService.currentPreset,
-      savedPreset: shaderProvider.savedPreset,
+      savedPreset: shaderProvider.findPresetById(savedPresetId) ?? ShaderPreset.none,
       allPresets: shaderProvider.allPresets,
     );
 
@@ -85,10 +109,11 @@ extension _PlexVideoControlsTrackMethods on _PlexVideoControlsState {
           .then((_) async {
             if (!mounted) return;
             if (targetPreset.isEnabled) {
-              await shaderProvider.setPreset(targetPreset);
-            } else {
-              shaderProvider.setCurrentPreset(targetPreset);
+              await ScopedPlayerPrefs.write(ScopedPlayerPrefs.shaderPreset, widget.metadata, targetPreset.id);
             }
+            // Toggling off stays session-only; the write above already synced
+            // the provider when the configured scope is global.
+            shaderProvider.setCurrentPreset(targetPreset);
             if (!mounted) return;
             // ignore: no-empty-block - setState triggers rebuild to reflect shader changes
             _setControlsState(() {});
@@ -135,6 +160,7 @@ extension _PlexVideoControlsTrackMethods on _PlexVideoControlsState {
       selectedQualityPreset: widget.selectedQualityPreset,
       serverSupportsTranscoding: versionQuality.serverSupportsTranscoding,
       isTranscoding: versionQuality.isTranscoding,
+      transcodeEmbedsSubtitles: versionQuality.isTranscoding && widget.transcodeEmbedsSubtitles,
       sourceAudioTracks: versionQuality.sourceAudioTracks,
       selectedAudioStreamId: versionQuality.selectedAudioStreamId,
       sourceSubtitleTracks: canSwitchSourceSubtitles
@@ -152,7 +178,7 @@ extension _PlexVideoControlsTrackMethods on _PlexVideoControlsState {
       audioSyncOffset: _audioSyncOffset,
       subtitleSyncOffset: _subtitleSyncOffset,
       isRotationLocked: _isRotationLocked,
-      isFullscreen: _isFullscreen,
+      isFullscreen: FullscreenStateManager().isFullscreen,
       isAlwaysOnTop: _isAlwaysOnTop,
       onTogglePIPMode: (_isPipSupported && !PlatformDetector.isTV()) ? widget.onTogglePIPMode : null,
       onCycleBoxFitMode: widget.onCycleBoxFitMode,
@@ -171,14 +197,11 @@ extension _PlexVideoControlsTrackMethods on _PlexVideoControlsState {
       onAudioTrackChanged: widget.onAudioTrackChanged,
       onSubtitleTrackChanged: _onSubtitleTrackChanged,
       onSecondarySubtitleTrackChanged: widget.onSecondarySubtitleTrackChanged,
-      onLoadSeekTimes: null,
+      onRateRequested: widget.onRateRequested,
       onCancelAutoHide: widget.chromeController.cancelAutoHide,
       onStartAutoHide: _startHideTimer,
-      // Sync offsets are now driven by listenable rebuilds — the sheet writes
-      // to SettingsService and the parent re-reads via `_audioSyncOffset` /
-      // `_subtitleSyncOffset` getters. Callback kept for sheet API compat.
-      onSyncOffsetChanged: null,
       serverId: widget.metadata.serverId,
+      metadata: widget.metadata,
       shaderService: widget.shaderService,
       onShaderChanged: widget.onShaderChanged,
       isAmbientLightingEnabled: widget.isAmbientLightingEnabled,

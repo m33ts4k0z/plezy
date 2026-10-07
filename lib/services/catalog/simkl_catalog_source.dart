@@ -32,7 +32,8 @@ class SimklCatalogSource with CatalogWatchlistMachinery implements CatalogSource
   final Map<CatalogRowId, List<CatalogItem>> _rowCache = {};
   final Map<CatalogRowId, DateTime> _rowCacheLoadedAt = {};
   final KeyedFutureCoalescer<CatalogRowId, List<CatalogItem>> _rowLoads = KeyedFutureCoalescer();
-  final FutureCoalescer<SimklAllItems> _watchlistLoad = FutureCoalescer();
+  // Coalesces the Simkl all-items fetch; distinct from the mixin's `_watchlistLoad` (membership snapshot).
+  final FutureCoalescer<SimklAllItems> _simklAllItemsLoad = FutureCoalescer();
   final Set<int> _animeIds = {};
   SimklAllItems? _watchlistCache;
   int _watchlistCacheGeneration = 0;
@@ -147,7 +148,7 @@ class SimklCatalogSource with CatalogWatchlistMachinery implements CatalogSource
     final cached = _watchlistCache;
     if (cached != null) return Future.value(cached);
     final generation = _watchlistCacheGeneration;
-    return _watchlistLoad.run(() async {
+    return _simklAllItemsLoad.run(() async {
       final response = await _client.getAllItems(extended: 'full');
       if (generation == _watchlistCacheGeneration) _watchlistCache = response;
       return response;
@@ -568,24 +569,21 @@ class SimklCatalogSource with CatalogWatchlistMachinery implements CatalogSource
       external.hasCatalogIds ? CatalogItemIds.fromExternal(external) : null;
 
   @override
-  Future<WatchlistKeyPage> fetchWatchlistKeyPage(int page, int limit) async {
-    final response = await _getWatchlistItems();
-    return (
-      groups: [
-        for (final entry in response.movies)
-          if (entry.media case final media?) membershipKeysFor(MediaKind.movie, media.ids.toCatalogItemIds()),
-        for (final entry in response.shows)
-          if (entry.media case final media?) membershipKeysFor(MediaKind.show, media.ids.toCatalogItemIds()),
-        for (final entry in response.anime)
-          if (entry.media case final media?)
-            [
-              ...membershipKeysFor(MediaKind.movie, media.ids.toCatalogItemIds()),
-              ...membershipKeysFor(MediaKind.show, media.ids.toCatalogItemIds()),
-            ],
-      ],
-      hasMore: false,
-    );
-  }
+  Future<WatchlistKeyPage> fetchWatchlistKeyPage(int page, int limit) async =>
+      (groups: _watchlistKeyGroups(await _getWatchlistItems()), hasMore: false);
+
+  List<List<String>> _watchlistKeyGroups(SimklAllItems response) => [
+    for (final entry in response.movies)
+      if (entry.media case final media?) membershipKeysFor(MediaKind.movie, media.ids.toCatalogItemIds()),
+    for (final entry in response.shows)
+      if (entry.media case final media?) membershipKeysFor(MediaKind.show, media.ids.toCatalogItemIds()),
+    for (final entry in response.anime)
+      if (entry.media case final media?)
+        [
+          ...membershipKeysFor(MediaKind.movie, media.ids.toCatalogItemIds()),
+          ...membershipKeysFor(MediaKind.show, media.ids.toCatalogItemIds()),
+        ],
+  ];
 
   @override
   Future<void> performWatchlistMutation(MediaKind kind, CatalogItemIds ids, {required bool add}) async {
@@ -599,8 +597,18 @@ class SimklCatalogSource with CatalogWatchlistMachinery implements CatalogSource
       });
     } else {
       // Simkl has no remove-from-list endpoint. A bare-IDs history removal drops
-      // the title from the user's library entirely; for a Plan to Watch entry,
-      // that is the documented and intended removal behavior.
+      // the title from the user's library entirely, watch history included; for
+      // a Plan to Watch entry, that is the documented and intended removal
+      // behavior. So re-read Plan to Watch first: a title that has moved on to
+      // watching or completed since the snapshot loaded is already off it, and
+      // the removal would wipe its history.
+      _invalidateWatchlistCache();
+      final keys = membershipKeysFor(kind, ids).toSet();
+      final planned = _watchlistKeyGroups(await _getWatchlistItems());
+      if (!planned.any((group) => group.any(keys.contains))) {
+        reloadWatchlistSnapshot();
+        return;
+      }
       await _client.removeFromHistory({
         bucket: [
           {'ids': mutationIds},
@@ -613,7 +621,7 @@ class SimklCatalogSource with CatalogWatchlistMachinery implements CatalogSource
   void _invalidateWatchlistCache() {
     _watchlistCacheGeneration++;
     _watchlistCache = null;
-    _watchlistLoad.reset();
+    _simklAllItemsLoad.reset();
     _rowCache.remove(CatalogRowId.watchlist);
     _rowCacheLoadedAt.remove(CatalogRowId.watchlist);
   }

@@ -81,7 +81,11 @@ void main() {
   });
 
   test('metadata preference request failures preserve the editable basic fields', () async {
-    final client = testPlexClient(handler: (_) async => http.Response('{}', 503));
+    final client = testPlexClient(
+      handler: (request) async => request.url.queryParameters.containsKey('includePreferences')
+          ? http.Response('{}', 503)
+          : _metadataResponse(const []),
+    );
     addTearDown(client.close);
 
     final draft = await PlexMetadataEditAdapter(client).load(_show());
@@ -90,6 +94,89 @@ void main() {
     expect(draft.value<String>('originalTitle'), 'Original show title');
     expect(draft.value<String>('pref:episodeSort'), isNull);
   });
+
+  test('the editor loads full metadata even for a row that has a summary and library id', () async {
+    final client = testPlexClient(handler: (_) async => _metadataResponse(const []));
+    addTearDown(client.close);
+
+    // A list row: summary and library id present, genres absent.
+    final draft = await PlexMetadataEditAdapter(client).load(_show());
+
+    // save() diffs tag edits against these originals, so they must be the
+    // server's, not the row's empty list.
+    expect(draft.value<List<String>>('genre'), ['Drama', 'Science Fiction']);
+    expect(draft.originalValues['genre'], ['Drama', 'Science Fiction']);
+  });
+
+  test('the editor refuses to start from a partial row when the item cannot be fetched', () async {
+    final client = testPlexClient(handler: (_) async => http.Response('not found', 404));
+    addTearDown(client.close);
+
+    await expectLater(PlexMetadataEditAdapter(client).load(_show()), throwsStateError);
+  });
+
+  test('removed tags are emitted single-encoded because the transport encodes exactly once', () async {
+    Uri? requestedUri;
+    final client = testPlexClient(
+      handler: (request) async {
+        requestedUri = request.url;
+        return http.Response('{}', 200, headers: const {'content-type': 'application/json'});
+      },
+    );
+    addTearDown(client.close);
+
+    final ok = await client.updateMetadata(
+      sectionId: 1,
+      ratingKey: 'show-1',
+      typeNumber: 2,
+      tagChanges: {
+        'genre': (current: ['Drama'], original: ['Drama', 'Science Fiction']),
+      },
+    );
+
+    expect(ok, isTrue);
+    expect(requestedUri, isNotNull);
+    // Decoding the emitted query once must yield the original tag. The old
+    // Uri.encodeComponent pre-pass double-encoded it ('Science%2520Fiction'
+    // on the wire), so the server deleted a tag that doesn't exist.
+    expect(requestedUri!.queryParameters['genre[].tag.tag-'], 'Science Fiction');
+    expect(requestedUri!.query, contains('Science%20Fiction'));
+    expect(requestedUri!.query, isNot(contains('%2520')));
+  });
+
+  test('a removed tag containing a comma travels one removal per request', () async {
+    final requestedUris = <Uri>[];
+    final client = testPlexClient(
+      handler: (request) async {
+        requestedUris.add(request.url);
+        return http.Response('{}', 200, headers: const {'content-type': 'application/json'});
+      },
+    );
+    addTearDown(client.close);
+
+    final ok = await client.updateMetadata(
+      sectionId: 1,
+      ratingKey: 'show-1',
+      typeNumber: 2,
+      tagChanges: {
+        'genre': (current: ['Drama'], original: ['Drama', 'Action, Comedy', 'Science Fiction']),
+      },
+    );
+
+    expect(ok, isTrue);
+    // Plex's tag.tag- removes "comma separated tags" with no escape, so a
+    // joined value would split 'Action, Comedy' and could over-remove tags
+    // named 'Action'/'Comedy'. The whole field defers to one removal per
+    // request; the main request still locks the field and restates keeps.
+    expect(requestedUris, hasLength(3));
+    expect(requestedUris[0].queryParameters.containsKey('genre[].tag.tag-'), isFalse);
+    expect(requestedUris[0].queryParameters['genre[0].tag.tag'], 'Drama');
+    expect(requestedUris[0].queryParameters['genre.locked'], '1');
+    expect(requestedUris[1].queryParameters['genre[].tag.tag-'], 'Action, Comedy');
+    expect(requestedUris[1].query, contains('Action%2C%20Comedy'));
+    expect(requestedUris[1].queryParameters['genre[0].tag.tag'], 'Drama');
+    expect(requestedUris[2].queryParameters['genre[].tag.tag-'], 'Science Fiction');
+  });
 }
 
 http.Response _metadataResponse(List<Object?> settings) {
@@ -97,7 +184,19 @@ http.Response _metadataResponse(List<Object?> settings) {
     jsonEncode({
       'MediaContainer': {
         'Metadata': [
-          {'ratingKey': 'show-1', 'Setting': settings},
+          {
+            'ratingKey': 'show-1',
+            'type': 'show',
+            'title': 'Show',
+            'originalTitle': 'Original show title',
+            'summary': 'Summary',
+            'librarySectionID': 1,
+            'Genre': [
+              {'tag': 'Drama'},
+              {'tag': 'Science Fiction'},
+            ],
+            'Setting': settings,
+          },
         ],
       },
     }),

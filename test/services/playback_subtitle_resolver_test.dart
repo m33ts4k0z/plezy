@@ -2,7 +2,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:plezy/media/media_backend.dart';
 import 'package:plezy/media/media_kind.dart';
 import 'package:plezy/media/media_source_info.dart';
-import 'package:plezy/models/jellyfin/jellyfin_user_profile.dart';
+import 'package:plezy/media/account_preferences.dart';
+import 'package:plezy/models/jellyfin/jellyfin_account_preferences.dart';
 import 'package:plezy/mpv/mpv.dart';
 import 'package:plezy/services/jellyfin_media_info_mapper.dart';
 import 'package:plezy/services/playback_initialization_types.dart';
@@ -228,6 +229,56 @@ void main() {
     expect(result.sidecarsAtOpen.single.uri, 'https://example.test/subtitles/2.srt');
   });
 
+  test('a preloaded sidecar attaches at open even when not selected', () {
+    // The clients mark real external files preload, so the non-selected file
+    // still loads with the media and stays selectable as a secondary subtitle
+    // without a reopen (#1860).
+    final result = PlaybackSubtitleResolver.resolve(
+      metadata: metadata,
+      mediaInfo: _mediaInfo([
+        _sourceSubtitle(2, selected: true, usesExternalDelivery: true),
+        _sourceSubtitle(3, language: 'swe', usesExternalDelivery: true),
+      ]),
+      sidecars: [
+        _sidecar(2, preload: true),
+        _sidecar(3, language: 'swe', preload: true),
+      ],
+    );
+
+    expect(result.primarySourceStreamId, 2);
+    expect(result.sidecarsAtOpen.map((track) => track.uri), [
+      'https://example.test/subtitles/2.srt',
+      'https://example.test/subtitles/3.srt',
+    ]);
+  });
+
+  test('a transcode drops a carried secondary it cannot deliver', () {
+    // The burn covers the primary, and an embedded secondary has neither a sidecar to fetch nor a
+    // native track to land on. Kept selected, it made `TrackManager` wait out its thirty-second
+    // deadline and then read as active while nothing was on screen.
+    final result = PlaybackSubtitleResolver.resolve(
+      metadata: metadata,
+      mediaInfo: _mediaInfo([_sourceSubtitle(2, selected: true), _sourceSubtitle(3, language: 'swe')]),
+      sidecars: const [],
+      preferredSecondarySubtitleTrack: SubtitlePreference.track(const SubtitleTrack(id: 'source:3', language: 'swe')),
+      isTranscoding: true,
+    );
+
+    expect(result.secondaryTrack, isNull, reason: 'nothing can carry it, so it must not stay selected');
+    expect(result.secondarySourceStreamId, isNull);
+  });
+
+  test('a direct play keeps a carried secondary the player can select natively', () {
+    final result = PlaybackSubtitleResolver.resolve(
+      metadata: metadata,
+      mediaInfo: _mediaInfo([_sourceSubtitle(2, selected: true), _sourceSubtitle(3, language: 'swe')]),
+      sidecars: const [],
+      preferredSecondarySubtitleTrack: SubtitlePreference.track(const SubtitleTrack(id: 'source:3', language: 'swe')),
+    );
+
+    expect(result.secondarySourceStreamId, 3, reason: 'the container still carries it');
+  });
+
   test('explicit off produces an open with zero sidecars', () {
     final result = PlaybackSubtitleResolver.resolve(
       metadata: metadata,
@@ -254,9 +305,8 @@ void main() {
       ],
     });
 
-    JellyfinUserProfile profileWithMode(String mode) => JellyfinUserProfile.fromUserDto({
-      'Configuration': {'SubtitleMode': mode, 'PlayDefaultAudioTrack': true},
-    });
+    AccountPreferences profileWithMode(String mode) =>
+        JellyfinAccountPreferences.fromConfiguration({'SubtitleMode': mode, 'PlayDefaultAudioTrack': true});
 
     test('a user who turned subtitles off on the server gets none (#1779)', () {
       final result = PlaybackSubtitleResolver.resolve(
@@ -692,6 +742,63 @@ void main() {
     });
   });
 
+  group('issue #2323 write-back provenance', () {
+    test("the server-selected row is not the caller's choice", () {
+      final result = PlaybackSubtitleResolver.resolve(
+        metadata: metadata,
+        mediaInfo: _mediaInfo([
+          _sourceSubtitle(3, language: 'eng'),
+          _sourceSubtitle(4, language: 'fre', selected: true),
+        ]),
+        sidecars: const [],
+      );
+
+      expect(result.primarySourceStreamId, 4);
+      expect(result.primaryHonorsPreference, isFalse);
+    });
+
+    test("a carry the catalog serves is the caller's choice", () {
+      final result = PlaybackSubtitleResolver.resolve(
+        metadata: metadata,
+        mediaInfo: _mediaInfo([
+          _sourceSubtitle(3, language: 'eng'),
+          _sourceSubtitle(4, language: 'fre', selected: true),
+        ]),
+        sidecars: const [],
+        preferredSubtitleTrack: const SubtitlePreference.intent(
+          SubtitleIntent(language: 'eng', forced: false, title: 'Subtitle 3', codec: 'srt'),
+        ),
+        preserveSourceIdentity: false,
+      );
+
+      expect(result.primarySourceStreamId, 3);
+      expect(result.primaryHonorsPreference, isTrue);
+    });
+
+    test("a carried off stays the caller's choice so it can be persisted", () {
+      final result = PlaybackSubtitleResolver.resolve(
+        metadata: metadata,
+        mediaInfo: _mediaInfo([_sourceSubtitle(3, language: 'eng', selected: true)]),
+        sidecars: const [],
+        preferredSubtitleTrack: const SubtitlePreference.off(),
+      );
+
+      expect(result.isOff, isTrue);
+      expect(result.primaryHonorsPreference, isTrue);
+    });
+
+    test("a server off decision is not the caller's choice", () {
+      final result = PlaybackSubtitleResolver.resolve(
+        metadata: metadata,
+        mediaInfo: _mediaInfo([_sourceSubtitle(3, language: 'eng')]),
+        sidecars: const [],
+      );
+
+      expect(result.isOff, isTrue);
+      expect(result.primaryHonorsPreference, isFalse);
+    });
+  });
+
   test('audio source descriptor keeps the discriminating row title', () {
     // Server display titles collapse to the bare language; a commentary or
     // alternate mix is only identifiable by the row's own title.
@@ -709,6 +816,59 @@ void main() {
     expect(track.title, 'Commentary');
     expect(track.language, 'eng');
     expect(track.channels, 6);
+  });
+
+  group('burned-in subtitles force a renegotiation', () {
+    bool needsServer({
+      bool isTranscoding = true,
+      int? currentSourceStreamId,
+      bool currentSelectionHasSidecar = false,
+      bool targetIsOff = false,
+      bool targetIsExternalFile = false,
+    }) => PlaybackSubtitleResolver.burnRequiresRenegotiation(
+      isTranscoding: isTranscoding,
+      currentSourceStreamId: currentSourceStreamId,
+      currentSelectionHasSidecar: currentSelectionHasSidecar,
+      targetIsOff: targetIsOff,
+      targetIsExternalFile: targetIsExternalFile,
+    );
+
+    // Burned pixels are not a track: off leaves them on screen, anything else is drawn over them.
+    // So from a burned selection the target is irrelevant - every change goes back to the server.
+    test('every change from a burned selection goes back to the server', () {
+      expect(needsServer(currentSourceStreamId: 3, targetIsOff: true), isTrue);
+      expect(needsServer(currentSourceStreamId: 3, targetIsExternalFile: true), isTrue);
+      expect(needsServer(currentSourceStreamId: 3), isTrue, reason: 'another embedded track');
+    });
+
+    // The other direction: nothing is burned yet, but the target can only arrive burned.
+    test('an embedded target has to be negotiated even with nothing burned', () {
+      expect(
+        needsServer(currentSourceStreamId: null),
+        isTrue,
+        reason: 'applying it locally attaches nothing and reports success over an unchanged picture',
+      );
+      expect(
+        needsServer(currentSourceStreamId: 3, currentSelectionHasSidecar: true),
+        isTrue,
+        reason: 'a sidecar-backed current selection does not make an embedded target local',
+      );
+    });
+
+    test('what the client already holds stays local', () {
+      expect(needsServer(currentSourceStreamId: null, targetIsOff: true), isFalse);
+      expect(needsServer(currentSourceStreamId: null, targetIsExternalFile: true), isFalse);
+      expect(
+        needsServer(currentSourceStreamId: 3, currentSelectionHasSidecar: true, targetIsOff: true),
+        isFalse,
+        reason: 'a sidecar was delivered as a file, so turning it off is a real local change',
+      );
+    });
+
+    test('a direct play never burns, whatever is selected', () {
+      expect(needsServer(isTranscoding: false, currentSourceStreamId: 3), isFalse);
+      expect(needsServer(isTranscoding: false), isFalse);
+    });
   });
 
   test('selected embedded subtitle keeps sidecars out of the open', () {

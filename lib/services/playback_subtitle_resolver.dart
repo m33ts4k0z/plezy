@@ -53,6 +53,13 @@ class PlaybackSubtitleSelection {
   /// explicit server-side off. A user or server decision leaves this null.
   final SubtitlePreference? declinedPreference;
 
+  /// Whether [primaryTrack] is the caller's own choice rather than the
+  /// source's selected row. The open flow hands [primaryTrack] to the track
+  /// manager as that open's subtitle preference either way, so priority alone
+  /// cannot tell them apart — and only the caller's choice may be written
+  /// back to the server (#2323).
+  final bool primaryHonorsPreference;
+
   const PlaybackSubtitleSelection({
     required this.primaryTrack,
     this.primarySourceStreamId,
@@ -62,15 +69,19 @@ class PlaybackSubtitleSelection {
     this.secondarySidecar,
     this.preloadedSidecars = const [],
     this.declinedPreference,
+    this.primaryHonorsPreference = false,
   });
 
-  const PlaybackSubtitleSelection.off({this.preloadedSidecars = const [], this.declinedPreference})
-    : primaryTrack = SubtitleTrack.off,
-      primarySourceStreamId = null,
-      primarySidecar = null,
-      secondaryTrack = null,
-      secondarySourceStreamId = null,
-      secondarySidecar = null;
+  const PlaybackSubtitleSelection.off({
+    this.preloadedSidecars = const [],
+    this.declinedPreference,
+    this.primaryHonorsPreference = false,
+  }) : primaryTrack = SubtitleTrack.off,
+       primarySourceStreamId = null,
+       primarySidecar = null,
+       secondaryTrack = null,
+       secondarySourceStreamId = null,
+       secondarySidecar = null;
 
   bool get isOff => primaryTrack.id == SubtitleTrack.off.id;
 
@@ -160,6 +171,7 @@ class PlaybackSubtitleResolver {
     SubtitlePreference? preferredSubtitleTrack,
     SubtitlePreference? preferredSecondarySubtitleTrack,
     bool preserveSourceIdentity = true,
+    bool isTranscoding = false,
   }) {
     final candidates = <_SubtitleCandidate>[];
     final matchedSidecars = <PlaybackSubtitleSidecar>{};
@@ -192,7 +204,7 @@ class PlaybackSubtitleResolver {
       metadata: metadata,
       plexMediaInfo: mediaInfo,
     );
-    final selectedAudio = service.selectAudioTrack(_audioTracksForSource(mediaInfo), preferredAudioTrack)?.track;
+    final selectedAudio = service.selectAudioTrack(audioTracksForSource(mediaInfo), preferredAudioTrack)?.track;
     final primaryPreference = _sourceBackedPreference(
       preferredSubtitleTrack,
       mediaInfo,
@@ -201,6 +213,8 @@ class PlaybackSubtitleResolver {
     );
     final primaryResult = service.selectSubtitleTrack(availableTracks, primaryPreference, selectedAudio);
     final primary = primaryResult?.track;
+    // `navigation` is the ladder's only preference-driven priority.
+    final primaryHonorsPreference = primaryResult?.priority == TrackSelectionPriority.navigation;
     // A non-off preference that still lands on off (or resolves to a track
     // this catalog cannot back) was declined, not chosen — keep it on the
     // selection so the open flow can retry it against native tracks (#1785).
@@ -211,6 +225,7 @@ class PlaybackSubtitleResolver {
       return PlaybackSubtitleSelection.off(
         preloadedSidecars: preloadedSidecars,
         declinedPreference: declinedPreference,
+        primaryHonorsPreference: primaryHonorsPreference,
       );
     }
 
@@ -219,6 +234,7 @@ class PlaybackSubtitleResolver {
       return PlaybackSubtitleSelection.off(
         preloadedSidecars: preloadedSidecars,
         declinedPreference: declinedPreference,
+        primaryHonorsPreference: primaryHonorsPreference,
       );
     }
 
@@ -238,6 +254,11 @@ class PlaybackSubtitleResolver {
       secondaryCandidate = candidates
           .where((candidate) => candidate.track.id == secondary?.id && candidate.track.id != primary.id)
           .firstOrNull;
+      // A transcode carries exactly one subtitle - the burned primary - so an embedded secondary has
+      // no route at all: no sidecar to fetch and no native track to land on. Kept in the committed
+      // selection it made `TrackManager` wait out its thirty-second deadline for a track that could
+      // never arrive, and then read as selected while nothing was on screen.
+      if (isTranscoding && secondaryCandidate?.sidecar == null) secondaryCandidate = null;
     }
 
     return PlaybackSubtitleSelection(
@@ -248,6 +269,70 @@ class PlaybackSubtitleResolver {
       secondarySourceStreamId: secondaryCandidate?.sourceStreamId,
       secondarySidecar: secondaryCandidate?.sidecar,
       preloadedSidecars: preloadedSidecars,
+      primaryHonorsPreference: primaryHonorsPreference,
+    );
+  }
+
+  /// Whether a subtitle change has to go back to the server rather than being applied to the
+  /// running player.
+  ///
+  /// Two independent reasons, both only on a transcode.
+  ///
+  /// Something is burned in right now: burned pixels are not a track, so turning them off
+  /// client-side leaves them on screen and selecting something else draws it *over* them. Every
+  /// change from that state needs a fresh negotiation, whatever it changes to.
+  ///
+  /// Or the target itself can only come from the server. On a transcode the only subtitle the
+  /// client holds is a real external file; an embedded row is delivered by being burned in, so
+  /// selecting one has to be negotiated. Applying it locally instead finds nothing attached and
+  /// reports success over a picture that never changed.
+  ///
+  /// Turning off with nothing burned is a genuine local no-op, and a direct play never burns.
+  static bool burnRequiresRenegotiation({
+    required bool isTranscoding,
+    required int? currentSourceStreamId,
+    required bool currentSelectionHasSidecar,
+    required bool targetIsOff,
+    required bool targetIsExternalFile,
+  }) {
+    if (!isTranscoding) return false;
+    if (currentSourceStreamId != null && !currentSelectionHasSidecar) return true;
+    return !targetIsOff && !targetIsExternalFile;
+  }
+
+  /// Whether the subtitle currently selected reaches the screen as burned-in
+  /// pixels rather than as a native track: [burnRequiresRenegotiation] asked
+  /// with an off target, since only a burned current selection forces the
+  /// server's hand and a selection delivered as a file stays an ordinary
+  /// native track the player can hide itself.
+  ///
+  /// A live source selection is always delivered by rebuilding the stream with
+  /// the track burned in (`isLive` never has sidecars), so it counts as a
+  /// transcode here even though no transcoding session is tracked for live.
+  ///
+  /// When this is true the engine exposes no subtitle track for the selection
+  /// and can never confirm it, so an engine cross-check must not be applied.
+  ///
+  /// [transcodeEmbedsSubtitles] marks a VOD transcode whose transport carries
+  /// the selected subtitle as a real track (Plex HTTP/MKV `subtitles=embedded`)
+  /// instead of painting it into the picture: nothing is burned, so the engine
+  /// renders, confirms and can hide it like any native track.
+  static bool burnsCurrentSelection({
+    required bool isTranscoding,
+    required bool isLive,
+    required PlaybackSourceSubtitleChoice? choice,
+    required List<PlaybackSubtitleSidecar> sidecars,
+    bool transcodeEmbedsSubtitles = false,
+  }) {
+    if (transcodeEmbedsSubtitles && !isLive) return false;
+    final sourceStreamId = choice != null && !choice.isOff ? choice.sourceStreamId : null;
+    return burnRequiresRenegotiation(
+      isTranscoding: isTranscoding || isLive,
+      currentSourceStreamId: sourceStreamId,
+      currentSelectionHasSidecar:
+          sourceStreamId != null && sidecars.any((sidecar) => sidecar.sourceStreamId == sourceStreamId),
+      targetIsOff: true,
+      targetIsExternalFile: false,
     );
   }
 
@@ -340,11 +425,14 @@ class PlaybackSubtitleResolver {
       language: track.languageCode ?? track.language,
       codec: track.codec,
       channels: track.channels,
-      isDefault: track.selected,
+      isDefault: track.isDefault,
     );
   }
 
-  static List<AudioTrack> _audioTracksForSource(MediaSourceInfo? mediaInfo) {
+  /// Every audio row of [mediaInfo] as the ladder-ranked descriptor
+  /// [audioTrackForSource] builds — the audio catalogue the selection ladder
+  /// sees before the native player has produced its own tracks.
+  static List<AudioTrack> audioTracksForSource(MediaSourceInfo? mediaInfo) {
     return [for (final track in mediaInfo?.audioTracks ?? const <MediaAudioTrack>[]) audioTrackForSource(track)];
   }
 }

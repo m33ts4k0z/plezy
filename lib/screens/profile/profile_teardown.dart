@@ -5,6 +5,8 @@ import 'package:provider/provider.dart';
 
 import '../../connection/connection_registry.dart';
 import '../../database/app_database.dart';
+import '../../database/download_collection_operations.dart';
+import '../../database/download_operations.dart';
 import '../../i18n/strings.g.dart';
 import '../../profiles/active_profile_binder.dart';
 import '../../profiles/active_profile_provider.dart';
@@ -13,19 +15,20 @@ import '../../profiles/profile.dart';
 import '../../profiles/profile_connection_cleanup.dart';
 import '../../profiles/profile_connection_registry.dart';
 import '../../profiles/profile_registry.dart';
+import '../../providers/account_preferences_controller.dart';
 import '../../providers/companion_remote_provider.dart';
 import '../../providers/download_provider.dart';
 import '../../providers/discover_provider.dart';
 import '../../providers/hidden_libraries_provider.dart';
 import '../../providers/multi_server_provider.dart';
 import '../../providers/playback_state_provider.dart';
-import '../../providers/user_profile_provider.dart';
 import '../../services/api_cache.dart';
 import '../../services/multi_server_manager.dart';
 import '../../services/storage_service.dart';
 import '../../services/system_shelf_service.dart';
 import '../../utils/app_logger.dart';
 import '../../utils/dialogs.dart';
+import '../../utils/global_key_utils.dart';
 import '../../utils/snackbar_helper.dart';
 import '../auth_screen.dart';
 
@@ -189,25 +192,38 @@ Future<bool> confirmAndDeleteProfile(
 }
 
 /// Delete a local profile and everything it owns: downloads, sync rules,
-/// queued watch actions, join rows (pruning now-unreferenced Jellyfin
-/// connections), last-used marker, and user-scoped prefs.
+/// downloads' collection membership, queued watch actions, join rows (pruning
+/// now-unreferenced Jellyfin connections), last-used marker, and user-scoped
+/// prefs.
 Future<void> deleteProfile(BuildContext context, Profile profile) async {
   final scope = SessionTeardownScope.of(context);
   final endedOwner = scope.active.activeId == profile.id ? profile.id : null;
-  if (endedOwner != null) {
-    await scope.shelf.endProfileSession(endedOwner);
-  }
-
-  try {
+  await withEndedProfileSession(scope, endedOwner, () async {
     await scope.downloads.deleteDownloadsForProfile(profile.id);
     await scope.database.deleteSyncRulesForProfile(profile.id);
+    await scope.database.deleteDownloadCollectionsForProfile(profile.id);
     await scope.database.deleteWatchActionsForProfile(profile.id);
+    await scope.database.deleteMusicSessionForProfile(profile.id);
     await scope.cleanup.removeAllProfileConnections(profile.id);
     await scope.profileRegistry.remove(profile.id);
     await scope.storage.clearProfileLastUsed(profile.id);
     await scope.storage.clearUserScopedPreferencesForProfile(profile.id);
 
     await settleSessionAfterRemoval(scope, endedShelfOwner: endedOwner);
+  });
+}
+
+/// Ends [endedOwner]'s system-shelf session (when non-null), runs [body], and
+/// on failure resumes a fresh shelf session for that owner before rethrowing.
+///
+/// Only the pause/recover scaffolding is shared: the success-path resume
+/// decision (re-begin vs rebind) belongs to each teardown flow's [body].
+Future<T> withEndedProfileSession<T>(SessionTeardownScope scope, String? endedOwner, Future<T> Function() body) async {
+  if (endedOwner != null) {
+    await scope.shelf.endProfileSession(endedOwner);
+  }
+  try {
+    return await body();
   } catch (_) {
     if (endedOwner != null) {
       await resumeFreshSystemShelf(scope, endedOwner);
@@ -218,63 +234,95 @@ Future<void> deleteProfile(BuildContext context, Profile profile) async {
 
 /// Sign out of a Plex account after confirmation: the account connection,
 /// its virtual Plex Home profiles, and their borrowed connections are all
-/// removed (#1423); surviving borrower profiles release the account's
-/// server downloads. Plex exposes no reliable single-session revoke
+/// removed (#1423). Plex exposes no reliable single-session revoke
 /// endpoint, so the server side is untouched — the user can revoke the
 /// device via plex.tv.
+///
+/// Downloads the account's profiles own are kept unless the user opts in to
+/// deleting them. Kept downloads retain their ownership rows: Plex Home
+/// profile ids derive from the account and home-user identities, so those
+/// owners become valid again when the same account signs back in, and the
+/// rows' profile-scoped Plex namespace keeps other profiles from adopting
+/// them meanwhile.
 ///
 /// Returns true when the sign-out ran, false when cancelled or the account
 /// no longer exists.
 Future<bool> confirmAndSignOutPlexAccount(BuildContext context, {required String accountConnectionId}) async {
   final account = await context.read<ConnectionRegistry>().getPlexAccount(accountConnectionId);
   if (account == null || !context.mounted) return false;
+  final accountServerIds = {for (final server in account.servers) server.clientIdentifier};
 
-  final confirmed = await showDeleteConfirmation(
-    context,
-    title: t.profiles.signOutPlexTitle,
-    message: t.profiles.signOutPlexMessage(displayName: account.displayLabel),
-    confirmText: t.profiles.signOut,
+  final database = context.read<AppDatabase>();
+  final plannedForPrompt = await planPlexAccountConnectionRemoval(
+    account: account,
+    profileConnections: context.read<ProfileConnectionRegistry>(),
   );
-  if (!confirmed || !context.mounted) return false;
+  final hasDownloads = await _plexAccountRemovalOwnsDownloads(database, plannedForPrompt, accountServerIds);
+  if (!context.mounted) return false;
+
+  final title = t.profiles.signOutPlexTitle;
+  final message = t.profiles.signOutPlexMessage(displayName: account.displayLabel);
+  final bool deleteDownloads;
+  if (hasDownloads) {
+    final choice = await showConfirmWithSwitchDialog(
+      context,
+      title: title,
+      message: message,
+      confirmText: t.profiles.signOut,
+      switchTitle: t.profiles.signOutPlexDeleteDownloads,
+      switchSubtitle: t.profiles.signOutPlexDeleteDownloadsDescription,
+      isDestructive: true,
+    );
+    if (choice == null) return false;
+    deleteDownloads = choice;
+  } else {
+    final confirmed = await showDeleteConfirmation(
+      context,
+      title: title,
+      message: message,
+      confirmText: t.profiles.signOut,
+    );
+    if (!confirmed) return false;
+    deleteDownloads = false;
+  }
+  if (!context.mounted) return false;
 
   final scope = SessionTeardownScope.of(context);
-  String? endedOwner;
   try {
+    // Re-plan: Plex Home refreshes can add join rows while the dialog is open.
     final removal = await planPlexAccountConnectionRemoval(
       account: account,
       profileConnections: scope.profileConnections,
     );
-    endedOwner = await _activeProfileUsingConnection(scope, accountConnectionId);
-    if (endedOwner != null) {
-      await scope.shelf.endProfileSession(endedOwner);
-    }
+    final endedOwner = await _activeProfileUsingConnection(scope, accountConnectionId);
+    final navigatedAway = await withEndedProfileSession(scope, endedOwner, () async {
+      if (deleteDownloads) {
+        // Physical download cleanup can fail. Finish it while the account and
+        // every ownership join still exist so a retry can resolve the same
+        // plan instead of stranding files without an owner.
+        for (final profileId in removal.removedVirtualProfileIds) {
+          await scope.downloads.deleteDownloadsForProfile(profileId);
+        }
+        for (final profileId in removal.borrowerProfileIds) {
+          await scope.downloads.releaseDownloadsForProfileServers(profileId, accountServerIds);
+        }
+      }
 
-    // Physical download cleanup can fail. Finish it while the account and
-    // every ownership join still exist so a retry can resolve the same plan
-    // instead of stranding files without an owner.
-    for (final profileId in removal.removedVirtualProfileIds) {
-      await scope.downloads.deleteDownloadsForProfile(profileId);
-    }
-    final accountServerIds = {for (final server in account.servers) server.clientIdentifier};
-    for (final profileId in removal.borrowerProfileIds) {
-      await scope.downloads.releaseDownloadsForProfileServers(profileId, accountServerIds);
-    }
+      await scope.cleanup.removePlexAccountConnection(account, plannedRemoval: removal);
+      for (final profileId in removal.removedVirtualProfileIds) {
+        await scope.database.deleteSyncRulesForProfile(profileId);
+        await scope.database.deleteDownloadCollectionsForProfile(profileId);
+        await scope.database.deleteWatchActionsForProfile(profileId);
+        await scope.database.deleteMusicSessionForProfile(profileId);
+      }
 
-    await scope.cleanup.removePlexAccountConnection(account, plannedRemoval: removal);
-    for (final profileId in removal.removedVirtualProfileIds) {
-      await scope.database.deleteSyncRulesForProfile(profileId);
-      await scope.database.deleteWatchActionsForProfile(profileId);
-    }
-
-    final navigatedAway = await settleSessionAfterRemoval(scope, rebindIfActiveKept: true, endedShelfOwner: endedOwner);
+      return settleSessionAfterRemoval(scope, rebindIfActiveKept: true, endedShelfOwner: endedOwner);
+    });
     if (!navigatedAway && context.mounted) {
       showSuccessSnackBar(context, t.profiles.signedOutPlex);
     }
     return true;
   } catch (e, st) {
-    if (endedOwner != null) {
-      await resumeFreshSystemShelf(scope, endedOwner);
-    }
     appLogger.w('Plex sign-out failed for $accountConnectionId', error: e, stackTrace: st);
     if (context.mounted) {
       showErrorSnackBar(context, t.profiles.signOutFailed);
@@ -283,12 +331,32 @@ Future<bool> confirmAndSignOutPlexAccount(BuildContext context, {required String
   }
 }
 
+/// Whether a sign-out following [removal] could release any download:
+/// everything the account's Plex Home profiles own, plus borrowers'
+/// downloads from the account's servers.
+Future<bool> _plexAccountRemovalOwnsDownloads(
+  AppDatabase database,
+  PlexAccountRemoval removal,
+  Set<String> accountServerIds,
+) async {
+  for (final profileId in removal.removedVirtualProfileIds) {
+    if ((await database.getDownloadOwnerKeysForProfile(profileId)).isNotEmpty) return true;
+  }
+  for (final profileId in removal.borrowerProfileIds) {
+    for (final globalKey in await database.getDownloadOwnerKeysForProfile(profileId)) {
+      final parsed = parseGlobalKey(globalKey);
+      if (parsed != null && accountServerIds.contains(parsed.serverId)) return true;
+    }
+  }
+  return false;
+}
+
 /// Full logout: clear every profile, connection, credential, cached API
 /// row, and user-scoped pref, then reset to [AuthScreen]. The caller
 /// confirms first.
 Future<void> logoutAllProfiles(BuildContext context) async {
   final scope = SessionTeardownScope.of(context);
-  final userProfileProvider = context.read<UserProfileProvider>();
+  final accountPreferences = context.read<AccountPreferencesController>();
   final companionRemote = context.read<CompanionRemoteProvider>();
   final playbackState = context.read<PlaybackStateProvider>();
 
@@ -298,7 +366,10 @@ Future<void> logoutAllProfiles(BuildContext context) async {
   }
 
   await companionRemote.resetForLogout();
-  await userProfileProvider.logout();
+  // Credentials and the signed-out users' server-side preferences go first so
+  // nothing below can read them back as the next sign-in's defaults.
+  await scope.storage.clearUserData();
+  accountPreferences.repository.clear();
   // Downloads are device-local data, not credentials. Keep their physical
   // files and pinned metadata, but detach profile ownership before deleting
   // the profiles so the next selected profile can adopt them.
@@ -313,11 +384,12 @@ Future<void> logoutAllProfiles(BuildContext context) async {
   await scope.storage.clearActiveProfileId();
   await scope.storage.clearAllProfileLastUsed();
   await scope.storage.clearAllUserScopedPreferences();
-  // Queued watch actions and sync rules are keyed by the profiles that just
-  // ceased to exist; left behind they'd strand forever (or worse, replay
-  // through the next sign-in's clients).
+  // Queued watch actions, sync rules and downloads' collection membership are
+  // keyed by the profiles that just ceased to exist; left behind they'd
+  // strand forever (or worse, replay through the next sign-in's clients).
   await scope.database.clearAllWatchActions();
   await scope.database.clearAllSyncRules();
+  await scope.database.clearAllDownloadCollections();
   // Preserve pinned rows backing offline downloads; all session/API data is
   // volatile and must not cross into the next sign-in.
   await ApiCache.clearRegisteredVolatile();

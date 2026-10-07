@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:plezy/media/media_backend.dart';
@@ -7,10 +9,13 @@ import 'package:plezy/media/media_kind.dart';
 import 'package:plezy/media/media_playlist.dart';
 import 'package:plezy/models/plex/play_queue_response.dart';
 import 'package:plezy/providers/playback_state_provider.dart';
+import 'package:plezy/services/media_list_playback_launcher.dart';
 import 'package:plezy/services/play_queue_launcher.dart';
 import 'package:plezy/services/plex_client.dart';
+import 'package:plezy/services/settings_service.dart';
 
 import '../test_helpers/media_items.dart';
+import '../test_helpers/prefs.dart';
 
 // Focused orchestration coverage lives here: the network response must be
 // published to PlaybackStateProvider before navigation, and a navigation
@@ -19,12 +24,16 @@ import '../test_helpers/media_items.dart';
 // jellyfin_sequential_launcher_test.dart.
 
 class _StubPlexClient implements PlexClient {
-  _StubPlexClient({this.response});
+  _StubPlexClient({this.response, this.gate});
 
   final PlayQueueResponse? response;
 
+  /// Holds [createPlayQueue] open until completed, so a test can act while the
+  /// launch's loading dialog is up.
+  final Completer<void>? gate;
+
   @override
-  Future<PlayQueueResponse?> createPlayQueue({
+  Future<PlayQueueResponse> createPlayQueue({
     String? uri,
     int? playlistID,
     required String type,
@@ -35,7 +44,8 @@ class _StubPlexClient implements PlexClient {
     String? librarySectionID,
     String? librarySectionTitle,
   }) async {
-    return response;
+    await gate?.future;
+    return response!;
   }
 
   @override
@@ -59,13 +69,12 @@ Future<BuildContext> _pumpContext(WidgetTester tester) async {
   return capturedContext;
 }
 
-PlayQueueResponse _queueWith(MediaItem item) {
+PlayQueueResponse _queueWith(MediaItem item, {bool shuffled = false}) {
   return PlayQueueResponse(
     playQueueID: 73,
     playQueueSelectedItemID: 41,
-    playQueueShuffled: false,
+    playQueueShuffled: shuffled,
     playQueueTotalCount: 1,
-    playQueueVersion: 1,
     items: [item],
   );
 }
@@ -73,22 +82,10 @@ PlayQueueResponse _queueWith(MediaItem item) {
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  // ============================================================
-  // PlayQueueResult sealed hierarchy
-  // ============================================================
-
-  group('PlayQueueResult', () {
-
-    test('PlayQueueCancelled is a distinct re-exported result', () {
-      const PlayQueueResult result = PlayQueueCancelled();
-      expect(result, isA<PlayQueueCancelled>());
-      expect(result, isNot(isA<PlayQueueError>()));
-    });
+  setUp(() async {
+    resetSharedPreferencesForTest();
+    await SettingsService.getInstance();
   });
-
-  // ============================================================
-  // Pre-flight branches that don't touch the network
-  // ============================================================
 
   group('launchShuffledShow pre-flight guard', () {
     testWidgets('returns PlayQueueError when metadata is not a show or season', (tester) async {
@@ -171,6 +168,37 @@ void main() {
       expect(navigated.single, same(item));
     });
 
+    testWidgets('Back on the loading dialog cancels the launch before it publishes or navigates', (tester) async {
+      final context = await _pumpContext(tester);
+      final item = const MediaItem.plex(id: 'movie-1', kind: MediaKind.movie, playQueueItemId: 41);
+      final gate = Completer<void>();
+      final playbackState = PlaybackStateProvider();
+      var didNavigate = false;
+      final launcher = PlexPlayQueueLauncher(
+        context: context,
+        client: _StubPlexClient(response: _queueWith(item), gate: gate),
+        playbackStateForTesting: playbackState,
+        navigateForTesting: (_) async => didNavigate = true,
+      );
+      const playlist = MediaPlaylist(id: '12', backend: MediaBackend.plex, title: 'Playlist', playlistType: 'video');
+
+      final resultFuture = launcher.launchFromCollectionOrPlaylist(item: playlist, shuffle: false);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.byType(AlertDialog), findsOneWidget);
+
+      await tester.binding.handlePopRoute();
+      await tester.pump();
+      gate.complete();
+
+      expect(await resultFuture, isA<PlayQueueCancelled>());
+      await tester.pumpAndSettle();
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(playbackState.isQueueActive, isFalse);
+      expect(didNavigate, isFalse);
+      expect(find.byType(SnackBar), findsNothing);
+    });
+
     testWidgets('navigation failure is returned as PlayQueueError, not success', (tester) async {
       final context = await _pumpContext(tester);
       final item = const MediaItem.plex(id: 'movie-1', kind: MediaKind.movie, playQueueItemId: 41);
@@ -194,6 +222,94 @@ void main() {
       expect((result as PlayQueueError).error, same(failure));
       expect(playbackState.isQueueActive, isTrue);
       expect(playbackState.currentQueueItem, same(item));
+    });
+  });
+  group('shuffle starts from beginning (#2303)', () {
+    testWidgets('strips the launched item\'s resume offset when the pref is on', (tester) async {
+      final context = await _pumpContext(tester);
+      await SettingsService.instance.write(SettingsService.shuffleStartsFromBeginning, true);
+      final item = const MediaItem.plex(
+        id: 'ep-1',
+        kind: MediaKind.episode,
+        playQueueItemId: 41,
+        viewOffsetMs: 120_000,
+      );
+      final playbackState = PlaybackStateProvider();
+      final navigated = <MediaItem>[];
+      final launcher = PlexPlayQueueLauncher(
+        context: context,
+        client: _StubPlexClient(response: _queueWith(item, shuffled: true)),
+        playbackStateForTesting: playbackState,
+        navigateForTesting: (m) async => navigated.add(m),
+      );
+      const playlist = MediaPlaylist(id: '12', backend: MediaBackend.plex, title: 'Playlist', playlistType: 'video');
+
+      final result = await launcher.launchFromCollectionOrPlaylist(
+        item: playlist,
+        shuffle: true,
+        showLoadingIndicator: false,
+      );
+
+      expect(result, isA<PlayQueueSuccess>());
+      expect(navigated.single.viewOffsetMs, 0);
+      // The queue itself keeps the server offset — only the launched copy is
+      // stripped; the in-player override covers later queue items.
+      expect(playbackState.loadedItems.single.viewOffsetMs, 120_000);
+    });
+
+    testWidgets('keeps the resume offset when the pref is off', (tester) async {
+      final context = await _pumpContext(tester);
+      final item = const MediaItem.plex(
+        id: 'ep-1',
+        kind: MediaKind.episode,
+        playQueueItemId: 41,
+        viewOffsetMs: 120_000,
+      );
+      final navigated = <MediaItem>[];
+      final launcher = PlexPlayQueueLauncher(
+        context: context,
+        client: _StubPlexClient(response: _queueWith(item, shuffled: true)),
+        playbackStateForTesting: PlaybackStateProvider(),
+        navigateForTesting: (m) async => navigated.add(m),
+      );
+      const playlist = MediaPlaylist(id: '12', backend: MediaBackend.plex, title: 'Playlist', playlistType: 'video');
+
+      final result = await launcher.launchFromCollectionOrPlaylist(
+        item: playlist,
+        shuffle: true,
+        showLoadingIndicator: false,
+      );
+
+      expect(result, isA<PlayQueueSuccess>());
+      expect(navigated.single.viewOffsetMs, 120_000);
+    });
+
+    testWidgets('keeps the resume offset on sequential launches even with the pref on', (tester) async {
+      final context = await _pumpContext(tester);
+      await SettingsService.instance.write(SettingsService.shuffleStartsFromBeginning, true);
+      final item = const MediaItem.plex(
+        id: 'ep-1',
+        kind: MediaKind.episode,
+        playQueueItemId: 41,
+        viewOffsetMs: 120_000,
+      );
+      final navigated = <MediaItem>[];
+      final launcher = PlexPlayQueueLauncher(
+        context: context,
+        client: _StubPlexClient(response: _queueWith(item)),
+        playbackStateForTesting: PlaybackStateProvider(),
+        navigateForTesting: (m) async => navigated.add(m),
+      );
+      const playlist = MediaPlaylist(id: '12', backend: MediaBackend.plex, title: 'Playlist', playlistType: 'video');
+
+      final result = await launcher.launchFromCollectionOrPlaylist(
+        item: playlist,
+        shuffle: false,
+        showLoadingIndicator: false,
+      );
+
+      expect(result, isA<PlayQueueSuccess>());
+      expect(navigated.single.viewOffsetMs, 120_000);
     });
   });
 }

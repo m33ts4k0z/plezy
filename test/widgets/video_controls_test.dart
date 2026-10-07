@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:ui' as ui;
 
+import 'package:flutter/gestures.dart' show kLongPressTimeout;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:intl/date_symbol_data_local.dart';
@@ -30,6 +31,8 @@ import 'package:plezy/widgets/video_controls/widgets/skip_marker_button.dart';
 import 'package:plezy/widgets/video_controls/widgets/sync_offset_control.dart';
 import 'package:plezy/widgets/video_controls/widgets/timeline_slider.dart';
 import 'package:plezy/widgets/video_controls/video_control_button.dart';
+import 'package:plezy/widgets/app_bar_back_button.dart';
+import 'package:plezy/widgets/system_clock.dart';
 import 'package:plezy/widgets/video_controls/widgets/video_timeline_bar.dart';
 
 import '../test_helpers/watch_together_fakes.dart';
@@ -133,15 +136,7 @@ void main() {
 
     test('returns the full list unchanged when not transcoding', () {
       final tracks = [sub(1, codec: 'srt'), sub(2, codec: 'pgs'), sub(3, codec: 'weird')];
-      expect(
-        selectableSourceSubtitleTracks(
-          tracks,
-          isTranscoding: false,
-          sidecarSourceIds: const {},
-          supportsEmbeddedTranscodeSelection: false,
-        ),
-        tracks,
-      );
+      expect(selectableSourceSubtitleTracks(tracks, isTranscoding: false, sidecarSourceIds: const {}), tracks);
     });
 
     test('keeps text, image and keyed tracks while transcoding', () {
@@ -152,7 +147,6 @@ void main() {
         [text, image, keyed],
         isTranscoding: true,
         sidecarSourceIds: {keyed.id},
-        supportsEmbeddedTranscodeSelection: true,
       );
       expect(result, [text, image, keyed]);
     });
@@ -164,24 +158,47 @@ void main() {
         [text, unsupported],
         isTranscoding: true,
         sidecarSourceIds: const {},
-        supportsEmbeddedTranscodeSelection: true,
       );
       expect(result, [text]);
     });
 
-    test('only offers resolved sidecars when embedded transcode selection is unsupported', () {
-      final external = sub(1, codec: 'srt', key: '/Videos/item/source/Subtitles/1/Stream.srt');
+    test('drops a keyed external row whose sidecar never resolved while transcoding', () {
+      // The client fetches this one itself, and on a transcode an external file is never a burn
+      // target - so with no sidecar built, nothing can draw it and reloading cannot help. Offering
+      // it left a selection that silently showed no caption. Its codec is text, which is exactly why
+      // the codec fallback must not cover keyed rows.
+      final unresolved = sub(1, codec: 'srt', key: '/library/streams/1');
       final embedded = sub(2, codec: 'srt');
-      final unavailableExternal = sub(3, codec: 'srt', key: '/missing');
+      final result = selectableSourceSubtitleTracks(
+        [unresolved, embedded],
+        isTranscoding: true,
+        sidecarSourceIds: const {},
+      );
+      expect(result, [embedded], reason: 'the embedded row can still be burned');
+    });
+
+    test('offers a burnable embedded image track that has no sidecar of its own', () {
+      // The regression this pins: a transcode burns PGS server-side, so the
+      // track deliberately has no sidecar. Gating selection on a sidecar - or on
+      // the backend - dropped it from the menu entirely, which is issue #1738's
+      // "PGS subtitles wont appear at all while transcoding". Every backend can
+      // be asked to burn, so the codec is the only thing that may exclude it.
+      final image = sub(1, codec: 'pgssub');
+      final result = selectableSourceSubtitleTracks([image], isTranscoding: true, sidecarSourceIds: const {});
+      expect(result, [image]);
+    });
+
+    test('still offers an unresolved external file only once its sidecar exists', () {
+      final resolved = sub(1, codec: 'srt', key: '/Videos/item/source/Subtitles/1/Stream.srt');
+      final unresolved = sub(2, codec: 'weird', key: '/missing');
 
       final result = selectableSourceSubtitleTracks(
-        [external, embedded, unavailableExternal],
+        [resolved, unresolved],
         isTranscoding: true,
-        sidecarSourceIds: {external.id},
-        supportsEmbeddedTranscodeSelection: false,
+        sidecarSourceIds: {resolved.id},
       );
 
-      expect(result, [external]);
+      expect(result, [resolved], reason: 'an unresolved key with an unburnable codec has no delivery route');
     });
 
     test('only offers resolved file sidecars during direct play', () {
@@ -193,7 +210,6 @@ void main() {
         [embedded, availableExternal, unavailableExternal],
         isTranscoding: false,
         sidecarSourceIds: {availableExternal.id},
-        supportsEmbeddedTranscodeSelection: false,
       );
 
       expect(result, [embedded, availableExternal]);
@@ -213,7 +229,6 @@ void main() {
         [deliveryExternalEmbedded],
         isTranscoding: false,
         sidecarSourceIds: const {},
-        supportsEmbeddedTranscodeSelection: false,
       );
 
       expect(result, [deliveryExternalEmbedded]);
@@ -558,6 +573,7 @@ void main() {
       Future<bool> Function()? exitFullscreenIfActive,
       bool physicalEscapeExitsFullscreen = true,
       bool Function()? physicalEscapeExitsFullscreenProvider,
+      bool Function()? exitPlayerBeforeChrome,
       VoidCallback? exitPlayer,
       VoidCallback? navigateHome,
       bool Function()? isActive,
@@ -569,6 +585,7 @@ void main() {
         isChromePresented: isChromePresented ?? () => chromeController.controlsPresented,
         exitFullscreenIfActive: exitFullscreenIfActive ?? () async => false,
         physicalEscapeExitsFullscreen: physicalEscapeExitsFullscreenProvider ?? () => physicalEscapeExitsFullscreen,
+        exitPlayerBeforeChrome: exitPlayerBeforeChrome,
         exitPlayer: exitPlayer ?? () {},
         navigateHome: navigateHome ?? () {},
         isActive: isActive,
@@ -621,6 +638,43 @@ void main() {
 
       expect(chromeController.controlsVisible, isTrue);
       expect(exits, 1);
+    });
+
+    testWidgets('mobile Back exits on the first press even with the chrome up (#1938)', (tester) async {
+      final chromeController = PlayerChromeController();
+      addTearDown(chromeController.dispose);
+      var exits = 0;
+      final coordinator = coordinatorFor(
+        chromeController,
+        exitPlayerBeforeChrome: () => true,
+        exitPlayer: () => exits++,
+      );
+      await pumpNavigationFocus(tester, coordinator);
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.gameButtonB);
+
+      expect(exits, 1, reason: 'a phone back must close the player even while the controls are up');
+      expect(chromeController.controlsVisible, isTrue, reason: 'no staged hide: the player leaves directly');
+    });
+
+    testWidgets('mobile Back dismisses an open prompt before exiting', (tester) async {
+      final chromeController = PlayerChromeController();
+      addTearDown(chromeController.dispose);
+      var promptDismissals = 0;
+      var exits = 0;
+      final coordinator = coordinatorFor(
+        chromeController,
+        isPromptOpen: () => true,
+        dismissPrompt: () => promptDismissals++,
+        exitPlayerBeforeChrome: () => true,
+        exitPlayer: () => exits++,
+      );
+      await pumpNavigationFocus(tester, coordinator);
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.gameButtonB);
+
+      expect(promptDismissals, 1, reason: 'prompts keep priority over the mobile exit policy');
+      expect(exits, 0);
     });
 
     testWidgets('Back exits on the first press when the route opened with no chrome', (tester) async {
@@ -872,6 +926,59 @@ void main() {
     });
   });
 
+  group('shouldDismissSkipMarkerOnBack', () {
+    bool call({
+      PlayerNavigationKey navigationKey = PlayerNavigationKey.back,
+      bool controlsVisible = false,
+      bool skipMarkerButtonVisible = true,
+      bool canControl = true,
+      bool isMobile = false,
+      bool playbackPromptOpen = false,
+    }) {
+      return shouldDismissSkipMarkerOnBack(
+        navigationKey: navigationKey,
+        controlsVisible: controlsVisible,
+        skipMarkerButtonVisible: skipMarkerButtonVisible,
+        canControl: canControl,
+        isMobile: isMobile,
+        playbackPromptOpen: playbackPromptOpen,
+      );
+    }
+
+    test('declines a skip prompt while the button is the sole affordance', () {
+      expect(call(), isTrue);
+    });
+
+    test('claims physical Escape too, which has no fullscreen role here', () {
+      expect(call(navigationKey: PlayerNavigationKey.physicalEscape), isTrue);
+    });
+
+    test('leaves Back to the screen when no skip button is up', () {
+      expect(call(skipMarkerButtonVisible: false), isFalse);
+    });
+
+    test('keeps Back on the chrome while the controls are visible', () {
+      expect(call(controlsVisible: true), isFalse);
+    });
+
+    test('leaves a phone Back unconditional, as #1938 requires', () {
+      expect(call(isMobile: true), isFalse);
+    });
+
+    test('does not eat the exit press for a viewer who cannot skip', () {
+      expect(call(canControl: false), isFalse);
+    });
+
+    test('leaves Back to a screen-level prompt that is waiting for it', () {
+      expect(call(playbackPromptOpen: true), isFalse);
+    });
+
+    test('ignores keys the screen owns outright', () {
+      expect(call(navigationKey: PlayerNavigationKey.home), isFalse);
+      expect(call(navigationKey: PlayerNavigationKey.none), isFalse);
+    });
+  });
+
   group('shouldPhysicalEscapeExitFullscreen', () {
     test('uses fullscreen-first behavior for normal Windows and Linux navigation', () {
       expect(
@@ -931,7 +1038,7 @@ void main() {
         onActivate: () => activateCount++,
       );
 
-      expect(find.text('Skip Intro (3)'), findsOneWidget);
+      expect(find.text('${t.videoControls.skipIntro} (3)'), findsOneWidget);
 
       await tester.tap(find.byType(InkWell));
       await tester.pump();
@@ -994,12 +1101,25 @@ void main() {
         onActivate: () => activateCount++,
       );
 
-      expect(find.text('Skip Intro'), findsOneWidget);
+      expect(find.text(t.videoControls.skipIntro), findsOneWidget);
 
       await tester.tap(find.byType(InkWell));
       await tester.pump();
 
       expect(activateCount, 1);
+    });
+
+    testWidgets('uses the localized marker label', (tester) async {
+      await tester.runAsync(() => LocaleSettings.setLocale(AppLocale.pt));
+      addTearDown(() => LocaleSettings.setLocaleSync(AppLocale.en));
+      final focusNode = FocusNode();
+      addTearDown(focusNode.dispose);
+
+      await _pumpSkipMarkerButton(tester, focusNode: focusNode, isAutoSkipActive: false, onActivate: () {});
+
+      expect(t.videoControls.skipIntro, 'Pular abertura');
+      expect(find.text('Pular abertura'), findsOneWidget);
+      expect(find.text('Skip Intro'), findsNothing);
     });
   });
 
@@ -1049,6 +1169,7 @@ void main() {
                 width: 1000,
                 height: 700,
                 child: DesktopVideoControls(
+                  useDpadNavigation: false,
                   player: player,
                   volumeController: volume,
                   metadata: testMediaItem(id: 'desktop'),
@@ -1129,6 +1250,148 @@ void main() {
       expect(startAutoHide, 1);
       expect(cancelAutoHide, 0);
       expect(player.commandLog.where((entry) => entry == 'play' || entry == 'pause'), isEmpty);
+    });
+  });
+
+  group('desktop timeline key seeking', () {
+    testWidgets('a press at the start of the item commits no seek on release', (tester) async {
+      // The focused timeline coalesces a held arrow into one seek on release.
+      // A first press back while already at 0:00 has nothing to preview and
+      // nothing to commit: it used to seek to the position already occupied.
+      // The forward press proves the same keys do reach the accumulator.
+      LocaleSettings.setLocaleSync(AppLocale.en);
+      await initializeDateFormatting('en');
+      tester.view.physicalSize = const Size(1200, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      resetSharedPreferencesForTest();
+      SettingsService.resetForTesting();
+      final settings = await SettingsService.getInstance();
+      final player = FakeSyncPlayer();
+      addTearDown(player.dispose);
+      final volume = VideoVolumeController(player: player, settings: settings, initialVolume: 100);
+      addTearDown(volume.dispose);
+      final seekEnds = <Duration>[];
+
+      final watchTogether = WatchTogetherProvider();
+      addTearDown(watchTogether.dispose);
+      await tester.pumpWidget(
+        ChangeNotifierProvider<WatchTogetherProvider>.value(
+          value: watchTogether,
+          child: MaterialApp(
+            theme: ThemeData(extensions: const [testMonoTokens]),
+            home: Scaffold(
+              body: SizedBox(
+                width: 1000,
+                height: 700,
+                child: DesktopVideoControls(
+                  useDpadNavigation: true,
+                  player: player,
+                  volumeController: volume,
+                  metadata: testMediaItem(id: 'desktop-timeline'),
+                  onPlayPause: () {},
+                  chapters: const [],
+                  chaptersLoaded: true,
+                  seekTimeSmall: 10,
+                  onSeekToPreviousChapter: () {},
+                  onSeekToNextChapter: () {},
+                  onSeek: (_) {},
+                  onSeekEnd: seekEnds.add,
+                  getReplayIcon: (_) => Icons.replay,
+                  getForwardIcon: (_) => Icons.forward_10,
+                  trackControlsState: const TrackControlsState(canControl: true),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+      tester.widget<VideoTimelineBar>(find.byType(VideoTimelineBar)).focusNode!.requestFocus();
+      await tester.pump();
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.arrowLeft);
+      await tester.pump();
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.arrowLeft);
+      await tester.pump();
+      expect(seekEnds, isEmpty, reason: 'nothing to rewind through, so nothing to commit');
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.arrowRight);
+      await tester.pump();
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.arrowRight);
+      await tester.pump();
+      expect(seekEnds, [const Duration(seconds: 10)]);
+    });
+  });
+
+  group('mobile header', () {
+    Future<void> pumpMobileControls(
+      WidgetTester tester, {
+      required Size physicalSize,
+      FakeViewPadding padding = FakeViewPadding.zero,
+    }) async {
+      LocaleSettings.setLocaleSync(AppLocale.en);
+      await initializeDateFormatting('en');
+      // Phone-sized viewport: 390x844 logical at 3x is ~4.9in diagonal.
+      tester.view.physicalSize = physicalSize;
+      tester.view.devicePixelRatio = 3;
+      tester.view.padding = padding;
+      addTearDown(tester.view.reset);
+      resetSharedPreferencesForTest();
+      SettingsService.resetForTesting();
+      await SettingsService.getInstance();
+      final player = FakeSyncPlayer();
+      addTearDown(player.dispose);
+      final watchTogether = WatchTogetherProvider();
+      addTearDown(watchTogether.dispose);
+
+      await tester.pumpWidget(
+        ChangeNotifierProvider<WatchTogetherProvider>.value(
+          value: watchTogether,
+          child: MaterialApp(
+            theme: ThemeData(platform: TargetPlatform.android, extensions: const [testMonoTokens]),
+            home: Scaffold(
+              body: MobileVideoControls(
+                player: player,
+                metadata: testMediaItem(id: 'mobile'),
+                chapters: const [],
+                chaptersLoaded: true,
+                seekTimeSmall: 10,
+                trackChapterControls: const SizedBox.shrink(),
+                onSeek: (_) {},
+                onSeekEnd: (_) {},
+                onPlayPause: () {},
+                onStartAutoHide: () {},
+                onCancelAutoHide: () {},
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pump();
+    }
+
+    testWidgets('portrait phone hides the clock', (tester) async {
+      await pumpMobileControls(tester, physicalSize: const Size(1170, 2532));
+      expect(find.byType(SystemClock), findsNothing, reason: 'the portrait header has no room for the clock');
+    });
+
+    testWidgets('landscape phone keeps the clock', (tester) async {
+      await pumpMobileControls(tester, physicalSize: const Size(2532, 1170));
+      expect(find.byType(SystemClock), findsOneWidget);
+    });
+
+    testWidgets('landscape phone keeps the header clear of the horizontal system insets', (tester) async {
+      // Landscape iPhone: the notch is on one side and the rounded corners on
+      // both; the video surface underneath stays full-bleed, the controls do
+      // not. View padding is in physical pixels (44 logical at 3x).
+      await pumpMobileControls(
+        tester,
+        physicalSize: const Size(2532, 1170),
+        padding: const FakeViewPadding(left: 44 * 3, right: 44 * 3),
+      );
+      final backButton = tester.getRect(find.byType(AppBarBackButton));
+      expect(backButton.left, greaterThanOrEqualTo(44));
     });
   });
 
@@ -1692,7 +1955,7 @@ void main() {
   });
 
   group('SyncOffsetControl', () {
-    testWidgets('uses 100ms slider steps without rendering tick marks', (tester) async {
+    testWidgets('uses 50ms slider steps across ±10s without rendering tick marks', (tester) async {
       LocaleSettings.setLocaleSync(AppLocale.en);
 
       await tester.pumpWidget(
@@ -1705,9 +1968,7 @@ void main() {
                 player: _FakeSyncPlayer(),
                 propertyName: 'sub-delay',
                 initialOffset: 0,
-                labelText: 'Subtitles',
                 onOffsetChanged: (_) async {},
-                compact: true,
               ),
             ),
           ),
@@ -1719,10 +1980,10 @@ void main() {
         find.ancestor(of: find.byType(Slider), matching: find.byType(SliderTheme)).first,
       );
 
-      expect(slider.min, -60000);
-      expect(slider.max, 60000);
-      expect(slider.divisions, 1200);
-      expect((slider.max - slider.min) / slider.divisions!, 100);
+      expect(slider.min, -10000);
+      expect(slider.max, 10000);
+      expect(slider.divisions, 400);
+      expect((slider.max - slider.min) / slider.divisions!, 50);
       expect(sliderTheme.data.tickMarkShape, same(SliderTickMarkShape.noTickMark));
     });
 
@@ -1741,9 +2002,7 @@ void main() {
                 player: player,
                 propertyName: 'sub-delay',
                 initialOffset: 500,
-                labelText: 'Subtitles',
                 onOffsetChanged: (offset) async => persistedOffsets.add(offset),
-                compact: true,
               ),
             ),
           ),
@@ -1787,9 +2046,7 @@ void main() {
                 player: player,
                 propertyName: 'audio-delay',
                 initialOffset: 0,
-                labelText: 'Audio',
                 onOffsetChanged: (offset) async => persistedOffsets.add(offset),
-                compact: true,
               ),
             ),
           ),
@@ -1840,11 +2097,9 @@ void main() {
                 player: player,
                 propertyName: 'sub-delay',
                 initialOffset: 0,
-                labelText: 'Subtitles',
                 onOffsetChanged: (offset) async {
                   persistedOffsets.add(offset);
                 },
-                compact: true,
               ),
             ),
           ),
@@ -1892,9 +2147,7 @@ void main() {
                 player: player,
                 propertyName: 'sub-delay',
                 initialOffset: 0,
-                labelText: 'Subtitles',
                 onOffsetChanged: (offset) async => persistedOffsets.add(offset),
-                compact: true,
               ),
             ),
           ),
@@ -1908,6 +2161,122 @@ void main() {
       await tester.pump();
 
       expect(persistedOffsets, [100]);
+    });
+
+    testWidgets('step buttons move by 50ms per tap', (tester) async {
+      final persistedOffsets = <int>[];
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData(extensions: const [testMonoTokens]),
+          home: Scaffold(
+            body: SizedBox(
+              width: 700,
+              child: SyncOffsetControl(
+                player: _FakeSyncPlayer(),
+                propertyName: 'audio-delay',
+                initialOffset: 0,
+                onOffsetChanged: (offset) async => persistedOffsets.add(offset),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.byIcon(Symbols.add_rounded));
+      await tester.pump();
+      expect(tester.widget<Slider>(find.byType(Slider)).value, 50);
+
+      await tester.tap(find.byIcon(Symbols.remove_rounded));
+      await tester.pump();
+      await tester.tap(find.byIcon(Symbols.remove_rounded));
+      await tester.pump();
+
+      expect(tester.widget<Slider>(find.byType(Slider)).value, -50);
+      expect(persistedOffsets, [50, 0, -50]);
+    });
+
+    testWidgets('long-press steps by 1s per tick', (tester) async {
+      final persistedOffsets = <int>[];
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData(extensions: const [testMonoTokens]),
+          home: Scaffold(
+            body: SizedBox(
+              width: 700,
+              child: SyncOffsetControl(
+                player: _FakeSyncPlayer(),
+                propertyName: 'audio-delay',
+                initialOffset: 0,
+                onOffsetChanged: (offset) async => persistedOffsets.add(offset),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      final gesture = await tester.startGesture(tester.getCenter(find.byIcon(Symbols.add_rounded)));
+      await tester.pump(kLongPressTimeout);
+      await tester.pump(const Duration(milliseconds: 200));
+      await tester.pump(const Duration(milliseconds: 200));
+      await gesture.up();
+      await tester.pump();
+      await tester.pump();
+
+      expect(persistedOffsets, [1000, 2000]);
+    });
+
+    testWidgets('step buttons clamp at the ±60s absolute limit beyond the slider range', (tester) async {
+      final persistedOffsets = <int>[];
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData(extensions: const [testMonoTokens]),
+          home: Scaffold(
+            body: SizedBox(
+              width: 700,
+              child: SyncOffsetControl(
+                player: _FakeSyncPlayer(),
+                propertyName: 'sub-delay',
+                initialOffset: 59980,
+                onOffsetChanged: (offset) async => persistedOffsets.add(offset),
+              ),
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.byIcon(Symbols.add_rounded));
+      await tester.pump();
+      await tester.pump();
+
+      expect(persistedOffsets, [60000]);
+      expect(tester.widget<Slider>(find.byType(Slider)).value, 10000);
+    });
+
+    testWidgets('shows the true offset while the slider thumb clamps to its range', (tester) async {
+      LocaleSettings.setLocaleSync(AppLocale.en);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: ThemeData(extensions: const [testMonoTokens]),
+          home: Scaffold(
+            body: SizedBox(
+              width: 700,
+              child: SyncOffsetControl(
+                player: _FakeSyncPlayer(),
+                propertyName: 'sub-delay',
+                initialOffset: 45000,
+                onOffsetChanged: (_) async {},
+              ),
+            ),
+          ),
+        ),
+      );
+
+      expect(find.text('+45.0s'), findsOneWidget);
+      expect(tester.widget<Slider>(find.byType(Slider)).value, 10000);
     });
   });
 

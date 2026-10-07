@@ -39,8 +39,8 @@ void main() {
       expect(result.contains('fmt=jpg'), isTrue);
     });
 
-    test('api_key redaction is case-insensitive', () {
-      final result = LogRedactionManager.redact('API_KEY=topsecret&z=1');
+    test('ApiKey redaction is case-insensitive', () {
+      final result = LogRedactionManager.redact('https://example.com/Items?ApiKey=topsecret&z=1');
       expect(result.contains('topsecret'), isFalse);
       expect(result.contains('[REDACTED]'), isTrue);
     });
@@ -340,6 +340,21 @@ void main() {
       final r2 = LogRedactionManager.redact('host https://server.example.com/');
       expect(r1.contains('server.example.com'), isFalse);
       expect(r2.contains('server.example.com'), isFalse);
+    });
+
+    test('redacts a registered plex.direct URL despite its IPv4-like address label', () {
+      const hash = '0123456789abcdef0123456789abcdef';
+      LogRedactionManager.registerServerUrl('https://203-0-113-10.$hash.plex.direct:32400');
+      final result = LogRedactionManager.redact('GET https://203-0-113-10.$hash.plex.direct:32400/library/sections');
+      expect(result, startsWith('GET [REDACTED_URL]'));
+      expect(result, isNot(contains(hash)));
+      expect(result, isNot(contains('203-')));
+    });
+
+    test('masks the server hash of an unregistered plex.direct host', () {
+      const hash = '0123456789ABCDEF0123456789abcdef';
+      final result = LogRedactionManager.redact('probe https://192-168-1-50.$hash.plex.direct:32400 failed');
+      expect(result, 'probe https://192-x-x-50.[REDACTED].plex.direct:32400 failed');
     });
 
     test('redacts the mpv-escaped form used in option-value logs', () {

@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../focus/focus_theme.dart';
 import '../focus/focusable_wrapper.dart';
 import '../media/media_item.dart';
+import '../services/settings_service.dart';
 import '../utils/platform_detector.dart';
 import 'media_card.dart';
 
@@ -19,13 +20,13 @@ class FocusableMediaCard extends StatefulWidget {
 
   /// Optional row/column position announced with this card.
   final String? semanticValue;
-  final double? width;
-  final double? height;
   final void Function(MediaItem source)? onRefresh;
   final VoidCallback? onRemoveFromContinueWatching;
   final VoidCallback? onListRefresh;
-  final bool forceGridMode;
-  final bool forceListMode;
+
+  /// Pins the inner [MediaCard] to grid or list layout; null follows the
+  /// user's view-mode setting.
+  final ViewMode? viewModeOverride;
   final bool isInContinueWatching;
   final bool usesContinueWatchingAction;
   final String? collectionId;
@@ -45,6 +46,10 @@ class FocusableMediaCard extends StatefulWidget {
 
   /// Show server name in list view (multi-server)
   final bool showServerName;
+
+  /// Library name to attribute the item with in list view, resolved by the
+  /// caller (see `LibrariesProvider.libraryLabelFor`). Null renders nothing.
+  final String? libraryName;
 
   /// Whether to disable the scale animation on focus (e.g. in list view).
   final bool disableScale;
@@ -82,13 +87,10 @@ class FocusableMediaCard extends StatefulWidget {
     super.key,
     required this.item,
     this.semanticValue,
-    this.width,
-    this.height,
     this.onRefresh,
     this.onRemoveFromContinueWatching,
     this.onListRefresh,
-    this.forceGridMode = false,
-    this.forceListMode = false,
+    this.viewModeOverride,
     this.isInContinueWatching = false,
     bool? usesContinueWatchingAction,
     this.collectionId,
@@ -97,6 +99,7 @@ class FocusableMediaCard extends StatefulWidget {
     this.fullBleedImage = false,
     this.cardShapeOverride,
     this.showServerName = false,
+    this.libraryName,
     this.disableScale = false,
     this.focusNode,
     this.onNavigateUp,
@@ -143,13 +146,10 @@ class _FocusableMediaCardState extends State<FocusableMediaCard> {
         key: _mediaCardKey,
         item: widget.item,
         semanticValue: widget.semanticValue,
-        width: widget.width,
-        height: widget.height,
         onRefresh: widget.onRefresh,
         onRemoveFromContinueWatching: widget.onRemoveFromContinueWatching,
         onListRefresh: widget.onListRefresh,
-        forceGridMode: widget.forceGridMode,
-        forceListMode: widget.forceListMode,
+        viewModeOverride: widget.viewModeOverride,
         isInContinueWatching: widget.isInContinueWatching,
         usesContinueWatchingAction: widget.usesContinueWatchingAction,
         collectionId: widget.collectionId,
@@ -158,6 +158,7 @@ class _FocusableMediaCardState extends State<FocusableMediaCard> {
         fullBleedImage: widget.fullBleedImage,
         cardShapeOverride: widget.cardShapeOverride,
         showServerName: widget.showServerName,
+        libraryName: widget.libraryName,
       ),
     );
   }

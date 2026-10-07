@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../focus/focusable_text_field.dart';
@@ -7,25 +9,57 @@ import '../mixins/controller_disposer_mixin.dart';
 import '../widgets/app_icon.dart';
 import '../widgets/dialog_action_button.dart';
 import '../widgets/focusable_list_tile.dart';
+import '../widgets/scroll_ink_boundary.dart';
 import 'focus_utils.dart';
 
 const _buttonPadding = EdgeInsets.symmetric(horizontal: 18, vertical: 14);
 const _buttonShape = StadiumBorder();
 
+final _dialogOwners = <Route<dynamic>, Set<Route<dynamic>>>{};
+
 /// Shows a dialog on the nearest navigator instead of Flutter's default root
 /// navigator. Use this for profile/session-owned modal routes so they are
-/// disposed when the active profile session is replaced.
+/// disposed when the active profile session is replaced. Ownership is captured
+/// when the route is pushed, before the dialog's builder runs.
 Future<T?> showScopedDialog<T>({
   required BuildContext context,
   required WidgetBuilder builder,
   bool barrierDismissible = true,
 }) {
-  return showDialog<T>(
+  assert(debugCheckHasMaterialLocalizations(context));
+  final navigator = Navigator.of(context);
+  final owner = ModalRoute.of(context);
+  final route = DialogRoute<T>(
     context: context,
     builder: builder,
+    themes: InheritedTheme.capture(from: context, to: navigator.context),
+    barrierColor: DialogTheme.of(context).barrierColor ?? Theme.of(context).dialogTheme.barrierColor ?? Colors.black54,
     barrierDismissible: barrierDismissible,
-    useRootNavigator: false,
+    traversalEdgeBehavior: TraversalEdgeBehavior.closedLoop,
   );
+  if (owner != null) {
+    // Snapshot ancestry so descendants remain owned even if their parent dialog
+    // completes first and its registration is removed.
+    _dialogOwners[route] = {owner, ...?_dialogOwners[owner]};
+  }
+  return navigator.push(route).whenComplete(() => _dialogOwners.remove(route));
+}
+
+/// Cancels only scoped dialogs opened by [owner], including nested dialogs.
+///
+/// Remove exact routes rather than popping the navigator: another dialog or
+/// page may now be above them, and a pending dialog may not have built yet.
+void dismissDialogsOwnedBy(Route<dynamic> owner) {
+  final dialogs = _dialogOwners.entries
+      .where((entry) => entry.value.contains(owner))
+      .map((entry) => entry.key)
+      .toList();
+  for (final dialog in dialogs.reversed) {
+    _dialogOwners.remove(dialog);
+    if (dialog.isActive) {
+      dialog.navigator!.removeRoute(dialog);
+    }
+  }
 }
 
 /// Shows a confirmation dialog with consistent button sizing and autofocus.
@@ -109,6 +143,96 @@ void showLoadingDialog(BuildContext context) {
   );
 }
 
+/// Single-shot lifecycle handle for a scoped, non-dismissible loading dialog
+/// whose owner may finish its work before the dialog's first frame renders.
+///
+/// [show] schedules the dialog without awaiting it, so callers can start
+/// network work concurrently with the dialog's first frame. [dismiss] waits
+/// for the dialog to actually mount (or its route to be disposed) before
+/// popping, and only pops while the dialog is still the current route — a
+/// player route pushed on top is never popped by accident. [dismiss] is
+/// idempotent, so a dismiss-before-navigate plus a `finally` safety net pop
+/// the dialog exactly once. Create a fresh controller per dialog.
+class ScopedLoadingDialogController {
+  BuildContext? _dialogContext;
+  bool _visible = false;
+  Completer<void>? _ready;
+
+  /// True from [show] until the dialog is dismissed or its route disposed.
+  bool get isVisible => _visible;
+
+  /// Completes once the dialog's first frame has built or its route has been
+  /// disposed, whichever comes first. Null before [show].
+  Future<void>? get ready => _ready?.future;
+
+  /// Push the dialog on the nearest scoped navigator without awaiting it.
+  /// [onDisposed] fires when the dialog route completes for any reason:
+  /// programmatic pop, back navigation, or scoped route disposal.
+  void show(BuildContext context, {required WidgetBuilder builder, VoidCallback? onDisposed}) {
+    final ready = Completer<void>();
+    _visible = true;
+    _ready = ready;
+    unawaited(
+      showScopedDialog<void>(
+        context: context,
+        barrierDismissible: false,
+        builder: (dialogContext) {
+          _dialogContext = dialogContext;
+          if (!ready.isCompleted) ready.complete();
+          return builder(dialogContext);
+        },
+      ).whenComplete(() {
+        _visible = false;
+        if (!ready.isCompleted) ready.complete();
+        onDisposed?.call();
+      }),
+    );
+  }
+
+  /// Dismiss the dialog. Safe to call before the first frame: waits for the
+  /// dialog to mount so the pop cannot land on another route.
+  Future<void> dismiss() async {
+    if (!_visible) return;
+    await _ready?.future;
+    if (!_visible) return;
+    final dialogContext = _dialogContext;
+    if (dialogContext == null || !dialogContext.mounted) {
+      _visible = false;
+      return;
+    }
+    // Only pop while the dialog is still the current route to avoid
+    // accidentally popping the player or the initiating screen.
+    final route = ModalRoute.of(dialogContext);
+    if (route?.isCurrent ?? false) {
+      Navigator.of(dialogContext).pop();
+    }
+    _visible = false;
+  }
+}
+
+/// Shows the server-side 403 modal: the server refused this account or
+/// connection. Never relay the refusal's response body: Plex's names a paid
+/// plan, which the app must not advertise (#2510).
+Future<void> showPlaybackNotAllowedDialog(BuildContext context) async {
+  await showScopedDialog<void>(
+    context: context,
+    barrierDismissible: false,
+    builder: (ctx) => AlertDialog(
+      title: Text(t.messages.playbackNotAllowedTitle),
+      content: Text(t.messages.playbackNotAllowedBody),
+      actions: [
+        DialogActionButton(
+          autofocus: true,
+          onPressed: () => Navigator.of(ctx).pop(),
+          label: t.common.close,
+          isPrimary: true,
+          style: FilledButton.styleFrom(padding: _buttonPadding, shape: _buttonShape),
+        ),
+      ],
+    ),
+  );
+}
+
 /// Shows the server-side 500 modal (bandwidth/transcoding limit rejection).
 Future<void> showServerLimitDialog(BuildContext context) async {
   await showScopedDialog<void>(
@@ -152,6 +276,29 @@ Future<void> showMediaUnreadableDialog(BuildContext context) async {
   );
 }
 
+/// Shows the server-side 503 modal: the server kept refusing to serve the
+/// stream for the whole open-phase watchdog window, so the reconnect loop is
+/// not going to start this playback (#1830).
+Future<void> showServerBusyDialog(BuildContext context) async {
+  await showScopedDialog<void>(
+    context: context,
+    barrierDismissible: false,
+    builder: (ctx) => AlertDialog(
+      title: Text(t.messages.serverBusyTitle),
+      content: Text(t.messages.serverBusyBody),
+      actions: [
+        DialogActionButton(
+          autofocus: true,
+          onPressed: () => Navigator.of(ctx).pop(),
+          label: t.common.close,
+          isPrimary: true,
+          style: FilledButton.styleFrom(padding: _buttonPadding, shape: _buttonShape),
+        ),
+      ],
+    ),
+  );
+}
+
 /// Shows a delete confirmation dialog.
 /// Convenience wrapper around [showConfirmDialog] with destructive styling.
 Future<bool> showDeleteConfirmation(
@@ -168,6 +315,73 @@ Future<bool> showDeleteConfirmation(
     confirmText: confirmText ?? t.common.delete,
     isDestructive: true,
     warning: warning,
+  );
+}
+
+/// Shows a confirmation whose destructive side effect is opt-in through one
+/// switch that starts off. Returns null when cancelled, otherwise the switch
+/// value. The confirm button takes the error colour when [isDestructive], or
+/// once the switch is on.
+Future<bool?> showConfirmWithSwitchDialog(
+  BuildContext context, {
+  required String title,
+  required String message,
+  required String confirmText,
+  required String switchTitle,
+  String? switchSubtitle,
+  bool isDestructive = false,
+  Key? switchKey,
+}) {
+  var switchValue = false;
+  return showScopedDialog<bool>(
+    context: context,
+    builder: (dialogContext) {
+      return StatefulBuilder(
+        builder: (context, setState) {
+          final colorScheme = Theme.of(context).colorScheme;
+          return AlertDialog(
+            title: Text(title),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Text(message),
+                const SizedBox(height: 12),
+                FocusableSwitchListTile(
+                  key: switchKey,
+                  value: switchValue,
+                  onChanged: (value) => setState(() => switchValue = value),
+                  title: Text(switchTitle),
+                  subtitle: switchSubtitle == null ? null : Text(switchSubtitle),
+                  contentPadding: EdgeInsets.zero,
+                ),
+              ],
+            ),
+            actions: [
+              DialogActionButton(
+                autofocus: true,
+                onPressed: () => Navigator.pop(dialogContext),
+                label: t.common.cancel,
+                style: TextButton.styleFrom(padding: _buttonPadding, shape: _buttonShape),
+              ),
+              DialogActionButton(
+                onPressed: () => Navigator.pop(dialogContext, switchValue),
+                label: confirmText,
+                isPrimary: true,
+                style: isDestructive || switchValue
+                    ? FilledButton.styleFrom(
+                        padding: _buttonPadding,
+                        shape: _buttonShape,
+                        backgroundColor: colorScheme.error,
+                        foregroundColor: colorScheme.onError,
+                      )
+                    : FilledButton.styleFrom(padding: _buttonPadding, shape: _buttonShape),
+              ),
+            ],
+          );
+        },
+      );
+    },
   );
 }
 
@@ -409,53 +623,62 @@ class _OptionPickerDialogState<T> extends State<_OptionPickerDialog<T>> {
       constraints: const BoxConstraints(minWidth: 304),
       contentPadding: const EdgeInsets.symmetric(vertical: 8),
       children: [
-        if (toggle != null)
-          MergeSemantics(
-            child: FocusableListTile(
-              title: Row(
-                children: [
-                  if (toggle.icon != null) ...[
-                    AppIcon(toggle.icon!, fill: 1, size: 24),
-                    const SizedBox(width: rowHorizontalTitleGap),
-                  ],
-                  Expanded(
-                    child: Text(
-                      toggle.label,
-                      style: Theme.of(context).textTheme.bodyLarge,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
+        // SimpleDialog owns the scroll view, so the ink boundary goes inside it.
+        ScrollInkBoundary(
+          child: Column(
+            mainAxisSize: .min,
+            crossAxisAlignment: .stretch,
+            children: [
+              if (toggle != null)
+                MergeSemantics(
+                  child: FocusableListTile(
+                    title: Row(
+                      children: [
+                        if (toggle.icon != null) ...[
+                          AppIcon(toggle.icon!, fill: 1, size: 24),
+                          const SizedBox(width: rowHorizontalTitleGap),
+                        ],
+                        Expanded(
+                          child: Text(
+                            toggle.label,
+                            style: Theme.of(context).textTheme.bodyLarge,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        const SizedBox(width: rowHorizontalTitleGap),
+                        ExcludeFocus(
+                          child: Switch(value: _toggleValue, onChanged: updateToggle),
+                        ),
+                      ],
                     ),
+                    contentPadding: rowPadding,
+                    onTap: () => updateToggle(!_toggleValue),
                   ),
-                  const SizedBox(width: rowHorizontalTitleGap),
-                  ExcludeFocus(
-                    child: Switch(value: _toggleValue, onChanged: updateToggle),
-                  ),
-                ],
-              ),
-              contentPadding: rowPadding,
-              onTap: () => updateToggle(!_toggleValue),
-            ),
+                ),
+              ...List.generate(widget.options.length, (index) {
+                final option = widget.options[index];
+                final icon = option.icon;
+                return FocusableListTile(
+                  focusNode: index == 0 && widget.focusFirstItem ? _initialFocusNode : null,
+                  leading: icon != null ? AppIcon(icon, fill: 1, size: 24) : null,
+                  title: Text(option.label, style: Theme.of(context).textTheme.bodyLarge),
+                  contentPadding: rowPadding,
+                  horizontalTitleGap: rowHorizontalTitleGap,
+                  minLeadingWidth: rowMinLeadingWidth,
+                  onTap: () async {
+                    if (widget.onBeforeClose != null) {
+                      final result = await widget.onBeforeClose!(option.value);
+                      if (context.mounted) Navigator.pop(context, result);
+                    } else {
+                      Navigator.pop(context, option.value);
+                    }
+                  },
+                );
+              }),
+            ],
           ),
-        ...List.generate(widget.options.length, (index) {
-          final option = widget.options[index];
-          final icon = option.icon;
-          return FocusableListTile(
-            focusNode: index == 0 && widget.focusFirstItem ? _initialFocusNode : null,
-            leading: icon != null ? AppIcon(icon, fill: 1, size: 24) : null,
-            title: Text(option.label, style: Theme.of(context).textTheme.bodyLarge),
-            contentPadding: rowPadding,
-            horizontalTitleGap: rowHorizontalTitleGap,
-            minLeadingWidth: rowMinLeadingWidth,
-            onTap: () async {
-              if (widget.onBeforeClose != null) {
-                final result = await widget.onBeforeClose!(option.value);
-                if (context.mounted) Navigator.pop(context, result);
-              } else {
-                Navigator.pop(context, option.value);
-              }
-            },
-          );
-        }),
+        ),
       ],
     );
   }

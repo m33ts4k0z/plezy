@@ -1,5 +1,3 @@
-import 'dart:convert';
-
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -14,6 +12,7 @@ import 'package:plezy/services/plex_api_cache.dart';
 import 'package:plezy/services/plex_client.dart';
 
 import '../test_helpers/backend_client_fixtures.dart';
+import '../test_helpers/http_fixtures.dart';
 import '../test_helpers/multi_server_fixtures.dart';
 
 void main() {
@@ -44,9 +43,6 @@ void main() {
     httpClient: httpClient,
   );
 
-  http.Response jsonResponse(Map<String, dynamic> body) =>
-      http.Response(jsonEncode(body), 200, headers: {'content-type': 'application/json'});
-
   test('Plex exposes one centralized Live TV DVR adapter', () async {
     final requests = <Uri>[];
     final client = plexClient(
@@ -70,14 +66,19 @@ void main() {
     expect(requests.single.path, '/livetv/dvrs');
   });
 
-  test('Jellyfin keeps common Live TV support without a DVR adapter', () {
-    final client = jellyfinClient(MockClient((_) async => fail('DVR adapter must not issue a request')));
+  test('Jellyfin exposes a DVR adapter that preserves the synthesized server identity', () async {
+    final client = jellyfinClient(MockClient((_) async => fail('DVR adapter access must not issue a request')));
     addTearDown(client.close);
 
     expect(client.capabilities.liveTv, isTrue);
-    expect(client.capabilities.liveTvDvr, isFalse);
-    expect(client.liveTv.dvr, isNull);
-    expect(client.liveTvDvr, isNull);
+    expect(client.capabilities.liveTvDvr, isTrue);
+    final dvr = client.liveTvDvr;
+    expect(dvr, isNotNull);
+    // No Plex-style rule re-evaluation on MediaBrowser; the bolt action hides.
+    expect(dvr!.supportsRuleProcessing, isFalse);
+    // Empty on purpose: a non-empty list would replace the synthesized
+    // `dvrKey: backend.id` identity that channels/favorites/playback key off.
+    expect(await dvr.fetchDvrs(), isEmpty);
   });
 
   test('availability call site gates DVR requests and still includes Jellyfin', () async {

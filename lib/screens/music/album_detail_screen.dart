@@ -36,6 +36,7 @@ import '../../widgets/music/track_row.dart';
 import '../../widgets/optimized_media_image.dart';
 import '../base_media_list_detail_screen.dart';
 import '../focusable_detail_screen_mixin.dart';
+import '../../utils/error_message_utils.dart';
 
 /// Detail screen for a music album: square cover header, Play/Shuffle/
 /// Instant Mix action row, and the track list rendered as grouped
@@ -43,7 +44,11 @@ import '../focusable_detail_screen_mixin.dart';
 class AlbumDetailScreen extends StatefulWidget {
   final MediaItem album;
 
-  const AlbumDetailScreen({super.key, required this.album});
+  /// Offline mode: the track list comes from [DownloadProvider] instead of
+  /// the server — the entry point for downloaded albums.
+  final bool isOffline;
+
+  const AlbumDetailScreen({super.key, required this.album, this.isOffline = false});
 
   @override
   State<AlbumDetailScreen> createState() => _AlbumDetailScreenState();
@@ -83,7 +88,9 @@ class _AlbumDetailScreenState extends BaseMediaListDetailScreen<AlbumDetailScree
   bool get hasItems => items.isNotEmpty;
 
   @override
-  Future<List<MediaItem>> fetchItems() => mediaClient.fetchAlbumTracks(widget.album.id);
+  Future<List<MediaItem>> fetchItems() => widget.isOffline
+      ? Future.value(context.read<DownloadProvider>().getDownloadedTracksForAlbum(widget.album.globalKey))
+      : mediaClient.fetchAlbumTracks(widget.album.id);
 
   @override
   Future<void> loadItems() async {
@@ -98,7 +105,7 @@ class _AlbumDetailScreenState extends BaseMediaListDetailScreen<AlbumDetailScree
   }
 
   MusicPlayContext get _playContext =>
-      MusicPlayContext(id: widget.album.id, title: widget.album.displayTitle, kind: MusicPlayContextKind.album);
+      MusicPlayContext(title: widget.album.displayTitle, kind: MusicPlayContextKind.album);
 
   /// Plays the already-fetched track list — no extra server round-trip.
   Future<void> _playAll({bool shuffle = false}) async {
@@ -112,14 +119,10 @@ class _AlbumDetailScreenState extends BaseMediaListDetailScreen<AlbumDetailScree
   Future<void> _openArtist() async {
     final parentId = widget.album.parentId;
     if (parentId == null) return;
-    MediaItem? artist;
-    try {
-      artist = await mediaClient.fetchItem(parentId);
-    } catch (e) {
-      appLogger.w('Failed to fetch artist $parentId for album ${widget.album.id}', error: e);
-    }
-    if (artist == null || !mounted) return;
-    await navigateToArtist(context, artist);
+    // Offline (or a vanished server) there is no client to resolve the artist.
+    final client = context.tryGetMediaClientWithFallback(serverIdOrNull(widget.album.serverId));
+    if (client == null) return;
+    await openArtistById(context, client, parentId);
   }
 
   void _showOverflowMenuAt(BuildContext buttonContext) {
@@ -189,7 +192,7 @@ class _AlbumDetailScreenState extends BaseMediaListDetailScreen<AlbumDetailScree
       if (mounted) showErrorSnackBar(context, t.settings.cellularDownloadBlocked);
     } catch (e) {
       appLogger.e('Failed to queue album download', error: e);
-      if (mounted) showErrorSnackBar(context, t.messages.errorLoading(error: e.toString()));
+      if (mounted) showErrorSnackBar(context, t.messages.errorLoading(error: localizedErrorReason(e)));
     }
   }
 

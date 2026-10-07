@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:drift/native.dart';
 import 'package:flutter/gestures.dart' show kDoubleTapTimeout;
 import 'package:flutter/material.dart';
@@ -90,7 +91,7 @@ void main() {
 
   Offset neutralZoneOf(WidgetTester tester) => tester.getRect(find.byType(PlexVideoControls)).center;
 
-  Future<void> pumpControls(WidgetTester tester) async {
+  Future<void> pumpControls(WidgetTester tester, {bool isLive = false}) async {
     await tester.pumpWidget(
       MultiProvider(
         providers: [
@@ -111,6 +112,7 @@ void main() {
                 toastController: toast,
                 chromeController: chrome,
                 canNavigateMediaItems: false,
+                isLive: isLive,
               ),
             ),
           ),
@@ -158,6 +160,17 @@ void main() {
     expect(player.seeks, [const Duration(minutes: 10, seconds: 10)]);
     expect(find.text('10s'), findsOneWidget);
     expect(chrome.controlsVisible, isFalse, reason: 'skipping must not raise the chrome');
+
+    await settleFeedback(tester);
+  });
+
+  testWidgets('a live stream without a capture buffer is not seeked by a double tap', (tester) async {
+    await pumpControls(tester, isLive: true);
+
+    await doubleTap(tester, forwardZoneOf(tester));
+    await doubleTap(tester, backwardZoneOf(tester));
+
+    expect(player.seeks, isEmpty, reason: 'there is no seekable window behind the live edge');
 
     await settleFeedback(tester);
   });
@@ -247,6 +260,58 @@ void main() {
     await settleFeedback(tester);
   });
 
+  testWidgets('a double tap at the end of the item reports only the distance left', (tester) async {
+    // #2425: five seconds from the end, a 10s skip travels five. The readout
+    // says so, and a second pair at the end adds nothing to it — and dispatches
+    // nothing: a seek to the position already occupied would re-poke the
+    // end-of-item trigger and announce itself to a Watch Together room.
+    player.setPosition(const Duration(minutes: 44, seconds: 55));
+    await pumpControls(tester);
+
+    await doubleTap(tester, forwardZoneOf(tester));
+    expect(player.seeks, [const Duration(minutes: 45)]);
+    expect(find.text('5s'), findsOneWidget);
+
+    await doubleTap(tester, forwardZoneOf(tester));
+    expect(find.text('5s'), findsOneWidget, reason: 'nothing left to skip through');
+    expect(find.text('15s'), findsNothing);
+    expect(player.seeks, [const Duration(minutes: 45)], reason: 'a tap that travels nothing must not seek');
+
+    await settleFeedback(tester);
+  });
+
+  testWidgets('a backward double tap at the start neither seeks nor raises a badge', (tester) async {
+    player.setPosition(Duration.zero);
+    await pumpControls(tester);
+
+    await doubleTap(tester, backwardZoneOf(tester));
+
+    expect(player.seeks, isEmpty);
+    expect(find.byType(DoubleTapFeedback), findsNothing, reason: 'a 0s badge would describe a seek not happening');
+    expect(chrome.controlsVisible, isFalse, reason: 'the pair still counts as a skip attempt, not a chrome toggle');
+
+    await settleFeedback(tester);
+  });
+
+  testWidgets('a position reported past the end counts as the end', (tester) async {
+    // The duration is authoritative; a playhead reported beyond it is a
+    // reporting artifact. A forward tap there has nowhere to go and must not
+    // clamp backwards under a forward chevron; a backward tap travels its full
+    // step from the end itself.
+    player.setPosition(const Duration(minutes: 45, milliseconds: 500));
+    await pumpControls(tester);
+
+    await doubleTap(tester, forwardZoneOf(tester));
+    expect(player.seeks, isEmpty);
+    expect(find.byType(DoubleTapFeedback), findsNothing);
+
+    await doubleTap(tester, backwardZoneOf(tester));
+    expect(player.seeks, [const Duration(minutes: 44, seconds: 50)]);
+    expect(find.text('10s'), findsOneWidget);
+
+    await settleFeedback(tester);
+  });
+
   testWidgets('an odd tap left over by a tap stream toggles the chrome', (tester) async {
     await pumpControls(tester);
 
@@ -299,6 +364,26 @@ void main() {
     await settleFeedback(tester);
   });
 
+  testWidgets('a double tap keeps its own readout while a keyboard burst is pending', (tester) async {
+    // Both input paths share one badge. The tap's seek is foreign to the
+    // keyboard accumulator, so retiring that burst must not take down the
+    // readout the tap just raised.
+    await pumpControls(tester);
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.arrowRight);
+    await tester.pump();
+    expect(find.byType(DoubleTapFeedback), findsOneWidget);
+
+    await doubleTap(tester, forwardZoneOf(tester));
+
+    expect(find.byType(DoubleTapFeedback), findsOneWidget, reason: 'the tap that just seeked owns the readout now');
+    expect(find.text('10s'), findsOneWidget, reason: 'and it counts only its own step');
+
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.arrowRight);
+    await tester.pump();
+    await settleFeedback(tester);
+  });
+
   testWidgets('a lone tap in the opposite zone does not skip', (tester) async {
     await pumpControls(tester);
 
@@ -340,9 +425,12 @@ void main() {
 /// Minimal [Player] recording seek targets against a fixed 45-minute item.
 class _RecordingPlayer implements Player {
   final List<Duration> seeks = [];
+  final StreamController<Duration?> _jumpController = StreamController<Duration?>.broadcast();
 
   bool _playing = true;
   Duration _position = const Duration(minutes: 10);
+
+  void setPosition(Duration value) => _position = value;
 
   @override
   String get playerType => 'mpv';
@@ -353,6 +441,7 @@ class _RecordingPlayer implements Player {
 
   @override
   PlayerStreams get streams => PlayerStreams(
+    playheadJump: _jumpController.stream,
     playing: const Stream<bool>.empty(),
     completed: const Stream<bool>.empty(),
     buffering: const Stream<bool>.empty(),
@@ -377,6 +466,12 @@ class _RecordingPlayer implements Player {
   Future<void> seek(Duration position) async {
     seeks.add(position);
     _position = position;
+    _jumpController.add(position);
+  }
+
+  @override
+  Future<void> dispose({bool preserveDisplayMode = false}) async {
+    await _jumpController.close();
   }
 
   @override

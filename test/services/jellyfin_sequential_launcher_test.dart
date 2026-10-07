@@ -14,12 +14,14 @@ import 'package:plezy/services/jellyfin_client.dart';
 import 'package:plezy/services/jellyfin_sequential_launcher.dart';
 import 'package:plezy/services/media_list_playback_launcher.dart';
 import 'package:plezy/services/playlist_items_loader.dart';
+import 'package:plezy/services/settings_service.dart';
 import 'package:plezy/utils/media_server_http_client.dart';
 import 'package:plezy/widgets/dialog_action_button.dart';
 import 'package:plezy/i18n/strings.g.dart';
 
 import '../test_helpers/paged_fakes.dart';
 import '../test_helpers/media_items.dart';
+import '../test_helpers/prefs.dart';
 
 /// Recording fake that satisfies [JellyfinClient] via `implements` +
 /// `noSuchMethod`. The launcher only needs the
@@ -80,12 +82,6 @@ class _RecordingJellyfinClient implements JellyfinClient {
   }
 
   @override
-  Future<List<MediaItem>> fetchPlaylistItems(String id, {int offset = 0, int limit = 100}) async {
-    final page = await fetchPlaylistPage(id, start: offset, size: limit);
-    return page.items;
-  }
-
-  @override
   Future<LibraryPage<MediaItem>> fetchPlaylistPage(String id, {int? start, int? size, AbortController? abort}) async {
     final offset = start ?? 0;
     final limit = size ?? fakeMediaPageSize;
@@ -110,6 +106,16 @@ class _RecordingJellyfinClient implements JellyfinClient {
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+/// Playlist fetch that fails before the loading dialog's first frame,
+/// exercising `executeWithLoading`'s early-failure path.
+class _ThrowingJellyfinClient extends _RecordingJellyfinClient {
+  @override
+  Future<LibraryPage<MediaItem>> fetchPlaylistPage(String id, {int? start, int? size, AbortController? abort}) async {
+    fetchPlaylistItemsCalls.add((id: id, offset: start ?? 0, limit: size ?? fakeMediaPageSize));
+    throw Exception('connection refused');
+  }
 }
 
 MediaItem _ep(String id, {ServerId? serverId}) => testMediaItem(
@@ -146,6 +152,11 @@ MediaItem _track(String id, {ServerId? serverId}) => testMediaItem(
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  setUp(() async {
+    resetSharedPreferencesForTest();
+    await SettingsService.getInstance();
+  });
 
   Future<BuildContext> pumpContext(WidgetTester tester) async {
     late BuildContext capturedContext;
@@ -390,6 +401,81 @@ void main() {
       expect(playback.isShuffleActive, isTrue);
       // The shuffle should not preserve the original order.
       expect(shuffledIds, isNot(equals(originalIds)));
+    });
+
+    testWidgets('shuffled launch strips the launched item\'s resume offset when the pref is on (#2303)', (
+      tester,
+    ) async {
+      final ctx = await pumpContext(tester);
+      await SettingsService.instance.write(SettingsService.shuffleStartsFromBeginning, true);
+      // Every item carries an offset so whichever one the shuffle lands on
+      // proves the strip.
+      final fetched = [_ep('a'), _ep('b'), _ep('c')].map((m) => m.copyWith(viewOffsetMs: 120_000)).toList();
+      final fakeClient = _RecordingJellyfinClient(playableDescendantsResponse: fetched);
+      final playback = PlaybackStateProvider();
+      final navigated = <MediaItem>[];
+
+      final launcher = JellyfinSequentialLauncher(
+        context: ctx,
+        clientForTesting: fakeClient,
+        playbackStateForTesting: playback,
+        navigateForTesting: (m) async => navigated.add(m),
+      );
+
+      final collection = testMediaItem(
+        id: 'col-1',
+        backend: MediaBackend.jellyfin,
+        kind: MediaKind.collection,
+        serverId: 'srv-jf',
+      );
+
+      final result = await launcher.launchFromCollectionOrPlaylist(
+        item: collection,
+        shuffle: true,
+        showLoadingIndicator: false,
+      );
+
+      expect(result, isA<PlayQueueSuccess>());
+      expect(navigated.single.viewOffsetMs, 0);
+      // The launched copy is the queue's own entry: membership is by identity,
+      // and the player drops a queue that does not hold the item it opened.
+      expect(playback.isItemInActiveQueue(navigated.single), isTrue);
+      // The other queue items keep their server offsets; the in-player
+      // override covers them.
+      expect(
+        playback.loadedItems.where((m) => !identical(m, navigated.single)).every((m) => m.viewOffsetMs == 120_000),
+        isTrue,
+      );
+    });
+
+    testWidgets('shuffled launch keeps the resume offset when the pref is off', (tester) async {
+      final ctx = await pumpContext(tester);
+      final fetched = [_ep('a'), _ep('b'), _ep('c')].map((m) => m.copyWith(viewOffsetMs: 120_000)).toList();
+      final fakeClient = _RecordingJellyfinClient(playableDescendantsResponse: fetched);
+      final navigated = <MediaItem>[];
+
+      final launcher = JellyfinSequentialLauncher(
+        context: ctx,
+        clientForTesting: fakeClient,
+        playbackStateForTesting: PlaybackStateProvider(),
+        navigateForTesting: (m) async => navigated.add(m),
+      );
+
+      final collection = testMediaItem(
+        id: 'col-1',
+        backend: MediaBackend.jellyfin,
+        kind: MediaKind.collection,
+        serverId: 'srv-jf',
+      );
+
+      final result = await launcher.launchFromCollectionOrPlaylist(
+        item: collection,
+        shuffle: true,
+        showLoadingIndicator: false,
+      );
+
+      expect(result, isA<PlayQueueSuccess>());
+      expect(navigated.single.viewOffsetMs, 120_000);
     });
 
     testWidgets('startItem positions playback at the matching index', (tester) async {
@@ -724,6 +810,78 @@ void main() {
       expect(result, isA<PlayQueueEmpty>());
       expect(playback.isQueueActive, isFalse);
       expect(didNavigate, isFalse);
+    });
+
+    testWidgets('fetch starts before the loading dialog first frame renders', (tester) async {
+      final ctx = await pumpContext(tester);
+      final gate = Completer<void>();
+      final fakeClient = _RecordingJellyfinClient(playlistItemsResponse: [_ep('a'), _ep('b')], playlistPageGate: gate);
+      final playback = PlaybackStateProvider();
+      var didNavigate = false;
+      final launcher = JellyfinSequentialLauncher(
+        context: ctx,
+        clientForTesting: fakeClient,
+        playbackStateForTesting: playback,
+        navigateForTesting: (_) async {
+          didNavigate = true;
+        },
+      );
+      const playlist = MediaPlaylist(
+        id: 'pl-early-fetch',
+        backend: MediaBackend.jellyfin,
+        title: 'Early fetch',
+        playlistType: 'video',
+        serverId: 'srv-jf',
+      );
+
+      final resultFuture = launcher.launchFromCollectionOrPlaylist(item: playlist, shuffle: false);
+
+      // No frame has been pumped, so the dialog has not built yet — but the
+      // network operation must already be in flight.
+      expect(fakeClient.fetchPlaylistItemsCalls, hasLength(1));
+      expect(find.byType(DialogActionButton), findsNothing);
+
+      gate.complete();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(await resultFuture, isA<PlayQueueSuccess>());
+      expect(didNavigate, isTrue);
+      expect(find.byType(DialogActionButton), findsNothing);
+    });
+
+    testWidgets('operation failure before the dialog first frame still dismisses the dialog', (tester) async {
+      final ctx = await pumpContext(tester);
+      final fakeClient = _ThrowingJellyfinClient();
+      final playback = PlaybackStateProvider();
+      var didNavigate = false;
+      final launcher = JellyfinSequentialLauncher(
+        context: ctx,
+        clientForTesting: fakeClient,
+        playbackStateForTesting: playback,
+        navigateForTesting: (_) async {
+          didNavigate = true;
+        },
+      );
+      const playlist = MediaPlaylist(
+        id: 'pl-early-error',
+        backend: MediaBackend.jellyfin,
+        title: 'Early error',
+        playlistType: 'video',
+        serverId: 'srv-jf',
+      );
+
+      final resultFuture = launcher.launchFromCollectionOrPlaylist(item: playlist, shuffle: false);
+      // The failure lands before the dialog's first frame; it must not
+      // surface as an unhandled error, and the dialog must still come down.
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(await resultFuture, isA<PlayQueueError>());
+      expect(didNavigate, isFalse);
+      expect(playback.isQueueActive, isFalse);
+      expect(find.byType(DialogActionButton), findsNothing);
+      expect(find.byType(SnackBar), findsOneWidget);
     });
 
     testWidgets('dialog Cancel aborts playlist launch idempotently without queue or snackbar', (tester) async {

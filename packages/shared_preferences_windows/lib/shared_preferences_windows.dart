@@ -211,8 +211,7 @@ base class SharedPreferencesAsyncWindows extends SharedPreferencesAsyncPlatform 
     String key,
     SharedPreferencesOptions options,
   ) async {
-    final Map<String, Object> data = await _readAll(<String>{key}, options);
-    return data[key] as String?;
+    return await _getValue(key, options) as String?;
   }
 
   @override
@@ -220,8 +219,7 @@ base class SharedPreferencesAsyncWindows extends SharedPreferencesAsyncPlatform 
     String key,
     SharedPreferencesOptions options,
   ) async {
-    final Map<String, Object> data = await _readAll(<String>{key}, options);
-    return data[key] as bool?;
+    return await _getValue(key, options) as bool?;
   }
 
   @override
@@ -229,8 +227,7 @@ base class SharedPreferencesAsyncWindows extends SharedPreferencesAsyncPlatform 
     String key,
     SharedPreferencesOptions options,
   ) async {
-    final Map<String, Object> data = await _readAll(<String>{key}, options);
-    return data[key] as double?;
+    return await _getValue(key, options) as double?;
   }
 
   @override
@@ -238,8 +235,7 @@ base class SharedPreferencesAsyncWindows extends SharedPreferencesAsyncPlatform 
     String key,
     SharedPreferencesOptions options,
   ) async {
-    final Map<String, Object> data = await _readAll(<String>{key}, options);
-    return data[key] as int?;
+    return await _getValue(key, options) as int?;
   }
 
   @override
@@ -247,8 +243,7 @@ base class SharedPreferencesAsyncWindows extends SharedPreferencesAsyncPlatform 
     String key,
     SharedPreferencesOptions options,
   ) async {
-    final Map<String, Object> data = await _readAll(<String>{key}, options);
-    return (data[key] as List<Object?>?)?.cast<String>().toList();
+    return (await _getValue(key, options) as List<Object?>?)?.cast<String>().toList();
   }
 
   @override
@@ -291,6 +286,12 @@ base class SharedPreferencesAsyncWindows extends SharedPreferencesAsyncPlatform 
     final Map<String, Object> prefs = Map<String, Object>.from(await _readPreferences(windowsOptions.fileName));
     prefs.removeWhere((String key, _) => !(allowList?.contains(key) ?? true));
     return prefs;
+  }
+
+  Future<Object?> _getValue(String key, SharedPreferencesOptions options) async {
+    final SharedPreferencesWindowsOptions windowsOptions =
+        SharedPreferencesWindowsOptions.fromSharedPreferencesOptions(options);
+    return (await _readPreferences(windowsOptions.fileName))[key];
   }
 
   Future<void> _setValue(String key, Object value, SharedPreferencesOptions options) async {
@@ -427,7 +428,29 @@ Future<bool> _writePreferences(
       staged.parent.createSync(recursive: true);
     }
     staged.writeAsStringSync(stringMap, flush: true);
-    staged.renameSync(localDataFile.path);
+    try {
+      staged.renameSync(localDataFile.path);
+    } on FileSystemException {
+      // PLEZY DELTA: a reader that denies delete sharing vetoes every rename
+      // over the document. `MoveFileExW` with MOVEFILE_REPLACE_EXISTING — and
+      // even a POSIX-semantics rename — fails while an open handle on the
+      // destination lacks FILE_SHARE_DELETE, and dart:io's own `File.open`
+      // produces exactly such a handle (`_wopen` shares read/write only), as
+      // do some antivirus and indexing services. The atomic path is not slow
+      // there; it is unavailable.
+      //
+      // Fall back to the upstream in-place rewrite: the sharing mode that
+      // blocks the rename still admits opening the document for write. This
+      // reintroduces the truncate window only while such a reader holds the
+      // store — a brief loss of crash-atomicity beats turning every
+      // preference write into a silent no-op on exactly the machines whose
+      // scanners are most likely to have damaged the store in the first
+      // place.
+      localDataFile.writeAsStringSync(stringMap, flush: true);
+      // The staging copy holds the whole document, credentials included, and
+      // was not consumed by a rename, so it must not outlive the write.
+      _removeStagingFile(localDataFile);
+    }
   } catch (e) {
     debugPrint('Error saving preferences to disk: $e');
     return false;

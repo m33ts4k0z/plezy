@@ -2,8 +2,8 @@ import 'dart:convert';
 
 import '../models/plex/plex_home.dart';
 import '../models/plex/plex_home_user.dart';
+import '../profiles/plex_home_service.dart';
 import '../profiles/profile.dart';
-import '../profiles/plex_home_cache_codec.dart';
 import '../profiles/profile_registry.dart';
 import '../services/plex_auth_service.dart';
 import '../services/server_registry.dart';
@@ -11,6 +11,7 @@ import '../services/storage_service.dart';
 import '../utils/app_logger.dart';
 import 'connection.dart';
 import 'connection_registry.dart';
+import 'plex_account_setup.dart';
 
 /// One-shot helpers that bridge between the legacy single-Plex-account
 /// SharedPreferences state (`StorageService.plexToken` +
@@ -19,24 +20,23 @@ import 'connection_registry.dart';
 ///
 /// Plex Home users are NOT persisted here — the bootstrap copies the
 /// legacy `homeUsersCache` into the per-connection
-/// `plex_home_users_{connectionId}` SharedPreferences slot so
-/// [PlexHomeService] picks it up on cold start.
+/// `plex_home_users_{connectionId}` SharedPreferences slot and asks
+/// [PlexHomeService] to reload (or fetch) it.
 class ConnectionBootstrap {
   ConnectionBootstrap({
     required this.storage,
     required this.connectionRegistry,
     required this.serverRegistry,
     required this.profileRegistry,
-    Future<List<PlexHomeUser>> Function(String accountToken)? plexHomeUserFetcher,
+    required this.plexHome,
     Future<Map<String, dynamic>> Function(String accountToken)? plexUserInfoFetcher,
-  }) : _plexHomeUserFetcher = plexHomeUserFetcher ?? fetchPlexHomeUsers,
-       _plexUserInfoFetcher = plexUserInfoFetcher ?? _fetchPlexUserInfo;
+  }) : _plexUserInfoFetcher = plexUserInfoFetcher ?? _fetchPlexUserInfo;
 
   final StorageService storage;
   final ConnectionRegistry connectionRegistry;
   final ServerRegistry serverRegistry;
   final ProfileRegistry profileRegistry;
-  final Future<List<PlexHomeUser>> Function(String accountToken) _plexHomeUserFetcher;
+  final PlexHomeService plexHome;
   final Future<Map<String, dynamic>> Function(String accountToken) _plexUserInfoFetcher;
 
   static const String _keyProfileMigrationV1Done = 'profile_migration_v1_done';
@@ -44,7 +44,7 @@ class ConnectionBootstrap {
   /// Run all idempotent boot-time migrations. Best-effort — errors are
   /// logged but never thrown.
   Future<void> run() async {
-    await seedFromDevTokenDefine();
+    final seededDevAccount = await seedFromDevTokenDefine();
     final hadLegacyPlexToken = (storage.getPlexToken() ?? '').isNotEmpty;
     final hadLegacyProfileState = _hasLegacyProfileState();
     final migratedAccount = await migrateLegacyPlexAccount();
@@ -57,11 +57,22 @@ class ConnectionBootstrap {
       }
       // Drop any plex_home rows left over from the pre-refactor data
       // model — Plex Home users are now fetched live, never persisted.
-      await profileRegistry.dropAllPlexHomeRows();
-      if (account != null) {
+      final droppedPlexHomeRows = await profileRegistry.dropAllPlexHomeRows();
+      // Only a legacy install has a profile selection to carry over. Without
+      // legacy state the flag is missing because the install is fresh or
+      // because a preference-store repair lost it (with the active profile)
+      // while the database kept the migrated accounts; selecting the Home
+      // admin then would auto-resume it on this boot, skipping the picker
+      // and its PIN.
+      final hasSelectionToMigrate =
+          hadLegacyPlexToken || hadLegacyProfileState || droppedPlexHomeRows > 0 || seededDevAccount;
+      if (account != null && hasSelectionToMigrate) {
         final prepared = await _preparePlexVirtualProfile(account);
         if (!prepared) {
           if (migratedAccount != null && hadLegacyPlexToken) {
+            // A failed/empty fetch may have left an empty cache slot on disk
+            // for the id we are about to drop; don't leave it orphaned.
+            await storage.clearPlexHomeUsersCache(migratedAccount.id);
             await connectionRegistry.remove(migratedAccount.id);
           }
           appLogger.w('Migration: could not hydrate Plex Home profiles for ${account.id}; will retry later');
@@ -90,34 +101,24 @@ class ConnectionBootstrap {
   /// [PlexAccountConnection] directly when the env var is non-empty AND
   /// the registry doesn't already have a Plex account, fetching the user
   /// info + servers like the auth screen does. No-op in normal builds.
-  Future<void> seedFromDevTokenDefine() async {
+  /// Returns whether an account was seeded.
+  Future<bool> seedFromDevTokenDefine() async {
     const devToken = String.fromEnvironment('PLEX_TOKEN');
-    if (devToken.isEmpty) return;
+    if (devToken.isEmpty) return false;
     final existing = await connectionRegistry.list();
-    if (existing.whereType<PlexAccountConnection>().isNotEmpty) return;
+    if (existing.whereType<PlexAccountConnection>().isNotEmpty) return false;
 
     try {
-      final auth = await PlexAuthService.create();
-      try {
-        final info = await auth.getUserInfo(devToken);
-        final servers = await auth.fetchServers(devToken);
-        final clientId = await storage.getOrCreateClientIdentifier();
-        final conn = PlexAccountConnection(
-          id: 'plex.$clientId',
-          accountToken: devToken,
-          clientIdentifier: clientId,
-          accountLabel: (info['username'] as String?) ?? (info['email'] as String?) ?? 'Plex',
-          servers: servers,
-          createdAt: DateTime.now(),
-          lastAuthenticatedAt: DateTime.now(),
-        );
-        await connectionRegistry.upsert(conn);
-        appLogger.i('Seeded Plex account from PLEX_TOKEN dart-define as ${conn.id}');
-      } finally {
-        auth.dispose();
-      }
+      // The dev seed always keys its row by the device client id and aborts
+      // on an identity-lookup failure — a bad PLEX_TOKEN must not seed a
+      // mislabelled row.
+      final build = await buildPlexAccountConnection(devToken, keyByAccountUuid: false, tolerateUserInfoFailure: false);
+      await connectionRegistry.upsert(build.connection);
+      appLogger.i('Seeded Plex account from PLEX_TOKEN dart-define as ${build.connection.id}');
+      return true;
     } catch (e, st) {
       appLogger.w('PLEX_TOKEN seed failed', error: e, stackTrace: st);
+      return false;
     }
   }
 
@@ -138,31 +139,17 @@ class ConnectionBootstrap {
     }
 
     try {
-      final clientId = await storage.getOrCreateClientIdentifier();
-      final servers = await serverRegistry.getServers();
-
-      String accountLabel = 'Plex';
-      String accountUuid = '';
-      try {
-        final info = await _plexUserInfoFetcher(token);
-        accountLabel = (info['username'] as String?) ?? (info['email'] as String?) ?? 'Plex';
-        accountUuid = (info['uuid'] as String?)?.trim() ?? '';
-      } catch (e) {
-        appLogger.d('Plex migration: account label lookup failed (using fallback): $e');
-      }
-
-      final conn = PlexAccountConnection(
-        id: 'plex.${accountUuid.isNotEmpty ? accountUuid : clientId}',
-        accountToken: token,
-        clientIdentifier: clientId,
-        accountLabel: accountLabel,
-        servers: servers,
-        createdAt: DateTime.now(),
-        lastAuthenticatedAt: DateTime.now(),
+      final build = await buildPlexAccountConnection(
+        token,
+        clientIdentifier: await storage.getOrCreateClientIdentifier(),
+        fetchUserInfo: _plexUserInfoFetcher,
+        // The migration wraps the cached legacy server list; a network server
+        // fetch could fail exactly when the migration must succeed offline.
+        fetchServers: (_) => serverRegistry.getServers(),
       );
-      await connectionRegistry.upsert(conn);
-      appLogger.i('Migrated legacy Plex account into ConnectionRegistry as ${conn.id}');
-      return conn;
+      await connectionRegistry.upsert(build.connection);
+      appLogger.i('Migrated legacy Plex account into ConnectionRegistry as ${build.connection.id}');
+      return build.connection;
     } catch (e, st) {
       appLogger.w('Plex account migration failed', error: e, stackTrace: st);
       return null;
@@ -173,9 +160,12 @@ class ConnectionBootstrap {
   /// profile. Plex users are never persisted as local Plezy profiles.
   Future<bool> _preparePlexVirtualProfile(PlexAccountConnection account) async {
     final copied = await _migrateLegacyPlexHomeUsersCache(account.id);
-    var users = copied ? _readPlexHomeUsersCache(account.id) : null;
-    users ??= await _fetchAndCachePlexHomeUsers(account);
-    final hydratedUsers = users;
+    if (copied) {
+      await plexHome.reloadFromStorage();
+    } else {
+      await plexHome.refresh(account);
+    }
+    final hydratedUsers = plexHome.current[account.id] ?? const [];
     if (hydratedUsers.isEmpty) return false;
 
     final legacyActiveUuid = storage.getCurrentUserUUID();
@@ -219,31 +209,6 @@ class ConnectionBootstrap {
     } catch (e, st) {
       appLogger.w('Plex Home cache migration failed', error: e, stackTrace: st);
       return false;
-    }
-  }
-
-  List<PlexHomeUser>? _readPlexHomeUsersCache(String connectionId) {
-    final raw = storage.getPlexHomeUsersCacheJson(connectionId);
-    if (raw == null || raw.isEmpty) return null;
-    try {
-      return decodePlexHomeUsersCache(raw);
-    } catch (e, st) {
-      appLogger.w('Migration: failed to read Plex Home cache for $connectionId', error: e, stackTrace: st);
-      return null;
-    }
-  }
-
-  Future<List<PlexHomeUser>> _fetchAndCachePlexHomeUsers(PlexAccountConnection account) async {
-    try {
-      final users = await _plexHomeUserFetcher(account.accountToken);
-      if (users.isNotEmpty) {
-        await storage.savePlexHomeUsersCache(account.id, encodePlexHomeUsersCache(users));
-        appLogger.i('Migration: fetched ${users.length} Plex Home users for ${account.id}');
-      }
-      return users;
-    } catch (e, st) {
-      appLogger.w('Migration: Plex Home fetch failed for ${account.id}', error: e, stackTrace: st);
-      return const [];
     }
   }
 

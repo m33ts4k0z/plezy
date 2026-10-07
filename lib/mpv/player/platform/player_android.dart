@@ -1,6 +1,7 @@
 import 'package:collection/collection.dart';
 import 'package:flutter/services.dart';
 
+import '../../../models/audio_channel_limit.dart';
 import '../../../services/device_performance.dart';
 import '../../../services/settings_service.dart';
 import '../../models.dart';
@@ -11,9 +12,8 @@ class PlayerAndroid extends PlayerBase {
   static const _methodChannel = MethodChannel('com.plezy/exo_player');
   static const _eventChannel = EventChannel('com.plezy/exo_player/events');
 
-  int? _bufferSizeBytes;
-  bool _bufferSizeIsAuto = false;
-  bool _tunnelingEnabled = true;
+  String _bufferTier = 'auto';
+  bool _tunnelingEnabled = false;
   String _dvConversionMode = 'auto';
   bool _audioNormalizationEnabled = false;
   bool _audioPassthroughEnabled = false;
@@ -55,14 +55,13 @@ class PlayerAndroid extends PlayerBase {
   @override
   String get playerType => 'exoplayer';
 
+  // ExoPlayerPlugin no-ops a dispose whose instanceId is not the core's
+  // creator, so a timed-out ownership wait may still force-dispose.
+  @override
+  bool get nativeDisposeIsStaleGuarded => true;
+
   @override
   bool get supportsSecondarySubtitles => false;
-
-  // ExoPlayer attaches external subtitles to the MediaItem before prepare;
-  // the Android mpv fallback mirrors PlayerNative by passing sub-files through
-  // loadfile options.
-  @override
-  bool get attachesExternalSubtitlesAtOpen => true;
 
   // The fallback runs mpv over MediaCodec — the same display-switch decoder
   // constraint as PlayerNative on Android. The whole startup-gate chain
@@ -113,8 +112,8 @@ class PlayerAndroid extends PlayerBase {
   Future<void> _doInitialize() async {
     try {
       final result = await invoke<bool>('initialize', {
-        'bufferSizeBytes': _bufferSizeBytes,
-        'bufferSizeAuto': _bufferSizeIsAuto,
+        'instanceId': nativeInstanceId,
+        'bufferTier': _bufferTier,
         'tunnelingEnabled': _tunnelingEnabled,
         'dvConversionMode': _dvConversionMode,
         'audioPassthroughEnabled': _audioPassthroughEnabled,
@@ -129,7 +128,7 @@ class PlayerAndroid extends PlayerBase {
       });
       if (disposed) throw StateError('Player was disposed during initialization');
       if (result != true) {
-        throw Exception('Failed to initialize ExoPlayer');
+        throw const PlayerInitializationException();
       }
 
       // Register property observers before flipping `initialized` so partial
@@ -153,7 +152,7 @@ class PlayerAndroid extends PlayerBase {
       initialized = true;
     } catch (e) {
       _initFuture = null;
-      if (!disposed) errorController.add(PlayerError('Initialization failed: $e'));
+      if (!disposed) errorController.add(PlayerError(e.toString(), cause: PlayerError.playerInitFailed));
       rethrow;
     }
   }
@@ -180,16 +179,19 @@ class PlayerAndroid extends PlayerBase {
     bool isLive = false,
     List<SubtitleTrack>? externalSubtitles,
     Duration? timelineDuration,
+    Duration timelineOffset = Duration.zero,
   }) async {
     if (disposed) return;
     await _ensureInitialized();
-    final startPosition = media.start ?? Duration.zero;
-    final hasStartPosition = media.start != null && startPosition > Duration.zero;
+    final startPosition = media.start ?? timelineOffset;
     final previousState = state;
     final previousPosition = currentPosition;
     final previousTimelineDuration = configuredTimelineDuration;
+    final previousTimelineOffset = this.timelineOffset;
     final previousExternalSubtitleMetadata = snapshotExternalSubtitleMetadata();
-    configureTimeline(duration: timelineDuration);
+    configureTimeline(duration: timelineDuration, offset: timelineOffset);
+    final sourceStart = sourcePositionFor(startPosition);
+    final hasStartPosition = media.start != null && sourceStart > Duration.zero;
     clearTracks();
     setExternalSubtitleMetadata(externalSubtitles);
     resetPlaybackProgress(startPosition);
@@ -202,7 +204,7 @@ class PlayerAndroid extends PlayerBase {
       await invoke('open', {
         'uri': media.uri,
         'headers': media.headers,
-        'startPositionMs': startPosition.inMilliseconds,
+        'startPositionMs': sourceStart.inMilliseconds,
         'hasStartPosition': hasStartPosition,
         'autoPlay': play,
         'isLive': isLive,
@@ -225,7 +227,7 @@ class PlayerAndroid extends PlayerBase {
       });
     } catch (_) {
       if (!disposed) {
-        configureTimeline(duration: previousTimelineDuration);
+        configureTimeline(duration: previousTimelineDuration, offset: previousTimelineOffset);
         restorePlaybackProgress(previousState, position: previousPosition);
         restoreTracks(previousState);
         restoreExternalSubtitleMetadata(previousExternalSubtitleMetadata);
@@ -254,7 +256,7 @@ class PlayerAndroid extends PlayerBase {
 
   @override
   Future<void> seek(Duration position) async {
-    await runSeek(position, () => invoke('seek', {'positionMs': position.inMilliseconds}));
+    await runSeek(position, () => invoke('seek', {'positionMs': sourcePositionFor(position).inMilliseconds}));
   }
 
   @override
@@ -281,19 +283,6 @@ class PlayerAndroid extends PlayerBase {
     await invoke('selectSubtitleTrack', {'trackId': track.id});
   }
 
-  /// A sidecar flagged default must not draw itself onto a hidden renderer
-  /// either; the selection pass that follows the add records it the same way
-  /// [selectSubtitleTrack] does.
-  @override
-  Future<void> addSubtitleTrack({required String uri, String? title, String? language, bool select = false}) async {
-    await invoke('addSubtitleTrack', {
-      'uri': uri,
-      'title': title,
-      'language': language,
-      'select': select && !_subtitlesHidden,
-    });
-  }
-
   @override
   Future<void> setVolume(double volume) async {
     await invoke('setVolume', {'volume': volume});
@@ -303,6 +292,9 @@ class PlayerAndroid extends PlayerBase {
   @override
   Future<void> setRate(double rate) async {
     await invoke('setRate', {'rate': rate});
+    // The ExoPlayer core emits no `speed` property, so the mirror below is the
+    // only thing that lands the rate in PlayerState — same shape as setVolume.
+    if (!disposed) setRateState(rate);
   }
 
   @override
@@ -322,14 +314,11 @@ class PlayerAndroid extends PlayerBase {
       case 'speed':
         await setRate(double.tryParse(value) ?? 1.0);
         break;
-      case 'demuxer-max-bytes':
-        _bufferSizeBytes = int.tryParse(value);
-        break;
-      // Not an mpv property. The heap tiers Dart derives for mpv's demuxer are the wrong
-      // shape for ExoPlayer's sample allocator, so on Auto the native side sizes its own
-      // LoadControl target instead of reusing `demuxer-max-bytes` (#1618).
-      case 'demuxer-max-bytes-auto':
-        _bufferSizeIsAuto = value != 'no';
+      // Not an mpv property. mpv read-ahead is owned by the mpv.conf editor; this tier is
+      // a named ExoPlayer read-ahead depth rather than a duration because the byte cap can
+      // bind first (#1816).
+      case 'exo-buffer-tier':
+        _bufferTier = value;
         break;
       case 'tunneled-playback':
         _tunnelingEnabled = value != 'no';
@@ -384,8 +373,14 @@ class PlayerAndroid extends PlayerBase {
   }
 
   @override
-  Future<void> setAudioDownmix({required bool enabled, required int centerBoostDb, required bool normalize}) async {
+  Future<void> setAudioChannelLimit(
+    AudioChannelLimit limit, {
+    required int centerBoostDb,
+    required bool normalize,
+  }) async {
     if (disposed) return;
+    final effective = limit.onExoPlayer;
+    final enabled = effective == AudioChannelLimit.stereo;
     _downmixEnabled = enabled;
     _downmixCenterBoostDb = centerBoostDb;
     _downmixNormalize = normalize;
@@ -394,8 +389,9 @@ class PlayerAndroid extends PlayerBase {
       () => _downmixEnabled == enabled && _downmixCenterBoostDb == centerBoostDb && _downmixNormalize == normalize,
     );
     // Keep the mpv properties flowing through setMpvProperty so the plugin's
-    // pendingMpvProperties replay applies downmix if exo falls back to mpv.
-    await super.setAudioDownmix(enabled: enabled, centerBoostDb: centerBoostDb, normalize: normalize);
+    // pendingMpvProperties replay applies the same limit if exo falls back to
+    // mpv mid-session.
+    await super.setAudioChannelLimit(effective, centerBoostDb: centerBoostDb, normalize: normalize);
   }
 
   @override
@@ -433,10 +429,17 @@ class PlayerAndroid extends PlayerBase {
         final stats = await getStats();
         final mode = stats['dvConversionDebugMode'];
         return mode?.toString().toLowerCase();
+      // ExoPlayer detects the rate from rendered frames (`videoFps`); its mpv
+      // fallback core reports mpv's own keys. Neither is observable, so the
+      // display-matching read goes through one stats round trip.
       case 'container-fps':
-        final fpsStats = await getStats();
-        final fps = fpsStats['videoFps'];
+        final stats = await getStats();
+        final fps = stats['container-fps'] ?? stats['videoFps'];
         return fps?.toString();
+      case 'estimated-vf-fps':
+      case 'deinterlace-active':
+        final stats = await getStats();
+        return stats[name]?.toString();
       case 'width':
       case 'dwidth':
         final stats = await getStats();
@@ -463,16 +466,6 @@ class PlayerAndroid extends PlayerBase {
     }
   }
 
-  /// Returns the device's large heap size in MB, or 0 if unavailable (Android only).
-  static Future<int> getHeapSize() async {
-    try {
-      final result = await _methodChannel.invokeMethod<int>('getHeapSize');
-      return result ?? 0;
-    } catch (e) {
-      return 0;
-    }
-  }
-
   @override
   Future<String> runtimePlayerType() async {
     if (disposed) return 'unknown';
@@ -484,40 +477,13 @@ class PlayerAndroid extends PlayerBase {
     }
   }
 
+  /// Raw mpv commands don't apply to the ExoPlayer backend. Every command
+  /// dispatched through the [Player] interface ('change-list', 'drop-buffers',
+  /// 'sub-seek', 'screenshot') targets an mpv core and has always been a
+  /// silent no-op here — including in the native MPV fallback mode.
   @override
-  Future<void> command(List<String> args) async {
-    if (disposed) return;
-    if (args.isEmpty) return;
-
-    switch (args.first) {
-      case 'loadfile':
-        if (args.length > 1) {
-          await open(Media(args[1]));
-        }
-        break;
-      case 'seek':
-        if (args.length > 1) {
-          final seconds = double.tryParse(args[1]) ?? 0;
-          final mode = args.length > 2 ? args[2] : 'relative';
-          if (mode == 'absolute') {
-            await seek(Duration(milliseconds: (seconds * 1000).toInt()));
-          } else {
-            final newPos = state.position + Duration(milliseconds: (seconds * 1000).toInt());
-            await seek(newPos);
-          }
-        }
-        break;
-      case 'stop':
-        await stop();
-        break;
-      case 'sub-add':
-        if (args.length > 1) {
-          final select = args.length > 2 && args[2] == 'select';
-          await addSubtitleTrack(uri: args[1], select: select);
-        }
-        break;
-    }
-  }
+  // ignore: no-empty-block - deliberate no-op, mpv commands target the mpv backend
+  Future<void> command(List<String> args) async {}
 
   /// Apply subtitle styling to the native ExoPlayer layer.
   ///
@@ -534,6 +500,7 @@ class PlayerAndroid extends PlayerBase {
     int subtitlePosition = 100,
     bool bold = false,
     bool italic = false,
+    bool anchorToScreen = false,
   }) async {
     if (disposed || !initialized) return;
     await invoke('setSubtitleStyle', {
@@ -546,6 +513,7 @@ class PlayerAndroid extends PlayerBase {
       'subtitlePosition': subtitlePosition,
       'bold': bold,
       'italic': italic,
+      'anchorToScreen': anchorToScreen,
     });
   }
 
@@ -571,6 +539,7 @@ class PlayerAndroid extends PlayerBase {
     int extraDelayMs = 0,
     int videoWidth = 0,
     int videoHeight = 0,
+    bool matchResolution = false,
   }) async {
     if (disposed || !initialized) return false;
     final result = await invoke<bool>('setVideoFrameRate', {
@@ -579,6 +548,7 @@ class PlayerAndroid extends PlayerBase {
       'extraDelayMs': extraDelayMs,
       'videoWidth': videoWidth,
       'videoHeight': videoHeight,
+      'matchResolution': matchResolution,
     });
     return result ?? false;
   }

@@ -10,14 +10,12 @@ import '../media/media_playlist.dart';
 import '../models/plex/play_queue_response.dart';
 import '../providers/multi_server_provider.dart';
 import '../providers/playback_state_provider.dart';
+import '../utils/media_server_http_client.dart';
 import '../utils/video_player_navigation.dart';
 import '../i18n/strings.g.dart';
 import 'media_list_playback_launcher.dart';
 import 'plex_client.dart';
-
-// Re-export the result types so existing imports of this file keep working.
-export 'media_list_playback_launcher.dart'
-    show PlayQueueResult, PlayQueueSuccess, PlayQueueEmpty, PlayQueueCancelled, PlayQueueError;
+import 'settings_service.dart';
 
 /// Plex-specific play queue launcher.
 ///
@@ -111,13 +109,18 @@ class PlexPlayQueueLauncher extends MediaListPlaybackLauncher {
     final ratingKey = facts.id;
     final itemServerId = facts.serverId ?? serverId;
     final itemServerName = facts.serverName ?? serverName;
+    // The loading dialog's Cancel/Back aborts the launch. The Plex queue
+    // requests cannot be torn down mid-flight, so each step checks it
+    // instead and a cancelled launch never publishes or navigates.
+    final abort = AbortController();
 
     return executeWithLoading(
       context: context,
       showLoading: showLoadingIndicator,
       actionLabel: t.common.shuffle,
+      abort: abort,
       execute: (dismissLoading) async {
-        PlayQueueResponse? playQueue;
+        PlayQueueResponse playQueue;
         final sourceLibraryId = facts.isCollection && item is MediaItem ? item.libraryId : null;
         final sourceLibraryTitle = facts.isCollection && item is MediaItem ? item.libraryTitle : null;
         // Plex's `key` param positions the queue's selected item — passed
@@ -127,6 +130,7 @@ class PlexPlayQueueLauncher extends MediaListPlaybackLauncher {
 
         if (facts.isCollection) {
           final machineId = client.config.machineIdentifier ?? await client.getMachineIdentifier();
+          abort.throwIfAborted();
 
           if (machineId == null) {
             throw Exception('Could not get server machine identifier');
@@ -151,10 +155,13 @@ class PlexPlayQueueLauncher extends MediaListPlaybackLauncher {
           );
         }
 
+        abort.throwIfAborted();
         playQueue = await _refetchIfEmpty(playQueue, libraryId: sourceLibraryId, libraryTitle: sourceLibraryTitle);
+        abort.throwIfAborted();
 
         // Close loading dialog before navigating to the player
         await dismissLoading();
+        abort.throwIfAborted();
 
         return _launchFromQueue(
           playQueue: playQueue,
@@ -164,6 +171,7 @@ class PlexPlayQueueLauncher extends MediaListPlaybackLauncher {
           libraryId: sourceLibraryId,
           libraryTitle: sourceLibraryTitle,
           selectedItem: selectedKey != null ? _resolveSelectedMediaItem(playQueue) : null,
+          shuffle: shuffle,
         );
       },
     );
@@ -178,10 +186,13 @@ class PlexPlayQueueLauncher extends MediaListPlaybackLauncher {
       return PlayQueueError(Exception('Shuffle play only works for shows and seasons'));
     }
 
+    final abort = AbortController();
+
     return executeWithLoading(
       context: context,
       showLoading: showLoadingIndicator,
       actionLabel: t.common.shuffle,
+      abort: abort,
       execute: (dismissLoading) async {
         // Determine the rating key for the play queue
         String showRatingKey;
@@ -201,9 +212,11 @@ class PlexPlayQueueLauncher extends MediaListPlaybackLauncher {
           librarySectionID: metadata.libraryId,
           librarySectionTitle: metadata.libraryTitle,
         );
+        abort.throwIfAborted();
 
         // Close loading dialog before navigating to the player
         await dismissLoading();
+        abort.throwIfAborted();
 
         return _launchFromQueue(
           playQueue: playQueue,
@@ -212,6 +225,7 @@ class PlexPlayQueueLauncher extends MediaListPlaybackLauncher {
           serverName: metadata.serverName ?? serverName,
           libraryId: metadata.libraryId,
           libraryTitle: metadata.libraryTitle,
+          shuffle: true,
           copyServerInfo: true,
         );
       },
@@ -234,12 +248,16 @@ class PlexPlayQueueLauncher extends MediaListPlaybackLauncher {
     final libraryId = folder.libraryId;
     final libraryTitle = folder.libraryTitle;
 
+    final abort = AbortController();
+
     return executeWithLoading(
       context: context,
       showLoading: showLoadingIndicator,
       actionLabel: shuffle ? t.common.shuffle : t.common.play,
+      abort: abort,
       execute: (dismissLoading) async {
         final folderUri = await client.buildFolderUri(folderKey);
+        abort.throwIfAborted();
 
         var playQueue = await client.createPlayQueue(
           uri: folderUri,
@@ -249,15 +267,19 @@ class PlexPlayQueueLauncher extends MediaListPlaybackLauncher {
           librarySectionTitle: libraryTitle,
         );
 
+        abort.throwIfAborted();
         playQueue = await _refetchIfEmpty(playQueue, libraryId: libraryId, libraryTitle: libraryTitle);
+        abort.throwIfAborted();
 
         await dismissLoading();
+        abort.throwIfAborted();
 
         return _launchFromQueue(
           playQueue: playQueue,
           ratingKey: folderKey,
           serverId: serverIdOrNull(serverId),
           serverName: serverName,
+          shuffle: shuffle,
           libraryId: libraryId,
           libraryTitle: libraryTitle,
         );
@@ -267,12 +289,12 @@ class PlexPlayQueueLauncher extends MediaListPlaybackLauncher {
 
   /// Creation sometimes returns a queue without its items; re-read it by ID
   /// and keep the refetched copy only when it actually carries items.
-  Future<PlayQueueResponse?> _refetchIfEmpty(
-    PlayQueueResponse? playQueue, {
+  Future<PlayQueueResponse> _refetchIfEmpty(
+    PlayQueueResponse playQueue, {
     String? libraryId,
     String? libraryTitle,
   }) async {
-    if (playQueue == null || (playQueue.items != null && playQueue.items!.isNotEmpty)) {
+    if (playQueue.items != null && playQueue.items!.isNotEmpty) {
       return playQueue;
     }
     final fetchedQueue = await client.getPlayQueue(
@@ -287,9 +309,17 @@ class PlexPlayQueueLauncher extends MediaListPlaybackLauncher {
   }
 
   /// Core method to launch playback from a play queue.
+  ///
+  /// [shuffle] marks a shuffled launch: with
+  /// [SettingsService.shuffleStartsFromBeginning] the launched item's resume
+  /// offset is stripped so external players — which read
+  /// [MediaItem.viewOffsetMs] directly and cannot take an explicit start
+  /// position — also open at 0:00. The built-in player applies the same
+  /// override per item in `resolveOpenResumePosition`.
   Future<PlayQueueResult> _launchFromQueue({
     required PlayQueueResponse? playQueue,
     required String ratingKey,
+    required bool shuffle,
     ServerId? serverId,
     String? serverName,
     String? libraryId,
@@ -334,10 +364,27 @@ class PlexPlayQueueLauncher extends MediaListPlaybackLauncher {
       );
     }
 
+    // Shuffle + "start at beginning" (#2303): strip the resume offset so
+    // external players — which read viewOffsetMs directly and cannot take an
+    // explicit start position — also open at 0:00, and skip the watch-state
+    // re-resolve that would restore it. The built-in player applies the same
+    // override per item in resolveOpenResumePosition.
+    var stripResumeOffset = false;
+    if (shuffle && (itemToPlay.viewOffsetMs ?? 0) > 0) {
+      stripResumeOffset = (await SettingsService.getInstance()).read(SettingsService.shuffleStartsFromBeginning);
+      if (stripResumeOffset) {
+        itemToPlay = itemToPlay.copyWith(viewOffsetMs: 0);
+      }
+    }
+
+    if (!context.mounted && navigateForTesting == null) {
+      return const PlayQueueError('Context not mounted');
+    }
+
     if (navigateForTesting != null) {
       await navigateForTesting!(itemToPlay);
     } else {
-      await navigateToVideoPlayer(context, metadata: itemToPlay);
+      await navigateToVideoPlayer(context, metadata: itemToPlay, resolveWatchState: !stripResumeOffset);
     }
 
     return const PlayQueueSuccess();

@@ -1,9 +1,77 @@
 import 'package:flutter_test/flutter_test.dart';
 import 'package:plezy/media/media_file_info.dart';
+import 'package:plezy/media/media_source_info.dart';
 import 'package:plezy/services/plex_playback_mapper.dart';
+import 'package:plezy/services/plex_mappers.dart';
 
 void main() {
   group('parsePlexVideoPlaybackDataFromJson', () {
+    test('cache prediction resolves the same id, signature, playable version and part as playback', () {
+      Map<String, dynamic> part(int id, String language, {bool accessible = true}) => {
+        'id': id,
+        'key': '/library/parts/$id/file.mkv',
+        'accessible': accessible,
+        'Stream': [
+          {'id': id * 10, 'streamType': 2, 'languageCode': language, 'selected': true},
+        ],
+      };
+      final first = {
+        'id': 1,
+        'videoResolution': '1080',
+        'videoCodec': 'h264',
+        'container': 'mkv',
+        'Part': [part(10, 'eng')],
+      };
+      final alternate = {
+        'id': 2,
+        'videoResolution': '4k',
+        'videoCodec': 'hevc',
+        'container': 'mkv',
+        'Part': [part(20, 'fre', accessible: false), part(21, 'jpn')],
+      };
+      void expectSelection(
+        List<Map<String, dynamic>> media, {
+        String? id,
+        String? signature,
+        required String language,
+        required int index,
+      }) {
+        final raw = <String, dynamic>{'Media': media};
+        final cached = plexMediaSourceInfoFromCacheJson(raw, mediaSourceId: id, preferredVersionSignature: signature)!;
+        final playback = parsePlexVideoPlaybackDataFromJson(
+          raw,
+          baseUrl: 'http://plex',
+          token: null,
+          selectedMediaSourceId: id,
+          preferredVersionSignature: signature,
+        );
+        expect(cached.audioTracks.single.languageCode, language);
+        expect(playback.mediaInfo!.audioTracks.single.languageCode, language);
+        expect(cached.mediaIndex, index);
+        expect(cached.partId, playback.mediaInfo!.partId);
+        expect(cached.partIndex, playback.selectedPartIndex);
+        expect(cached.mediaSourceId, playback.mediaInfo!.mediaSourceId);
+      }
+
+      expectSelection([first, alternate], id: '2', signature: '1080:h264:mkv', language: 'jpn', index: 1);
+      expectSelection([alternate, first], id: '2', language: 'jpn', index: 0);
+      expectSelection([first, alternate], id: 'sibling-source', signature: '4k:hevc:mkv', language: 'jpn', index: 1);
+      final unavailable = {
+        ...alternate,
+        'Part': [part(20, 'jpn', accessible: false)],
+      };
+      expectSelection([first, unavailable], id: '2', language: 'eng', index: 0);
+      expectSelection([unavailable, first], language: 'eng', index: 1);
+      expectSelection([first], id: '2', signature: '4k:hevc:mkv', language: 'eng', index: 0);
+      // Offline source metadata stays pinned even when the server says the
+      // downloaded version is no longer remotely accessible.
+      final raw = <String, dynamic>{
+        'Media': [first, unavailable],
+      };
+      final downloaded = resolvePlexPlaybackSelection(raw, mediaIndex: 1, preferPlayable: false)!;
+      expect(plexMediaSourceInfoForSelection(raw, downloaded)!.audioTracks.single.languageCode, 'jpn');
+    });
+
     test('falls back from inaccessible selected version to playable version', () {
       late (int, int) fallback;
 
@@ -475,4 +543,90 @@ void main() {
       expect(subtitles.map((stream) => stream.ordinal), [1, 2, 3]);
     });
   });
+
+  group('stacked parts', () {
+    // `Movie - Part 1/2/3`: 50, 40 and 30 minutes, each with its own
+    // external subtitle stream.
+    Map<String, dynamic> stacked({bool secondExists = true, bool thirdHasDuration = true}) => {
+      'duration': 7200000,
+      'Media': [
+        {
+          'id': 1,
+          'duration': 7200000,
+          'Part': [
+            for (final (index, durationMs) in [(1, 3000000), (2, 2400000), (3, 1800000)])
+              {
+                'id': 10 + index,
+                'key': '/library/parts/${10 + index}/file.mkv',
+                if (index != 3 || thirdHasDuration) 'duration': durationMs,
+                'exists': index == 2 && !secondExists ? 0 : 1,
+                'Stream': [
+                  {'streamType': 1, 'id': 100 + index},
+                  {
+                    'streamType': 3,
+                    'id': 300 + index,
+                    'key': '/library/streams/${300 + index}',
+                    'codec': 'srt',
+                    'languageCode': 'eng',
+                  },
+                ],
+              },
+          ],
+        },
+      ],
+    };
+
+    _OpenedPart open(Map<String, dynamic> raw, {Duration? position}) {
+      final data = parsePlexVideoPlaybackDataFromJson(raw, baseUrl: 'http://plex', token: null, position: position);
+      return (url: data.videoUrl, partIndex: data.selectedPartIndex, info: data.mediaInfo!);
+    }
+
+    test('opens the file holding the start position, placed on the item timeline', () {
+      final first = open(stacked());
+      expect(first.url, 'http://plex/library/parts/11/file.mkv');
+      final timeline = first.info.partTimeline!;
+      expect(timeline.currentIndex, 0);
+      expect(timeline.duration, const Duration(minutes: 120));
+      expect(timeline.parts.map((part) => part.start), const [
+        Duration.zero,
+        Duration(minutes: 50),
+        Duration(minutes: 90),
+      ]);
+
+      // A boundary belongs to the file that starts there, and that file's own
+      // streams describe the source.
+      final second = open(stacked(), position: const Duration(minutes: 50));
+      expect(second.url, 'http://plex/library/parts/12/file.mkv');
+      expect(second.partIndex, 1);
+      expect(second.info.partId, 12);
+      expect(second.info.partTimeline!.current.start, const Duration(minutes: 50));
+      expect(second.info.subtitleTracks.single.id, 302);
+
+      expect(open(stacked(), position: const Duration(minutes: 89, seconds: 59)).partIndex, 1);
+      // Past the end is still the last file.
+      expect(open(stacked(), position: const Duration(hours: 3)).partIndex, 2);
+    });
+
+    test('a file that is gone plays on from the next one that is there', () {
+      final opened = open(stacked(secondExists: false), position: const Duration(minutes: 60));
+      expect(opened.url, 'http://plex/library/parts/13/file.mkv');
+      expect(opened.info.partTimeline!.currentIndex, 2);
+
+      // A downloaded copy is on disk whatever the server says.
+      final cached = resolvePlexPlaybackSelection(
+        stacked(secondExists: false),
+        preferPlayable: false,
+        position: const Duration(minutes: 60),
+      )!;
+      expect(cached.partIndex, 1);
+    });
+
+    test('a part without a duration leaves the version unstacked', () {
+      final opened = open(stacked(thirdHasDuration: false), position: const Duration(minutes: 60));
+      expect(opened.url, 'http://plex/library/parts/11/file.mkv');
+      expect(opened.info.partTimeline, isNull);
+    });
+  });
 }
+
+typedef _OpenedPart = ({String? url, int partIndex, MediaSourceInfo info});

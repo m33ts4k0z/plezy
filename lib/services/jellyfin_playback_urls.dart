@@ -4,6 +4,7 @@
 String buildJellyfinDirectStreamUrl({
   required String baseUrl,
   required String accessToken,
+  required String tokenQueryParam,
   required String deviceId,
   required String itemId,
   String mediaSegment = 'Videos',
@@ -12,10 +13,11 @@ String buildJellyfinDirectStreamUrl({
   String? playSessionId,
   String? liveStreamId,
   int? audioStreamIndex,
+  bool containerExtension = false,
 }) {
   final params = <String, String>{
     'Static': 'true',
-    'api_key': accessToken,
+    tokenQueryParam: accessToken,
     'DeviceId': deviceId,
     'Container': ?container,
     'MediaSourceId': ?mediaSourceId,
@@ -24,19 +26,35 @@ String buildJellyfinDirectStreamUrl({
     'AudioStreamIndex': ?audioStreamIndex?.toString(),
   };
   final encodedItem = Uri.encodeComponent(itemId);
-  return '$baseUrl/$mediaSegment/$encodedItem/stream?${_encodeQuery(params)}';
+  // `stream.{container}` is the canonical direct-play shape Jellyfin's own
+  // clients hand external players: the extension is the only hint a player
+  // gets about the payload (a bare `stream` path gives it nothing to sniff
+  // for, which is fatal for disc images like ISO). Restricted to callers that
+  // opt in via [containerExtension]; the extension is sanitized to a plain
+  // alphanumeric suffix so a malformed Container can't inject path segments.
+  final extension = containerExtension ? _safeContainerExtension(container) : null;
+  final streamPath = extension == null ? 'stream' : 'stream.$extension';
+  return '$baseUrl/$mediaSegment/$encodedItem/$streamPath?${_encodeQuery(params)}';
+}
+
+String? _safeContainerExtension(String? container) {
+  final value = container?.trim();
+  if (value == null || value.isEmpty) return null;
+  // Lowercased to match jellyfin-web's `stream.{container}` construction.
+  return RegExp(r'^[A-Za-z0-9]+$').hasMatch(value) ? value.toLowerCase() : null;
 }
 
 String buildJellyfinTrickplayTileUrl({
   required String baseUrl,
   required String accessToken,
+  required String tokenQueryParam,
   required String deviceId,
   required String itemId,
   required int width,
   required int sheetIndex,
   String? mediaSourceId,
 }) {
-  final params = <String, String>{'api_key': accessToken, 'DeviceId': deviceId, 'MediaSourceId': ?mediaSourceId};
+  final params = <String, String>{tokenQueryParam: accessToken, 'DeviceId': deviceId, 'MediaSourceId': ?mediaSourceId};
   final encodedItem = Uri.encodeComponent(itemId);
   return '$baseUrl/Videos/$encodedItem/Trickplay/$width/$sheetIndex.jpg?${_encodeQuery(params)}';
 }

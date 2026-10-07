@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/widgets.dart';
 
@@ -44,6 +45,11 @@ mixin PaginatedItemLoader<T, W extends StatefulWidget> on State<W> {
   /// Re-invoked by the retry timer. Most recent range-load args.
   VoidCallback? _scheduledRetry;
 
+  /// Size of the page whose response set [totalSize] to a [fallbackPageTotal]
+  /// sentinel (a full page, total claimed one past it), or null when the total
+  /// looks authoritative. Such a total is no bound on the next request.
+  int? _openEndedPageSize;
+
   /// Fetch a page of items. Subclass implements this — typically delegating
   /// to a paginated client method that returns a [LibraryPage].
   Future<LibraryPage<T>> fetchPage(int start, int size, AbortController? abort);
@@ -69,9 +75,18 @@ mixin PaginatedItemLoader<T, W extends StatefulWidget> on State<W> {
     _lastEagerPrefetch = null;
     _scheduledRetry = null;
     _paginationError = null;
+    _openEndedPageSize = null;
     loadedItems.clear();
     _loadingRanges.clear();
     totalSize = 0;
+  }
+
+  /// Record whether [page], fetched from [start] with [requestedSize], carries
+  /// a [fallbackPageTotal] sentinel rather than the server's own count.
+  void _trackOpenEndedTotal(int start, int requestedSize, LibraryPage<T> page) {
+    final count = page.items.length;
+    final sentinel = requestedSize > 0 && count >= requestedSize && page.totalCount == start + count + 1;
+    _openEndedPageSize = sentinel ? requestedSize : null;
   }
 
   /// Fetch the first page. Await from outside `setState`. Mutates
@@ -100,6 +115,7 @@ mixin PaginatedItemLoader<T, W extends StatefulWidget> on State<W> {
       loadedItems[i] = result.items[i];
     }
     totalSize = result.totalCount;
+    _trackOpenEndedTotal(0, pageSize, result);
     onPageLoaded(0, result.items);
     return (page: result, applied: true);
   }
@@ -163,7 +179,10 @@ mixin PaginatedItemLoader<T, W extends StatefulWidget> on State<W> {
     for (var i = firstIndex - 1; i >= lookBehindStart; i--) {
       if (!loadedItems.containsKey(i) && !_loadingRanges.contains(i)) {
         _lastEagerPrefetch = now;
-        _fetchRange(i, pageSize);
+        // Scanning upward finds the gap's last index: fetch the page that ends
+        // there, not one starting there (that would refetch the viewport).
+        final start = (i - pageSize + 1).clamp(0, i);
+        _fetchRange(start, i - start + 1);
         return;
       }
     }
@@ -201,6 +220,89 @@ mixin PaginatedItemLoader<T, W extends StatefulWidget> on State<W> {
       ..clear()
       ..addAll(shifted);
     totalSize = (totalSize - 1).clamp(0, totalSize);
+  }
+
+  /// Refetch the loaded span in place — the sparse-grid equivalent of Plex
+  /// Web's `repopulateRange`. The old items stay rendered while the fetch
+  /// runs; on success the span is replaced wholesale and [totalSize] adopts
+  /// the server's new count, so server-side additions materialize at their
+  /// sorted positions and removals disappear with no clearing and no
+  /// skeleton flash. On failure the old content stays untouched
+  /// (best-effort background refresh; the staleness paths recover).
+  ///
+  /// [anchorId] (resolved through [idOf]) reports where a caller-chosen item
+  /// moved, so the caller can compensate the scroll offset and keep it
+  /// visually stationary. A null result means nothing was applied.
+  ///
+  /// [maxSpan] bounds the refetched request: a sparse map holding disjoint
+  /// clusters (initial pages plus an alpha-jump target) would otherwise span
+  /// nearly the whole library in one call. When the span exceeds it, entries
+  /// outside a [maxSpan]-wide window centered on [windowCenter] are dropped
+  /// first — they degrade to ordinary unloaded slots the scroll path
+  /// refetches on demand. Callers that cache per-index state (focus nodes)
+  /// evict theirs to the same window.
+  Future<({int? anchorOldIndex, int? anchorNewIndex})?> repopulateLoadedRange({
+    required String Function(T item) idOf,
+    String? anchorId,
+    int? maxSpan,
+    int? windowCenter,
+  }) async {
+    if (!mounted || loadedItems.isEmpty || totalSize == 0) return null;
+    var indices = loadedItems.keys.toList()..sort();
+    if (maxSpan != null && indices.last - indices.first + 1 > maxSpan) {
+      final center = (windowCenter ?? indices.first).clamp(indices.first, indices.last);
+      final lo = center - maxSpan ~/ 2;
+      loadedItems.removeWhere((index, _) => index < lo || index >= lo + maxSpan);
+      if (loadedItems.isEmpty) return null;
+      indices = loadedItems.keys.toList()..sort();
+    }
+    final start = indices.first;
+    final size = indices.last - start + 1;
+    int? anchorOldIndex;
+    if (anchorId != null) {
+      for (final entry in loadedItems.entries) {
+        if (idOf(entry.value) == anchorId) {
+          anchorOldIndex = entry.key;
+          break;
+        }
+      }
+    }
+    // Supersede in-flight fetches: their merges would interleave stale pages
+    // into the repopulated span.
+    _requestId++;
+    _cancelToken?.abort();
+    _cancelToken = AbortController();
+    _retryTimer?.cancel();
+    _loadingRanges.clear();
+    _scheduledRetry = null;
+    final generation = _requestId;
+    final LibraryPage<T> page;
+    try {
+      page = await fetchPage(start, size, _cancelToken);
+    } catch (_) {
+      return null;
+    }
+    if (generation != _requestId || !mounted) return null;
+    int? anchorNewIndex;
+    if (anchorId != null) {
+      for (var i = 0; i < page.items.length; i++) {
+        if (idOf(page.items[i]) == anchorId) {
+          anchorNewIndex = start + i;
+          break;
+        }
+      }
+    }
+    setState(() {
+      loadedItems.removeWhere((index, _) => index >= start && index < start + size);
+      for (var i = 0; i < page.items.length; i++) {
+        loadedItems[start + i] = page.items[i];
+      }
+      totalSize = page.totalCount;
+      loadedItems.removeWhere((index, _) => index >= totalSize);
+    });
+    _trackOpenEndedTotal(start, size, page);
+    onPageLoaded(start, page.items);
+    return (anchorOldIndex: anchorOldIndex, anchorNewIndex: anchorNewIndex);
   }
 
   /// Discard the "fetch in flight" markers. In-flight network requests keep
@@ -251,10 +353,19 @@ mixin PaginatedItemLoader<T, W extends StatefulWidget> on State<W> {
     _paginationError = null;
     onPaginationStateChanged();
 
+    // A sentinel total ends one past the last full page, so clamping to it
+    // would ask for a one-item tail page (and page one item at a time from
+    // there). Past the known items, request a page as big as the one that
+    // came back full; the server returns only what exists.
+    final openEndedPageSize = _openEndedPageSize;
+    final requestSize = openEndedPageSize != null && start + clampedSize >= totalSize
+        ? math.max(size, openEndedPageSize)
+        : clampedSize;
+
     final generation = _requestId;
 
     try {
-      final result = await fetchPage(start, clampedSize, _cancelToken);
+      final result = await fetchPage(start, requestSize, _cancelToken);
       if (generation != _requestId || !mounted) return false;
 
       setState(() {
@@ -263,6 +374,7 @@ mixin PaginatedItemLoader<T, W extends StatefulWidget> on State<W> {
         }
         if (result.totalCount != totalSize) totalSize = result.totalCount;
       });
+      _trackOpenEndedTotal(start, requestSize, result);
 
       _retryCount = 0;
       onPageLoaded(start, result.items);

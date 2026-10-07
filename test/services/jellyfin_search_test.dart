@@ -12,8 +12,7 @@ import 'package:plezy/services/jellyfin_client.dart';
 import 'package:plezy/utils/media_server_http_client.dart';
 
 import '../test_helpers/backend_client_fixtures.dart';
-
-http.Response _json(Object body) => http.Response(jsonEncode(body), 200, headers: {'content-type': 'application/json'});
+import '../test_helpers/http_fixtures.dart';
 
 /// `/Users/{id}/Views` shape: the id is the CollectionFolder id that
 /// `ParentId=` accepts and that hidden-library keys are built from.
@@ -54,12 +53,15 @@ void main() {
       httpClient: MockClient((request) async {
         captured.add(request.url);
         final path = request.url.path;
-        if (path.endsWith('/Views')) return _json({'Items': views});
+        if (path.endsWith('/Views')) return jsonResponse({'Items': views});
         if (path == '/Items') {
-          final parent = request.url.queryParameters['ParentId'] ?? '*';
+          final parent = request.url.queryParameters['ParentId'];
+          // Search is always library-scoped: an unscoped query can neither
+          // attribute its hits to a library nor honour a hidden one (#1970).
+          if (parent == null) fail('Unscoped /Items search: ${request.url}');
           final includedTypes = request.url.queryParameters['IncludeItemTypes']?.split(',').toSet();
           final items = itemsByParent[parent] ?? const <Map<String, dynamic>>[];
-          return _json({
+          return jsonResponse({
             'Items': [
               for (final item in items)
                 if (includedTypes == null || includedTypes.contains(item['Type'])) item,
@@ -67,31 +69,39 @@ void main() {
           });
         }
         if (path == '/Artists') {
-          final parent = request.url.queryParameters['parentId'] ?? '*';
-          return _json({'Items': itemsByParent['artists:$parent'] ?? const <Map<String, dynamic>>[]});
+          final parent = request.url.queryParameters['parentId'];
+          if (parent == null) fail('Unscoped /Artists search: ${request.url}');
+          return jsonResponse({'Items': itemsByParent['artists:$parent'] ?? const <Map<String, dynamic>>[]});
         }
         fail('Unexpected request: ${request.url}');
       }),
     );
   }
 
-  test('with nothing hidden, search stays a single unscoped query', () async {
+  test('every search fans out one scoped query per visible library', () async {
     final captured = <Uri>[];
     final client = makeClient(
       captured,
       itemsByParent: {
-        '*': [_hit('movie-1', 'Movie', 'The Movie')],
+        'lib-movies': [_hit('movie-1', 'Movie', 'The Movie')],
+        'lib-shows': [_hit('show-1', 'Series', 'The Show')],
+        'lib-music': [_hit('album-1', 'MusicAlbum', 'The Album')],
       },
     );
     addTearDown(client.close);
 
     final results = await client.searchItems('the');
 
-    expect(results.map((item) => item.id), ['movie-1']);
-    expect(captured.map((uri) => uri.path), ['/Items', '/Artists']);
-    expect(captured.first.queryParameters.containsKey('ParentId'), isFalse);
-    // No library listing is fetched when there is nothing to exclude.
-    expect(captured.where((uri) => uri.path.endsWith('/Views')), isEmpty);
+    expect(results.map((item) => item.id), ['movie-1', 'show-1', 'album-1']);
+    // A cold search loads the library views itself, exactly once.
+    expect(captured.where((uri) => uri.path.endsWith('/Views')), hasLength(1));
+    // One /Items leg per video library, two (album + audio) for music.
+    expect(captured.where((uri) => uri.path == '/Items').map((uri) => uri.queryParameters['ParentId']), [
+      'lib-movies',
+      'lib-shows',
+      'lib-music',
+      'lib-music',
+    ]);
   });
 
   test('a hidden library is excluded by scoping one request per visible library', () async {
@@ -111,6 +121,13 @@ void main() {
     expect(results.map((item) => item.id), ['movie-1', 'album-1']);
     // The unscoped query must not run: it would reintroduce the hidden library.
     expect(captured.where((uri) => uri.path == '/Items' && !uri.queryParameters.containsKey('ParentId')), isEmpty);
+    // The hidden library gets no request at all, under either param spelling.
+    expect(
+      captured.where(
+        (uri) => uri.queryParameters['ParentId'] == 'lib-shows' || uri.queryParameters['parentId'] == 'lib-shows',
+      ),
+      isEmpty,
+    );
     expect(captured.where((uri) => uri.path == '/Items').map((uri) => uri.queryParameters['ParentId']), [
       'lib-movies',
       'lib-music',
@@ -118,7 +135,7 @@ void main() {
     ]);
   });
 
-  test('scoped results carry the library they came from', () async {
+  test('every hit carries the library it came from', () async {
     final captured = <Uri>[];
     final client = makeClient(
       captured,
@@ -129,10 +146,10 @@ void main() {
     );
     addTearDown(client.close);
 
-    final results = await client.searchItems('the', excludedLibraryIds: {'lib-shows'});
+    final results = await client.searchItems('the');
 
     // Jellyfin sends no library field, so this stamp is the only attribution
-    // these items will ever have — and what the caller filters on.
+    // these items will ever have — what the caller renders and filters on.
     expect(results.map((item) => item.libraryId), ['lib-movies', 'lib-music']);
     expect(results.map((item) => item.libraryTitle), ['Movies', 'Music']);
     expect(results.map((item) => item.libraryGlobalKey), ['srv-1:lib-movies', 'srv-1:lib-music']);
@@ -148,7 +165,7 @@ void main() {
     );
     addTearDown(client.close);
 
-    final results = await client.searchItems('the', excludedLibraryIds: {'lib-shows'});
+    final results = await client.searchItems('the');
 
     expect(results.map((item) => item.id), ['artist-1']);
     expect(captured.where((uri) => uri.path == '/Artists').map((uri) => uri.queryParameters['parentId']), [
@@ -187,7 +204,7 @@ void main() {
     ]);
   });
 
-  test('scoped search reuses the views the library load already fetched', () async {
+  test('a warm search reuses the views the library load already fetched', () async {
     final captured = <Uri>[];
     final client = makeClient(captured);
     addTearDown(client.close);
@@ -196,7 +213,7 @@ void main() {
     await client.fetchLibraries();
     final afterLoad = captured.length;
 
-    await client.searchItems('the', excludedLibraryIds: {'lib-shows'});
+    await client.searchItems('the');
     await client.searchItems('the movie', excludedLibraryIds: {'lib-shows'});
 
     // /Views sits serially in front of every leg, so re-fetching it per
@@ -213,8 +230,8 @@ void main() {
     final client = testJellyfinClient(
       httpClient: MockClient((request) async {
         captured.add(request.url);
-        if (request.url.path.endsWith('/Views')) return _json({'Items': views});
-        return _json({'Items': <Map<String, dynamic>>[]});
+        if (request.url.path.endsWith('/Views')) return jsonResponse({'Items': views});
+        return jsonResponse({'Items': <Map<String, dynamic>>[]});
       }),
     );
     addTearDown(client.close);
@@ -256,9 +273,9 @@ void main() {
           final responseViews = views;
           // Hold the search's own (first) view fetch in flight.
           if (viewsServed == 1) await viewsGate.future;
-          return _json({'Items': responseViews});
+          return jsonResponse({'Items': responseViews});
         }
-        return _json({'Items': <Map<String, dynamic>>[]});
+        return jsonResponse({'Items': <Map<String, dynamic>>[]});
       }),
     );
     addTearDown(client.close);
@@ -354,12 +371,12 @@ void main() {
     expect(movies.queryParameters['Fields'], contains('ChildCount'));
   });
 
-  test('excluded ids owned by another server leave the single query in place', () async {
+  test('excluded ids owned by another server do not shrink the fan-out', () async {
     final captured = <Uri>[];
     final client = makeClient(
       captured,
       itemsByParent: {
-        '*': [_hit('movie-1', 'Movie', 'The Movie')],
+        'lib-movies': [_hit('movie-1', 'Movie', 'The Movie')],
       },
     );
     addTearDown(client.close);
@@ -367,7 +384,14 @@ void main() {
     final results = await client.searchItems('the', excludedLibraryIds: {'some-other-servers-library'});
 
     expect(results.map((item) => item.id), ['movie-1']);
-    expect(captured.where((uri) => uri.path == '/Items').single.queryParameters.containsKey('ParentId'), isFalse);
+    // The foreign key matches none of this server's views, so every library
+    // stays visible — and every query stays scoped.
+    expect(captured.where((uri) => uri.path == '/Items').map((uri) => uri.queryParameters['ParentId']), [
+      'lib-movies',
+      'lib-shows',
+      'lib-music',
+      'lib-music',
+    ]);
   });
 
   test('hiding every library returns nothing instead of everything', () async {
@@ -434,7 +458,7 @@ void main() {
       httpClient: MockClient((request) async {
         paths.add(request.url.path);
         if (request.url.path.endsWith('/Views')) return http.Response('nope', 500);
-        return _json({'Items': <Map<String, dynamic>>[]});
+        return jsonResponse({'Items': <Map<String, dynamic>>[]});
       }),
     );
     addTearDown(client.close);
@@ -443,5 +467,231 @@ void main() {
     // hidden library; the server must be reported as failed instead.
     await expectLater(client.searchItems('the', excludedLibraryIds: {'lib-shows'}), throwsA(isA<Exception>()));
     expect(paths.where((path) => path == '/Items'), isEmpty);
+  });
+
+  group('searchPeople', () {
+    const peopleViews = [
+      {'Id': 'lib-movies', 'Name': 'Movies', 'CollectionType': 'movies', 'Type': 'CollectionFolder'},
+      {'Id': 'lib-shows', 'Name': 'Shows', 'CollectionType': 'tvshows', 'Type': 'CollectionFolder'},
+      {'Id': 'lib-music', 'Name': 'Music', 'CollectionType': 'music', 'Type': 'CollectionFolder'},
+      {'Id': 'lib-anime', 'Name': 'Anime', 'CollectionType': 'tvshows', 'Type': 'CollectionFolder'},
+    ];
+
+    /// A `/Persons` row as the server returns it: no library, no credit.
+    Map<String, dynamic> personRow(String id, String name, {String? primaryTag}) => {
+      'Id': id,
+      'Name': name,
+      'Type': 'Person',
+      if (primaryTag != null) 'ImageTags': {'Primary': primaryTag},
+    };
+
+    /// Serves `/Persons` in the given (name) order, honouring `Limit` the way
+    /// the server does, and answers each `/Items?PersonIds=` check from
+    /// [titlesByPerson]: person id → {library id: title type}.
+    JellyfinClient makePeopleClient(
+      List<Uri> captured, {
+      required List<Map<String, dynamic>> persons,
+      Map<String, Map<String, String>> titlesByPerson = const {},
+      JellyfinClient Function({http.Client? httpClient}) factory = testJellyfinClient,
+    }) {
+      return factory(
+        httpClient: MockClient((request) async {
+          captured.add(request.url);
+          final path = request.url.path;
+          final params = request.url.queryParameters;
+          if (path.endsWith('/Views')) return jsonResponse({'Items': peopleViews});
+          if (path == '/Persons') {
+            final limit = int.tryParse(params['Limit'] ?? '');
+            return jsonResponse({'Items': limit == null ? persons : persons.take(limit).toList()});
+          }
+          if (path == '/Items') {
+            final personId = params['PersonIds'];
+            if (personId == null) fail('Unexpected /Items request: ${request.url}');
+            final parent = params['ParentId'];
+            final types = params['IncludeItemTypes']?.split(',').toSet();
+            final matches = [
+              for (final MapEntry(key: libraryId, value: type) in (titlesByPerson[personId] ?? const {}).entries)
+                if ((parent == null || parent == libraryId) && (types == null || types.contains(type)))
+                  _hit('$personId-$libraryId', type, 'A Title'),
+            ];
+            final limit = int.tryParse(params['Limit'] ?? '');
+            return jsonResponse({'Items': limit == null ? matches : matches.take(limit).toList()});
+          }
+          fail('Unexpected request: ${request.url}');
+        }),
+      );
+    }
+
+    List<Uri> titleChecks(List<Uri> captured) => captured.where((uri) => uri.path == '/Items').toList();
+
+    test('ranks the name-ordered candidates before cutting them to the limit', () async {
+      final captured = <Uri>[];
+      final client = makePeopleClient(
+        captured,
+        // `/Persons` sorts by name, so the exact match comes last.
+        persons: [
+          personRow('p-andrew', 'Andrew Jackson'),
+          personRow('p-emily', 'Emily Jackson'),
+          personRow('p-samuel', 'Samuel L. Jackson'),
+        ],
+        titlesByPerson: {
+          'p-andrew': {'lib-movies': 'Movie'},
+          'p-emily': {'lib-movies': 'Movie'},
+          'p-samuel': {'lib-movies': 'Movie'},
+        },
+      );
+      addTearDown(client.close);
+
+      final results = await client.searchPeople('Samuel L. Jackson', limit: 2);
+
+      expect(results, hasLength(2));
+      expect(results.first.id, 'p-samuel');
+      // Only the ranked top `limit` are worth an existence check.
+      expect(titleChecks(captured).map((uri) => uri.queryParameters['PersonIds']), hasLength(2));
+    });
+
+    for (final (dialect, factory) in [('Jellyfin', testJellyfinClient), ('Emby', testEmbyClient)]) {
+      test('$dialect drops candidates without a filmography title and keeps ranked order', () async {
+        final captured = <Uri>[];
+        final client = makePeopleClient(
+          captured,
+          factory: factory,
+          persons: [
+            personRow('p-christopher', 'Christopher Nolan'),
+            personRow('p-jonathan', 'Jonathan Nolan'),
+            personRow('p-gould', 'Nolan Gould'),
+            personRow('p-north', 'Nolan North'),
+          ],
+          titlesByPerson: {
+            'p-christopher': {'lib-movies': 'Movie'},
+            // Credited on an episode only: the filmography lists movies and
+            // series, so this person would open an empty screen.
+            'p-jonathan': {'lib-shows': 'Episode'},
+            'p-north': {'lib-shows': 'Series'},
+          },
+        );
+        addTearDown(client.close);
+
+        final results = await client.searchPeople('Nolan');
+
+        // Best match first, not the server's name order.
+        expect(results.map((person) => person.id), ['p-north', 'p-christopher']);
+        expect(titleChecks(captured).map((uri) => uri.queryParameters['PersonIds']), hasLength(4));
+        // Nothing is hidden, so no view fetch and no library scoping.
+        expect(captured.where((uri) => uri.path.endsWith('/Views')), isEmpty);
+        expect(titleChecks(captured).map((uri) => uri.queryParameters['ParentId']), everyElement(isNull));
+      });
+    }
+
+    test('a person whose only titles sit in a hidden library is left out', () async {
+      final captured = <Uri>[];
+      final client = makePeopleClient(
+        captured,
+        persons: [
+          personRow('p-bryan', 'Bryan Cranston'),
+          personRow('p-waltz', 'Christoph Waltz'),
+          personRow('p-kana', 'Kana Hanazawa'),
+        ],
+        titlesByPerson: {
+          'p-bryan': {'lib-shows': 'Series'},
+          // A title in any visible library keeps a person who is also in the hidden one.
+          'p-waltz': {'lib-movies': 'Movie', 'lib-anime': 'Series'},
+          'p-kana': {'lib-anime': 'Series'},
+        },
+      );
+      addTearDown(client.close);
+
+      final results = await client.searchPeople('a', excludedLibraryIds: {'lib-anime'});
+
+      expect(results.map((person) => person.id), unorderedEquals(['p-bryan', 'p-waltz']));
+      // An unscoped check or one scoped to the hidden library would bring
+      // the hidden library's people back.
+      expect(
+        titleChecks(captured).map((uri) => uri.queryParameters['ParentId']),
+        everyElement(isIn(['lib-movies', 'lib-shows', 'lib-music'])),
+      );
+    });
+
+    test('hiding every library that can hold a title returns nobody without searching', () async {
+      final captured = <Uri>[];
+      final client = makePeopleClient(
+        captured,
+        persons: [personRow('p-waltz', 'Christoph Waltz')],
+        titlesByPerson: {
+          'p-waltz': {'lib-movies': 'Movie'},
+        },
+      );
+      addTearDown(client.close);
+
+      final results = await client.searchPeople('Waltz', excludedLibraryIds: {'lib-movies', 'lib-shows', 'lib-anime'});
+
+      expect(results, isEmpty);
+      expect(captured.where((uri) => uri.path == '/Persons' || uri.path == '/Items'), isEmpty);
+    });
+
+    test('a thumb exists only for a person with a primary image tag', () async {
+      final captured = <Uri>[];
+      final client = makePeopleClient(
+        captured,
+        persons: [
+          personRow('p-tagged', 'Tagged Actor', primaryTag: 'tag-1'),
+          personRow('p-untagged', 'Untagged Actor'),
+        ],
+        titlesByPerson: {
+          'p-tagged': {'lib-movies': 'Movie'},
+          'p-untagged': {'lib-movies': 'Movie'},
+        },
+      );
+      addTearDown(client.close);
+
+      final results = await client.searchPeople('Actor');
+      final byId = {for (final person in results) person.id: person};
+
+      final thumb = Uri.parse(byId['p-tagged']!.thumbPath!);
+      expect(thumb.origin, 'https://jf.example.com');
+      expect(thumb.path, '/Items/p-tagged/Images/Primary');
+      expect(thumb.queryParameters['tag'], 'tag-1');
+      // A tagless image URL 404s; no URL at all lets the row show a fallback.
+      expect(byId['p-untagged']!.thumbPath, isNull);
+    });
+
+    test('aborting during the title checks cancels them and starts no further batch', () async {
+      final checks = <String>[];
+      final checksEntered = Completer<void>();
+      final personsBody = jsonEncode({
+        'Items': [for (var i = 0; i < 4; i++) personRow('p-$i', 'Actor $i')],
+      });
+      final client = testJellyfinClient(
+        httpClient: MockClient.streaming((request, _) async {
+          if (request.url.path == '/Persons') {
+            return http.StreamedResponse(
+              Stream.value(utf8.encode(personsBody)),
+              200,
+              headers: const {'content-type': 'application/json'},
+            );
+          }
+          if (request.url.path == '/Items') {
+            checks.add(request.url.queryParameters['PersonIds']!);
+            if (checks.length == 3) checksEntered.complete();
+            await (request as http.AbortableRequest).abortTrigger!;
+            throw http.RequestAbortedException(request.url);
+          }
+          fail('Unexpected request: ${request.url}');
+        }),
+      );
+      addTearDown(client.close);
+
+      final abort = AbortController();
+      final search = client.searchPeople('Actor', abort: abort);
+      await checksEntered.future;
+      abort.abort();
+
+      await expectLater(
+        search,
+        throwsA(isA<MediaServerHttpException>().having((e) => e.isCancellation, 'isCancellation', isTrue)),
+      );
+      // The fourth candidate sat in the next batch, which must never start.
+      expect(checks, hasLength(3));
+    });
   });
 }

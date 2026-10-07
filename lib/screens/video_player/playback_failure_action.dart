@@ -5,11 +5,17 @@ const int maxLiveFallbackLevel = 2;
 
 /// What the player screen should do about one playback error.
 enum PlaybackFailureAction {
+  /// Server refused this account or connection with HTTP 403.
+  playbackNotAllowedDialog,
+
   /// Server rejected the session with HTTP 500 — a bandwidth/transcoding limit.
   serverLimitDialog,
 
   /// Server could not read the file behind the item (HTTP 404).
   mediaUnreadableDialog,
+
+  /// Server kept refusing the stream with HTTP 503 for the whole open phase.
+  serverBusyDialog,
 
   /// A live retry already owns the player and its error UI.
   ignore,
@@ -33,8 +39,25 @@ enum PlaybackFailureAction {
 /// Live TV deliberately diverges on 404: an HLS segment that has rolled off the
 /// playlist, or a transcode session restarting under us, answers 404 mid-stream,
 /// and the bounded ladder exists to ride that out. Only on-demand playback
-/// treats 404 as terminal, where it does mean the file is unreadable. 500 stays
-/// terminal for both — a limit rejection is not something a retry clears.
+/// treats 404 as terminal, where it does mean the file is unreadable. 403 takes
+/// the same split: on-demand it is a refusal of this account or connection
+/// (#2510), while live TV has no observed 403 cause worth abandoning the bounded
+/// ladder for. It outranks every other status latched on the same open — until
+/// the server lets this account stream, what it says about the file or session
+/// is moot. 500 stays terminal for both — a limit rejection is not something a
+/// retry clears. 503 arrives only as the open-phase watchdog's cause tag (it
+/// never latches into [fatalHttpStatuses]); by then the reconnect loop has had
+/// its chances, so on-demand playback surfaces it while live TV keeps its
+/// ladder.
+///
+/// An audio-output failure is checked first: the device stopped taking audio,
+/// so a latched status or the live ladder would only re-open a stream into the
+/// same dead output.
+///
+/// [PlayerError.openTimedOut] and [PlayerError.streamInitFailed] name no
+/// status and no device fault, so they take the default path like any other
+/// failed open: live TV climbs its ladder (a different stream may well decode),
+/// on-demand playback is fatal.
 PlaybackFailureAction resolvePlaybackFailureAction({
   required String? cause,
   required Set<int> fatalHttpStatuses,
@@ -43,12 +66,20 @@ PlaybackFailureAction resolvePlaybackFailureAction({
   required int liveFallbackLevel,
   required bool liveRetryFailed,
 }) {
+  if (cause == PlayerError.audioOutputFailed) return PlaybackFailureAction.fatal;
+
+  if (!isLive && fatalHttpStatuses.contains(403)) return PlaybackFailureAction.playbackNotAllowedDialog;
+
   if (cause == PlayerError.serverHttp500 || fatalHttpStatuses.contains(500)) {
     return PlaybackFailureAction.serverLimitDialog;
   }
 
   if (!isLive && (cause == PlayerError.serverHttp404 || fatalHttpStatuses.contains(404))) {
     return PlaybackFailureAction.mediaUnreadableDialog;
+  }
+
+  if (!isLive && cause == PlayerError.serverHttp503) {
+    return PlaybackFailureAction.serverBusyDialog;
   }
 
   if (isLive) {

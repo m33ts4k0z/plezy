@@ -1,6 +1,10 @@
 import 'package:drift/drift.dart';
+import 'package:flutter/foundation.dart';
 import 'package:plezy/database/app_database.dart';
 import 'package:plezy/media/ids.dart';
+import 'package:plezy/media/media_server_client.dart';
+import 'package:plezy/providers/download_provider.dart';
+import 'package:plezy/utils/global_key_utils.dart';
 
 /// Seeds `downloaded_media` rows at an arbitrary [status] so tests can start
 /// from completed, downloading, or paused state.
@@ -18,6 +22,8 @@ extension DownloadFixtures on AppDatabase {
     required String type,
     String? parentRatingKey,
     String? grandparentRatingKey,
+    String? libraryId,
+    String? libraryTitle,
     required int status,
     int mediaIndex = 0,
     String? mediaSourceId,
@@ -32,10 +38,12 @@ extension DownloadFixtures on AppDatabase {
         type,
         parent_rating_key,
         grandparent_rating_key,
+        library_id,
+        library_title,
         status,
         media_index,
         media_source_id
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(global_key) DO UPDATE SET
         server_id = excluded.server_id,
         client_scope_id = excluded.client_scope_id,
@@ -43,6 +51,8 @@ extension DownloadFixtures on AppDatabase {
         type = excluded.type,
         parent_rating_key = excluded.parent_rating_key,
         grandparent_rating_key = excluded.grandparent_rating_key,
+        library_id = excluded.library_id,
+        library_title = excluded.library_title,
         status = excluded.status,
         progress = 0,
         total_bytes = NULL,
@@ -60,6 +70,8 @@ extension DownloadFixtures on AppDatabase {
         Variable<String>(type),
         Variable<String>(parentRatingKey),
         Variable<String>(grandparentRatingKey),
+        Variable<String>(libraryId),
+        Variable<String>(libraryTitle),
         Variable<int>(status),
         Variable<int>(mediaIndex),
         Variable<String>(mediaSourceId),
@@ -67,4 +79,18 @@ extension DownloadFixtures on AppDatabase {
       updates: {downloadedMedia},
     );
   }
+}
+
+/// A collection-navigation fixture with no auto-download rules.
+/// Operations outside that read contract deliberately throw.
+class NoSyncRulesDownloadProvider extends ChangeNotifier implements DownloadProvider {
+  @override
+  bool hasSyncRule(String globalKey) => false;
+
+  @override
+  String syncRuleKeyForClient(MediaServerClient client, String ratingKey, {ServerId? serverId}) =>
+      buildGlobalKey(serverId ?? client.serverId, ratingKey);
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }

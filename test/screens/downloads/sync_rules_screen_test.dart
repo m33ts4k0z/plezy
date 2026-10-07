@@ -335,7 +335,7 @@ void main() {
     await pumpScreen(tester);
 
     expect(connectionRegistry.watchCalls, 1);
-    await downloadProvider.updateSyncRuleCount(downloadProvider.syncRules.keys.single, 6);
+    await downloadProvider.updateSyncRuleOptions(downloadProvider.syncRules.keys.single, episodeCount: 6);
     await tester.pump();
 
     expect(connectionRegistry.watchCalls, 1);
@@ -368,6 +368,31 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(downloadProvider.syncRules.values.single.enabled, isFalse);
+  });
+
+  testWidgets('keyboard navigation reaches the remove action of a list sync rule', (tester) async {
+    multiServerProvider = testMultiServerProvider(serverManager);
+    await insertPlaylistRule(ServerId('playlist-srv'), 'playlist-1');
+
+    await pumpScreen(tester, keyboardMode: true);
+    expect(primaryFocusLabel(), 'sync_rule_row');
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+    await tester.pumpAndSettle();
+    expect(primaryFocusLabel(), 'sync_rule_switch');
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowRight);
+    await tester.pumpAndSettle();
+    expect(primaryFocusLabel(), 'sync_rule_remove');
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pumpAndSettle();
+    expect(find.text('Stop syncing "Road Trip"?'), findsOneWidget);
+
+    await tester.tap(find.widgetWithText(FilledButton, 'Remove sync rule'));
+    await tester.pumpAndSettle();
+
+    expect(downloadProvider.syncRules, isEmpty);
+    expect(find.text('No sync rules'), findsOneWidget);
   });
 
   testWidgets('setting sync rule count to zero removes the rule', (tester) async {

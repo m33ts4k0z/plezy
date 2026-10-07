@@ -5,7 +5,9 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'storage_service.dart';
 import 'plex_client.dart';
 import '../exceptions/media_server_exceptions.dart';
-import '../models/plex/plex_user_profile.dart';
+import '../i18n/strings.g.dart';
+import '../media/account_preferences.dart';
+import '../models/plex/plex_account_preferences.dart';
 import '../models/plex/plex_home.dart';
 import '../models/plex/plex_home_user.dart';
 import '../models/plex/plex_switch_response.dart';
@@ -149,7 +151,6 @@ class PlexAuthService {
     return false;
   }
 
-  /// Create a PIN for authentication
   Future<Map<String, dynamic>> createPin() async {
     final response = await _http.post(
       '$_plexApiBase/pins?strong=true',
@@ -179,7 +180,11 @@ class PlexAuthService {
       throw const MediaServerPinExpiredException();
     }
     if (response.statusCode == 401 || response.statusCode == 403) {
-      throw MediaServerAuthException('Plex PIN check rejected', statusCode: response.statusCode);
+      throw MediaServerAuthException(
+        'Plex PIN check rejected',
+        statusCode: response.statusCode,
+        display: t.auth.pinCheckRejected,
+      );
     }
     _checkStatus(response);
 
@@ -190,16 +195,30 @@ class PlexAuthService {
   /// Poll the PIN until it's claimed or timeout.
   ///
   /// Uses an exponential backoff (1s → 2s → 4s, capped at 5s) so a stalled
-  /// claim doesn't hammer plex.tv every second for two minutes.
+  /// claim doesn't hammer plex.tv every second for two minutes. Transient
+  /// transport failures are treated as an inconclusive probe: the browser
+  /// sign-in may still be in progress, so one dropped request must not abort
+  /// the entire attempt.
   Future<String?> pollPinUntilClaimed(
     int pinId, {
     Duration timeout = const Duration(minutes: 2),
     bool Function()? shouldCancel,
+    Duration initialBackoff = const Duration(seconds: 1),
+    Duration maxBackoff = const Duration(seconds: 5),
   }) {
     return pollWithBackoff<String>(
-      probe: () => checkPin(pinId),
+      probe: () async {
+        try {
+          return await checkPin(pinId);
+        } on MediaServerHttpException catch (error) {
+          if (!error.isTransient) rethrow;
+          return null;
+        }
+      },
       endTime: DateTime.now().add(timeout),
       shouldCancel: shouldCancel,
+      initial: initialBackoff,
+      maxBackoff: maxBackoff,
     );
   }
 
@@ -235,30 +254,49 @@ class PlexAuthService {
       throw ServerParsingException(
         'No valid servers found. All ${invalidServers.length} server(s) have malformed data.',
         invalidServers,
+        display: t.serverSelection.noValidServers,
       );
     }
 
     return servers;
   }
 
-  /// Get user information
   Future<Map<String, dynamic>> getUserInfo(String authToken) async {
     final response = await _getUser(authToken);
     _checkStatus(response);
     return response.data as Map<String, dynamic>;
   }
 
-  /// Get user profile with preferences (audio/subtitle settings)
-  Future<PlexUserProfile> getUserProfile(String authToken) async {
-    final response = await _getClientsApi(
-      '/user?includeSettings=1&includeSharedSettings=1',
+  /// Fetch the account preferences stored by plex.tv.
+  ///
+  /// This reads `/user/profile`; it deliberately does not touch the per-device
+  /// `experience` settings blob or the PMS `/accounts/1` mirror.
+  Future<AccountPreferences> getAccountPreferences(String authToken) async {
+    final response = await _getClientsApi('/user/profile', headers: _getCommonHeaders(authToken: authToken));
+    _checkStatus(response);
+    return PlexAccountPreferences.fromProfileJson(response.data as Map<String, dynamic>);
+  }
+
+  /// Update the account preferences stored by plex.tv.
+  ///
+  /// Plex requires a partial write shaped as query parameters with an empty
+  /// body. The `experience` settings blob and PMS `/accounts/1` mirror remain
+  /// deliberately untouched.
+  Future<AccountPreferences> updateAccountPreferences(String authToken, AccountPreferencesPatch patch) async {
+    final response = await _http.put(
+      '$_clientsApi/user/profile',
+      queryParameters: PlexAccountPreferences.queryParametersFor(patch),
       headers: _getCommonHeaders(authToken: authToken),
     );
     _checkStatus(response);
-    return PlexUserProfile.fromJson(response.data as Map<String, dynamic>);
+
+    final data = response.data;
+    if (data is Map<String, dynamic> && data.isNotEmpty) {
+      return PlexAccountPreferences.fromProfileJson(data);
+    }
+    return getAccountPreferences(authToken);
   }
 
-  /// Get home users for the authenticated user
   Future<PlexHome> getHomeUsers(String authToken) async {
     final response = await _getClientsApi('/home/users', headers: _getCommonHeaders(authToken: authToken));
     _checkStatus(response);
@@ -317,7 +355,6 @@ class PlexServer {
   final String? product;
   final String? platform;
   final DateTime? lastSeenAt;
-  final bool presence;
 
   PlexServer({
     required this.name,
@@ -328,7 +365,6 @@ class PlexServer {
     this.product,
     this.platform,
     this.lastSeenAt,
-    this.presence = false,
   });
 
   factory PlexServer.fromJson(Map<String, dynamic> json) {
@@ -340,20 +376,43 @@ class PlexServer {
     }
 
     final List<dynamic> connectionsJson = json['connections'] as List<dynamic>;
-    final connections = <PlexConnection>[];
-
-    // Parse connections and generate HTTP fallbacks for HTTPS connections
+    final parsed = <PlexConnection>[];
     for (final c in connectionsJson) {
       try {
-        final connection = PlexConnection.fromJson(c as Map<String, dynamic>);
-        connections.add(connection);
-
-        if (_allowsHttpFallback(connection)) {
-          connections.add(connection.toHttpFallback());
-        }
+        parsed.add(PlexConnection.fromJson(c as Map<String, dynamic>));
       } catch (e) {
         // Skip invalid connections rather than failing the entire server
         continue;
+      }
+    }
+
+    // [toJson] persists the expanded list, so a stored server comes back with
+    // its synthetic fallbacks already in `connections`. Older builds also
+    // synthesized them for remote and relay endpoints, which sent the token
+    // in cleartext across the internet; drop those rather than reload them.
+    // plex.tv never publishes an http:// twin of an https:// endpoint, so an
+    // exact [PlexConnection.toHttpFallback] of a sibling is always synthetic.
+    final staleFallbacks = {
+      for (final connection in parsed)
+        if (connection.protocol == 'https' && !_isLanConnection(connection))
+          connection.toHttpFallback()._endpointIdentity,
+    };
+
+    final connections = <PlexConnection>[];
+    // Keeping the first of each equivalent endpoint makes re-expansion
+    // idempotent.
+    final seen = <String>{};
+    void addConnection(PlexConnection connection) {
+      if (seen.add(connection._endpointIdentity)) connections.add(connection);
+    }
+
+    // Generate HTTP fallbacks for HTTPS connections that stay on the LAN
+    for (final connection in parsed) {
+      if (staleFallbacks.contains(connection._endpointIdentity)) continue;
+      addConnection(connection);
+
+      if (_allowsHttpFallback(connection)) {
+        addConnection(connection.toHttpFallback());
       }
     }
 
@@ -373,7 +432,6 @@ class PlexServer {
       product: _optionalScalarString(json['product']),
       platform: _optionalScalarString(json['platform']),
       lastSeenAt: lastSeenAt,
-      presence: flexibleBool(json['presence']),
     );
   }
 
@@ -408,18 +466,19 @@ class PlexServer {
       'product': product,
       'platform': platform,
       'lastSeenAt': lastSeenAt?.toIso8601String(),
-      'presence': presence,
     };
   }
 
-  /// Check if server is online using the presence field
-  bool get isOnline => presence;
-
   /// Find the best working connection by testing them
   /// Returns a Stream that emits connections progressively:
-  /// 1. First emission: The first connection that responds successfully
+  /// 1. First emission: The first connection that responds successfully.
+  ///    IPv6 and relay are fallback tiers: an IPv6 success is held until every
+  ///    IPv4 direct candidate has failed, a relay success until every direct
+  ///    candidate has failed, and a cached fallback-tier URL gets no head
+  ///    start, so a fast IPv6 or plex.tv relay edge can never beat a working
+  ///    IPv4 direct endpoint (see [PlexConnection.isIPv6]).
   /// 2. Second emission (optional): The best connection after latency testing
-  /// Priority: local > remote > relay, then HTTPS > HTTP, then lowest latency
+  /// Priority: local > remote > relay, then IPv4 > IPv6, then HTTPS > HTTP, then lowest latency
   /// Tests both plex.direct URI and direct IP for each connection
   /// HTTPS connections are tested first, with HTTP as fallback
   Stream<PlexConnection> findBestWorkingConnection({
@@ -464,6 +523,7 @@ class PlexServer {
       candidates: candidates,
       preferredUrl: preferredUri,
       candidateForUrl: _candidateForUrl,
+      tierOf: (candidate) => _raceTier(candidate.connection),
       urlOf: (candidate) => candidate.url,
       displayTypeOf: (candidate) => candidate.connection.displayType,
       failureLogFields: (candidate, result) => {
@@ -534,14 +594,13 @@ class PlexServer {
     }
   }
 
-  /// Update a connection's URI to use the specified URL
   PlexConnection _updateConnectionUrl(PlexConnection connection, String url) {
     // If the URL matches the original URI, return as-is
     if (url == connection.uri) {
       return connection;
     }
 
-    // Otherwise, create a new connection with the directUrl as the uri
+    // Otherwise, create a new connection with the given url as the uri
     return PlexConnection(
       protocol: connection.protocol,
       address: connection.address,
@@ -553,19 +612,21 @@ class PlexServer {
     );
   }
 
+  /// Mirrors [_buildPrioritizedCandidates]: a cached cleartext URL left by an
+  /// older build (e.g. `http://<public ip>:32400`) maps to no candidate, so it
+  /// is never probed with the token again.
   _ConnectionCandidate? _candidateForUrl(String url) {
     for (final connection in connections) {
-      final httpUrl = connection.httpDirectUrl;
-      if (httpUrl == url) {
-        return _ConnectionCandidate(connection, httpUrl, false, false);
-      }
-
       final uri = connection.uri;
       if (uri == url) {
         final isHttps = uri.startsWith('https://');
         final parsedHost = Uri.tryParse(uri)?.host ?? '';
         final isPlexDirect = parsedHost.toLowerCase().contains('plex.direct');
         return _ConnectionCandidate(connection, uri, isPlexDirect, isHttps);
+      }
+
+      if (_allowsHttpFallback(connection) && _httpFallbackUrl(connection) == url) {
+        return _ConnectionCandidate(connection, url, false, false);
       }
     }
     return null;
@@ -575,6 +636,12 @@ class PlexServer {
   /// HTTPS hostnames are treated as remote so failover avoids LAN-only URLs.
   PlexNetworkClass networkClassForUrl(String url) {
     return _candidateForUrl(url)?.connection.networkClass ?? _classifyCustomPreferredUrl(url);
+  }
+
+  bool _isUnpublishedPublicCleartextUrl(String url) {
+    final uri = Uri.tryParse(url);
+    if (uri == null || uri.scheme.toLowerCase() != 'http') return false;
+    return _candidateForUrl(url) == null && !_isLocalOrPrivateHost(_normalizedHost(uri.host));
   }
 
   PlexNetworkClass _classifyCustomPreferredUrl(String url) {
@@ -623,8 +690,11 @@ class PlexServer {
     }
 
     for (final connection in connections) {
-      // Skip endpoints that are never reachable from an external client:
-      // Docker bridge addresses and IPv6 link-local / all-zeros addresses.
+      // Skip endpoints that are never reachable from any client: IPv6
+      // link-local / all-zeros addresses. Private IPv4 addresses (including
+      // Docker bridge gateways) are deliberately kept — a client running on
+      // the server host itself can reach them, so reachability is probed at
+      // failover time (PlexClient's validateCandidate), not inferred here.
       if (_isUnreachableAddress(connection.address)) {
         continue;
       }
@@ -639,7 +709,14 @@ class PlexServer {
       }
     }
 
-    final all = [...httpsLocal, ...httpsRemote, ...httpsRelay, ...httpLocal, ...httpRemote, ...httpRelay];
+    // IPv4 leads each bucket so sequential failover reaches an endpoint every
+    // stack resolves before trying its IPv6 sibling (PlexConnection.isIPv6).
+    final all = [
+      for (final bucket in [httpsLocal, httpsRemote, httpsRelay, httpLocal, httpRemote, httpRelay]) ...[
+        ...bucket.where((c) => !c.connection.isIPv6),
+        ...bucket.where((c) => c.connection.isIPv6),
+      ],
+    ];
 
     // Failover reachability filter. After discovery, failover should stay within
     // endpoint families plausible for the current session: when a remote or relay
@@ -660,7 +737,9 @@ class PlexServer {
     final exclude = <String>{};
     PlexNetworkClass? restrictTo;
 
-    if (preferredFirst != null && preferredFirst.isNotEmpty) {
+    // A cleartext URL the server doesn't publish may only lead the list when
+    // it stays on the LAN; failover would otherwise send the token over it.
+    if (preferredFirst != null && preferredFirst.isNotEmpty && !_isUnpublishedPublicCleartextUrl(preferredFirst)) {
       urls.add(preferredFirst);
       exclude.add(preferredFirst);
       restrictTo = networkClassForUrl(preferredFirst);
@@ -770,14 +849,22 @@ class PlexServer {
         _findLowestLatencyCandidate(relayCandidates);
   }
 
-  /// Find the candidate with lowest latency, preferring HTTPS and plex.direct URI on tie
+  /// Find the candidate with lowest latency, preferring IPv4, HTTPS and plex.direct URI
   _ConnectionCandidate? _findLowestLatencyCandidate(
     List<MapEntry<_ConnectionCandidate, ConnectionTestResult>> entries,
   ) {
     if (entries.isEmpty) return null;
 
-    // Sort by protocol first (HTTPS enables H2 multiplexing), then latency, then URL type
+    // Sort by address family first (IPv6 is unusable by some native stacks,
+    // see PlexConnection.isIPv6), then protocol (HTTPS enables H2
+    // multiplexing), then latency, then URL type
     entries.sort((a, b) {
+      // Prefer IPv4 over IPv6
+      final aIsIPv6 = a.key.connection.isIPv6;
+      final bIsIPv6 = b.key.connection.isIPv6;
+      if (!aIsIPv6 && bIsIPv6) return -1;
+      if (aIsIPv6 && !bIsIPv6) return 1;
+
       // Prefer HTTPS over HTTP
       final aIsHttps = a.key.isHttps;
       final bIsHttps = b.key.isHttps;
@@ -797,6 +884,15 @@ class PlexServer {
     return entries.first.key;
   }
 
+  /// Phase 1 race tier: IPv4 direct endpoints win outright; an IPv6 direct
+  /// success is held until every IPv4 direct probe has failed, and a relay
+  /// success until every direct probe has failed (see [PlexConnection.isIPv6]
+  /// and `raceEndpointCandidates`).
+  static int _raceTier(PlexConnection connection) {
+    if (connection.relay) return 2;
+    return connection.isIPv6 ? 1 : 0;
+  }
+
   /// True when the address is a raw IP (no hostname → no reverse proxy → HTTP
   /// fallback on an HTTPS port is safe to try).
   static bool _isIpLiteral(String address) {
@@ -804,8 +900,16 @@ class PlexServer {
     return InternetAddress.tryParse(bare) != null;
   }
 
+  /// Every probe and request carries X-Plex-Token from the first byte, so a
+  /// cleartext fallback is only synthesized where the path stays on the LAN:
+  /// a non-relay connection plex.tv flags local whose address is private. A
+  /// public address flagged local (a server with a public interface) is
+  /// reachable across the internet, and remote/relay endpoints always are.
+  static bool _isLanConnection(PlexConnection connection) =>
+      connection.local && !connection.relay && _isLocalOrPrivateHost(_normalizedHost(connection.address));
+
   static bool _allowsHttpFallback(PlexConnection connection) {
-    if (connection.protocol != 'https') return false;
+    if (connection.protocol != 'https' || !_isLanConnection(connection)) return false;
     return _isPlexDirectUri(connection.uri) ||
         _isIpLiteral(connection.address) ||
         _isNativePlexHostnameHttps(connection);
@@ -978,9 +1082,10 @@ class PlexConnection {
     };
   }
 
-  /// Get the direct URL constructed from address and port
-  /// This bypasses plex.direct DNS and connects directly to the IP
-  String get directUrl => '$protocol://$address:$port';
+  /// Identity used by [PlexServer.fromJson] to drop an endpoint it already
+  /// holds. Metadata is part of it: two rows for the same URL that disagree
+  /// about local/relay/IPv6 are different candidates.
+  String get _endpointIdentity => '$protocol|$address|$port|$uri|$local|$relay|$ipv6';
 
   /// Always return an HTTP URL that points directly at the IP/port combo.
   String get httpDirectUrl {
@@ -990,10 +1095,25 @@ class PlexConnection {
   }
 
   String get displayType {
-    if (relay) return 'Relay';
-    if (local) return 'Local';
-    return 'Remote';
+    final base = relay
+        ? 'Relay'
+        : local
+        ? 'Local'
+        : 'Remote';
+    return isIPv6 ? '$base IPv6' : base;
   }
+
+  /// True for an IPv6 endpoint, from Plex's `IPv6` flag or the raw address.
+  ///
+  /// IPv6 endpoints rank below their IPv4 siblings everywhere a candidate is
+  /// ordered. Dart's resolver retries an AAAA-only host without
+  /// `AI_ADDRCONFIG`, so the discovery probe succeeds on a network that has an
+  /// IPv6 prefix but no global IPv6 route; Android's Java resolver does not
+  /// retry, so the native downloader then fails the same host with
+  /// `UnknownHostException`. Preferring IPv4 keeps every stack on an endpoint
+  /// they all resolve while still using IPv6 when nothing else answers.
+  bool get isIPv6 =>
+      ipv6 || InternetAddress.tryParse(PlexServer._normalizedHost(address))?.type == InternetAddressType.IPv6;
 
   PlexNetworkClass get networkClass {
     if (relay) return PlexNetworkClass.relay;
@@ -1041,11 +1161,15 @@ String? _optionalScalarString(Object? value) => switch (value) {
 
 /// Custom exception for server parsing errors that includes debug data
 class ServerParsingException implements Exception {
+  /// English diagnostic text, kept verbatim for logs and Sentry grouping.
   final String message;
+
+  /// Localized text rendered by the UI via [toString].
+  final String display;
   final List<Map<String, dynamic>> invalidServerData;
 
-  ServerParsingException(this.message, this.invalidServerData);
+  ServerParsingException(this.message, this.invalidServerData, {required this.display});
 
   @override
-  String toString() => message;
+  String toString() => display;
 }

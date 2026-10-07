@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'package:drift/native.dart';
 import 'package:flutter/material.dart';
@@ -11,12 +12,15 @@ import 'package:plezy/i18n/strings.g.dart';
 import 'package:plezy/media/media_source_info.dart';
 import 'package:plezy/mpv/mpv.dart';
 import 'package:plezy/providers/playback_state_provider.dart';
+import 'package:plezy/services/live_seek_accumulator.dart';
 import 'package:plezy/services/settings_service.dart';
 import 'package:plezy/services/video_volume_controller.dart';
 import 'package:plezy/utils/platform_detector.dart';
 import 'package:plezy/watch_together/providers/watch_together_provider.dart';
+import 'package:plezy/focus/transport_keys.dart';
 import 'package:plezy/widgets/video_controls/player_chrome_controller.dart';
 import 'package:plezy/widgets/app_icon.dart';
+import 'package:plezy/widgets/video_controls/desktop_video_controls.dart';
 import 'package:plezy/widgets/video_controls/video_controls.dart';
 import 'package:plezy/widgets/video_controls/widgets/double_tap_feedback.dart';
 import 'package:plezy/widgets/video_controls/widgets/player_toast_indicator.dart';
@@ -75,6 +79,7 @@ void main() {
       chrome.dispose();
       toast.dispose();
       await database.close();
+      await player.dispose();
     });
 
     Future<void> pumpControls(
@@ -82,7 +87,8 @@ void main() {
       List<MediaChapter>? chapters,
       bool wireTransportCallback = false,
       bool isLive = false,
-      ValueChanged<int>? onLiveSeekBy,
+      LiveSeekBy? onLiveSeekBy,
+      String itemId = 'transient-feedback',
     }) async {
       transportCommands = [];
       await tester.pumpWidget(
@@ -101,7 +107,7 @@ void main() {
                 child: PlexVideoControls(
                   player: player,
                   volumeController: volume,
-                  metadata: testMediaItem(id: 'transient-feedback'),
+                  metadata: testMediaItem(id: itemId),
                   toastController: toast,
                   chromeController: chrome,
                   initialChapters: chapters,
@@ -193,6 +199,79 @@ void main() {
       await settleFeedback(tester);
     });
 
+    testWidgets('a burst that reaches the start of the media stops counting there', (tester) async {
+      // #2425: from 0:25 with a 10s step, three presses travel 10, 10 and 5;
+      // the fourth and fifth dispatch nothing and must add nothing. The badge
+      // keeps reading the 25s that was actually rewound for as long as the
+      // user keeps pressing.
+      player.setPosition(const Duration(seconds: 25));
+      await pumpControls(tester);
+
+      for (var i = 0; i < 5; i++) {
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.arrowLeft);
+        await tester.pump();
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.arrowLeft);
+        await tester.pump();
+      }
+
+      expect(find.text('25s'), findsOneWidget, reason: 'the readout reports the distance travelled, not five steps');
+      expect(player.seeks, [const Duration(seconds: 15), const Duration(seconds: 5), Duration.zero]);
+      expect(chrome.controlsVisible, isFalse);
+
+      await settleFeedback(tester);
+    });
+
+    testWidgets('a press with nothing to rewind through raises no badge and no seek', (tester) async {
+      // With no readout up, a swallowed press has nothing to announce: a `0s`
+      // badge would describe travel that is not happening. Nor is a seek to
+      // the position the playhead already occupies worth dispatching.
+      player.setPosition(Duration.zero);
+      await pumpControls(tester);
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.arrowLeft);
+      await tester.pump();
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.arrowLeft);
+      await tester.pump();
+
+      expect(find.byType(DoubleTapFeedback), findsNothing);
+      expect(player.seeks, isEmpty);
+
+      // The other direction still travels, and starts its own count.
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.arrowRight);
+      await tester.pump();
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.arrowRight);
+      await tester.pump();
+
+      expect(find.text('10s'), findsOneWidget);
+      expect(player.seeks, [const Duration(seconds: 10)]);
+
+      await settleFeedback(tester);
+    });
+
+    testWidgets('a held rewind of fractional steps reads the distance travelled, not rounded steps', (tester) async {
+      // #2425 in miniature: a 5s step accelerates to 7.5s on the first tier,
+      // so from 0:25 a press and three repeats travel 5, 7.5, 7.5 and 5 — 25s,
+      // landing on 0:00. Rounding each step before summing reads 5 + 8 + 8 + 5.
+      await SettingsService.instance.write(SettingsService.seekTimeSmall, 5);
+      player.setPosition(const Duration(seconds: 25));
+      await pumpControls(tester);
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.arrowLeft);
+      await tester.pump();
+      for (var i = 0; i < 3; i++) {
+        await tester.sendKeyRepeatEvent(LogicalKeyboardKey.arrowLeft);
+        await tester.pump();
+      }
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.arrowLeft);
+      await tester.pump();
+
+      expect(find.text('25s'), findsOneWidget);
+      expect(find.text('26s'), findsNothing);
+      expect(player.seeks, [Duration.zero]);
+
+      await settleFeedback(tester);
+    });
+
     testWidgets('a held arrow accelerates and commits exactly one seek on release', (tester) async {
       await pumpControls(tester);
 
@@ -266,6 +345,154 @@ void main() {
       await settleFeedback(tester);
     });
 
+    testWidgets('a held media fast-forward is consumed whole and commits one skip', (tester) async {
+      // Every event of the press must be consumed here. Whatever escapes
+      // reaches Android's own MediaSession, whose fixed 15-second
+      // fast-forward re-enters the player once per auto-repeat, so the
+      // playhead ends up displaced by how long the key was held (#1375).
+      await pumpControls(tester);
+
+      expect(await tester.sendKeyDownEvent(LogicalKeyboardKey.mediaFastForward), isTrue, reason: 'down');
+      await tester.pump();
+      for (var i = 0; i < 4; i++) {
+        expect(await tester.sendKeyRepeatEvent(LogicalKeyboardKey.mediaFastForward), isTrue, reason: 'repeat $i');
+        await tester.pump();
+      }
+      expect(player.seeks, isEmpty, reason: 'the press is coalesced, not dispatched per event');
+
+      expect(await tester.sendKeyUpEvent(LogicalKeyboardKey.mediaFastForward), isTrue, reason: 'up');
+      await tester.pump();
+
+      expect(player.seeks, [
+        const Duration(minutes: 10, seconds: 10),
+      ], reason: 'one press is one step, however long it is held');
+      expect(find.text('10s'), findsOneWidget);
+
+      await settleFeedback(tester);
+    });
+
+    testWidgets('a rewind burst mirrors a fast-forward burst from the same position', (tester) async {
+      // The hardware symptom of #1375: four rapid fast-forward presses moved
+      // +353s while four rapid rewinds moved -992s, because the leaked
+      // auto-repeats — not the presses — drove the playhead, and the two
+      // holds were not the same length.
+      await pumpControls(tester);
+      const start = Duration(minutes: 10);
+
+      await _holdMediaKey(tester, LogicalKeyboardKey.mediaFastForward);
+      expect(player.seeks, hasLength(1));
+      final forward = player.seeks.single - start;
+
+      // A reload-style jump back retires the pinned target, so the mirrored
+      // hold really does start from where the first one did.
+      player.reopenAt(start);
+      await tester.pump();
+
+      await _holdMediaKey(tester, LogicalKeyboardKey.mediaRewind);
+      expect(player.seeks, hasLength(2));
+      final backward = player.seeks.last - start;
+
+      expect(forward, const Duration(seconds: 10));
+      expect(backward, -forward, reason: 'the same hold each way must move the same distance');
+
+      await settleFeedback(tester);
+    });
+
+    testWidgets('a skip after a jump elsewhere starts from where the jump landed', (tester) async {
+      // #1819: the timeline, a chapter jump, an OS media control and a Watch
+      // Together peer all land on Player.seek. Whichever of them moves the
+      // playhead, the coalesced target the previous skip pinned is stale, and a
+      // skip that resumes from it rewinds the user back across their own jump.
+      await pumpControls(tester);
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.mediaFastForward);
+      await tester.pump();
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.mediaFastForward);
+      await tester.pump();
+      expect(player.seeks, [const Duration(minutes: 10, seconds: 10)]);
+
+      await player.seek(const Duration(minutes: 30));
+      await tester.pump();
+      expect(
+        find.text('10s'),
+        findsNothing,
+        reason: 'the readout promised a skip the jump just cancelled, so it must come down at once',
+      );
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.mediaFastForward);
+      await tester.pump();
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.mediaFastForward);
+      await tester.pump();
+
+      expect(
+        player.seeks.last,
+        const Duration(minutes: 30, seconds: 10),
+        reason: 'the skip must be relative to the new position, not to the superseded 10:10 target',
+      );
+      expect(find.text('10s'), findsOneWidget, reason: 'the abandoned burst total must not keep climbing');
+
+      await settleFeedback(tester);
+    });
+
+    testWidgets('a skip after a stream rebuilt at a resume position starts from there', (tester) async {
+      // Dead-stream recovery answers a seek request by reopening the source at
+      // the target rather than seeking, so a fix that only watched Player.seek
+      // would leave the pin stale here.
+      await pumpControls(tester);
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.mediaFastForward);
+      await tester.pump();
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.mediaFastForward);
+      await tester.pump();
+      final seeksBeforeReload = player.seeks.length;
+
+      player.reopenAt(const Duration(minutes: 3));
+      await tester.pump();
+      expect(player.seeks, hasLength(seeksBeforeReload), reason: 'a reload is not a seek');
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.mediaFastForward);
+      await tester.pump();
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.mediaFastForward);
+      await tester.pump();
+
+      expect(player.seeks.last, const Duration(minutes: 3, seconds: 10));
+
+      await settleFeedback(tester);
+    });
+
+    testWidgets('a new item drops the previous item\'s pending skip and its badge total', (tester) async {
+      // The controls survive an in-place episode swap. A pending target is an
+      // offset into the outgoing item's timeline, and the badge total describes
+      // a burst that will never be committed.
+      player.freezePositionOnSeek = true;
+      await pumpControls(tester);
+
+      for (var i = 0; i < 2; i++) {
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.mediaFastForward);
+        await tester.pump();
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.mediaFastForward);
+        await tester.pump();
+      }
+      expect(find.text('20s'), findsOneWidget);
+      expect(player.seeks.last, const Duration(minutes: 10, seconds: 20));
+
+      await pumpControls(tester, itemId: 'next-episode');
+
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.mediaFastForward);
+      await tester.pump();
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.mediaFastForward);
+      await tester.pump();
+
+      expect(
+        player.seeks.last,
+        const Duration(minutes: 10, seconds: 10),
+        reason: 'the new item restarts from the live position, not from the outgoing 10:20 target',
+      );
+      expect(find.text('10s'), findsOneWidget, reason: 'the badge must not keep counting the abandoned burst');
+
+      await settleFeedback(tester);
+    });
+
     testWidgets('a media fast-forward key announces the chapter it lands on', (tester) async {
       await pumpControls(
         tester,
@@ -333,7 +560,7 @@ void main() {
       // the release must still reset the tier or the next hold in the same
       // direction resumes mid-acceleration.
       final liveOffsets = <int>[];
-      await pumpControls(tester, isLive: true, onLiveSeekBy: liveOffsets.add);
+      await pumpControls(tester, isLive: true, onLiveSeekBy: _acceptingLiveSeek(liveOffsets));
 
       await tester.sendKeyDownEvent(LogicalKeyboardKey.arrowRight);
       await tester.pump();
@@ -355,6 +582,46 @@ void main() {
       await tester.pump();
 
       expect(liveOffsets, [10, 15], reason: 'a fresh hold restarts at the slowest tier');
+      expect(chrome.controlsVisible, isFalse);
+
+      await settleFeedback(tester);
+    });
+
+    testWidgets('a live skip badge reports what the seekable window let through', (tester) async {
+      // #2425 on live TV: the parent accumulator clamps to the capture buffer,
+      // and a fast-forward at the live edge is the everyday case. The badge
+      // may only claim the seconds the accumulator says it applied.
+      final liveOffsets = <int>[];
+      var headroom = 0; // seconds between the playhead and the live edge
+      await pumpControls(
+        tester,
+        isLive: true,
+        onLiveSeekBy: (offset) {
+          liveOffsets.add(offset);
+          final applied = math.min(offset, headroom);
+          headroom -= applied;
+          return applied;
+        },
+      );
+
+      Future<void> pressRight() async {
+        await tester.sendKeyDownEvent(LogicalKeyboardKey.arrowRight);
+        await tester.pump();
+        await tester.sendKeyUpEvent(LogicalKeyboardKey.arrowRight);
+        await tester.pump();
+      }
+
+      await pressRight();
+      expect(liveOffsets, [10], reason: 'the request still reaches the accumulator');
+      expect(find.byType(DoubleTapFeedback), findsNothing, reason: 'nothing was applied at the edge');
+
+      headroom = 4;
+      await pressRight();
+      expect(find.text('4s'), findsOneWidget);
+
+      await pressRight();
+      expect(find.text('4s'), findsOneWidget, reason: 'pinned at the edge, the total holds');
+      expect(find.text('14s'), findsNothing);
       expect(chrome.controlsVisible, isFalse);
 
       await settleFeedback(tester);
@@ -644,6 +911,11 @@ void main() {
       // is derived from viewport width. Pump the readout at the real viewport
       // size rather than through the harness, whose surface is pinned landscape.
       const narrow = Size(400, 800);
+      // The caller owns the seconds notifier: held-seek updates the count
+      // without rebuilding the controls root, so the widget listens but never
+      // disposes it.
+      final seconds = ValueNotifier<int>(10);
+      addTearDown(seconds.dispose);
       await tester.pumpWidget(
         MediaQuery(
           data: const MediaQueryData(size: narrow),
@@ -653,7 +925,11 @@ void main() {
               child: SizedBox.fromSize(
                 key: const ValueKey('viewport'),
                 size: narrow,
-                child: const Stack(children: [Positioned.fill(child: DoubleTapFeedback(isForward: true, seconds: 10))]),
+                child: Stack(
+                  children: [
+                    Positioned.fill(child: DoubleTapFeedback(isForward: true, seconds: seconds, animate: true)),
+                  ],
+                ),
               ),
             ),
           ),
@@ -713,9 +989,19 @@ void main() {
       chrome.dispose();
       toast.dispose();
       await database.close();
+      await player.dispose();
     });
 
-    Future<void> pumpDesktopControls(WidgetTester tester) async {
+    Future<void> pumpDesktopControls(
+      WidgetTester tester, {
+      _RecordingPlayer? withPlayer,
+      bool isLive = false,
+      LiveSeekBy? onLiveSeekBy,
+      ValueChanged<int>? onLiveSeek,
+      VoidCallback? onNext,
+      bool canNavigateMediaItems = false,
+    }) async {
+      final active = withPlayer ?? player;
       await tester.pumpWidget(
         MultiProvider(
           providers: [
@@ -730,12 +1016,16 @@ void main() {
                 width: 1280,
                 height: 720,
                 child: PlexVideoControls(
-                  player: player,
+                  player: active,
                   volumeController: volume,
                   metadata: testMediaItem(id: 'desktop-keyboard-seek'),
                   toastController: toast,
                   chromeController: chrome,
-                  canNavigateMediaItems: false,
+                  canNavigateMediaItems: canNavigateMediaItems,
+                  isLive: isLive,
+                  onLiveSeekBy: onLiveSeekBy,
+                  onLiveSeek: onLiveSeek,
+                  onNext: onNext,
                 ),
               ),
             ),
@@ -830,6 +1120,129 @@ void main() {
 
       await settleFeedback(tester);
     });
+
+    testWidgets('a lagging backend still yields the pin to a jump elsewhere', (tester) async {
+      // The two invariants pull in opposite directions: a slow seek must not
+      // retire the pin (#1676), a jump from anywhere else must (#1819). Freeze
+      // the reported position so only the seek announcement can tell them apart.
+      player.freezePositionOnSeek = true;
+      await pumpDesktopControls(tester);
+
+      await pressKey(tester, LogicalKeyboardKey.arrowRight);
+      await pressKey(tester, LogicalKeyboardKey.arrowRight);
+      expect(player.seeks.last, const Duration(minutes: 10, seconds: 20), reason: 'the burst is still pinned');
+
+      player.setPosition(const Duration(minutes: 2));
+      await player.seek(const Duration(minutes: 2));
+      await tester.pump();
+
+      await pressKey(tester, LogicalKeyboardKey.arrowRight);
+
+      expect(player.seeks.last, const Duration(minutes: 2, seconds: 10));
+      expect(find.text('10s'), findsOneWidget);
+
+      await settleFeedback(tester);
+    });
+
+    testWidgets('swapping the player moves the pin listener with it', (tester) async {
+      // The controls survive a player replacement (didUpdateWidget accepts a new
+      // instance), so an accumulator left bound to the retired player would keep
+      // a pin from a timeline that no longer exists and take orders from a
+      // player nobody is watching.
+      final replacement = _RecordingPlayer()
+        ..setPosition(const Duration(minutes: 4))
+        // Frozen, so a pinned chain stays distinguishable from a rebase.
+        ..freezePositionOnSeek = true;
+      addTearDown(replacement.dispose);
+
+      await pumpDesktopControls(tester);
+      await pressKey(tester, LogicalKeyboardKey.arrowRight);
+      expect(player.seeks.last, const Duration(minutes: 10, seconds: 10));
+
+      await pumpDesktopControls(tester, withPlayer: replacement);
+      expect(tester.takeException(), isNull);
+
+      await pressKey(tester, LogicalKeyboardKey.arrowRight);
+      expect(
+        replacement.seeks.last,
+        const Duration(minutes: 4, seconds: 10),
+        reason: 'the retired pin must not survive the swap and chain to 10:20',
+      );
+      // The badge is not asserted here: pumping the replacement settles the
+      // feedback timer, which clears the total on its own.
+
+      // Build a fresh pin on the new player, then let the retired one shout.
+      await pressKey(tester, LogicalKeyboardKey.arrowRight);
+      expect(replacement.seeks.last, const Duration(minutes: 4, seconds: 20));
+      await player.seek(const Duration(minutes: 30));
+      await tester.pump();
+
+      await pressKey(tester, LogicalKeyboardKey.arrowRight);
+      expect(
+        replacement.seeks.last,
+        const Duration(minutes: 4, seconds: 30),
+        reason: 'a jump from the retired player must not retire the current pin',
+      );
+
+      await settleFeedback(tester);
+    });
+
+    testWidgets('an absolute live seek takes down the badge a live skip raised', (tester) async {
+      // Live relative skips go to the parent epoch accumulator, not _hiddenSeek
+      // (#1253), so no playhead jump can retire this badge. The absolute seek
+      // cancels the queued skip, so its promised total is going nowhere.
+      final liveOffsets = <int>[];
+      final absoluteSeeks = <int>[];
+      await pumpDesktopControls(
+        tester,
+        isLive: true,
+        onLiveSeekBy: _acceptingLiveSeek(liveOffsets),
+        onLiveSeek: absoluteSeeks.add,
+      );
+
+      await pressKey(tester, LogicalKeyboardKey.arrowRight);
+      expect(liveOffsets, [10]);
+      expect(find.text('10s'), findsOneWidget);
+
+      chrome.show();
+      await tester.pump();
+      final live = tester.widget<DesktopVideoControls>(find.byType(DesktopVideoControls));
+      live.onLiveSeek!(120);
+      await tester.pump();
+
+      expect(absoluteSeeks, [120], reason: 'the wrapper still delegates to the screen');
+      expect(find.byType(DoubleTapFeedback), findsNothing, reason: 'the skip it promised was cancelled with it');
+
+      await settleFeedback(tester);
+    });
+
+    testWidgets('switching what is playing takes the badge with the old timeline', (tester) async {
+      // A live channel switch cancels the queued live offset, and an item
+      // change re-keys the whole timeline. Neither runs through _hiddenSeek, so
+      // nothing else would retire a readout that now describes nothing.
+      final liveOffsets = <int>[];
+      var nextPresses = 0;
+      await pumpDesktopControls(
+        tester,
+        isLive: true,
+        onLiveSeekBy: _acceptingLiveSeek(liveOffsets),
+        onNext: () => nextPresses++,
+      );
+
+      await pressKey(tester, LogicalKeyboardKey.arrowRight);
+      expect(liveOffsets, [10]);
+      expect(find.text('10s'), findsOneWidget);
+
+      chrome.show();
+      await tester.pump();
+      tester.widget<DesktopVideoControls>(find.byType(DesktopVideoControls)).onNext!();
+      await tester.pump();
+
+      expect(nextPresses, 1, reason: 'the wrapper still delegates to the screen');
+      expect(find.byType(DoubleTapFeedback), findsNothing);
+
+      await settleFeedback(tester);
+    });
   });
 
   group('formatSkipFeedbackLabel', () {
@@ -847,10 +1260,34 @@ void main() {
   });
 }
 
+/// One remote press: key down, auto-repeats while it is held, release.
+///
+/// Every event of it must be consumed here — whatever leaks reaches the
+/// platform's own MediaSession, which answers with its own fixed skip and
+/// makes the displacement a function of hold length rather than presses.
+Future<void> _holdMediaKey(WidgetTester tester, LogicalKeyboardKey key) async {
+  expect(await tester.sendKeyDownEvent(key), isTrue, reason: '$key down');
+  await tester.pump();
+  for (var i = 0; i < 4; i++) {
+    expect(await tester.sendKeyRepeatEvent(key), isTrue, reason: '$key repeat $i');
+    await tester.pump();
+  }
+  expect(await tester.sendKeyUpEvent(key), isTrue, reason: '$key up');
+  await tester.pump();
+}
+
+/// A live accumulator with unbounded headroom: records every requested offset
+/// and reports it applied in full.
+LiveSeekBy _acceptingLiveSeek(List<int> offsets) => (offset) {
+  offsets.add(offset);
+  return offset;
+};
+
 /// Minimal [Player] that records transport calls and keeps a settable
 /// playing/position state so intent-dependent behaviour can be asserted.
 class _RecordingPlayer implements Player {
   final List<Duration> seeks = [];
+  final StreamController<Duration?> _jumpController = StreamController<Duration?>.broadcast();
   int playCalls = 0;
   int pauseCalls = 0;
   int playOrPauseCalls = 0;
@@ -866,6 +1303,13 @@ class _RecordingPlayer implements Player {
 
   void setPosition(Duration value) => _position = value;
 
+  /// Mirrors [PlayerBase.resetPlaybackProgress]: an in-place reload rebuilds
+  /// the stream at a resume position without ever calling [seek].
+  void reopenAt(Duration value) {
+    _position = value;
+    _jumpController.add(value);
+  }
+
   @override
   String get playerType => 'mpv';
 
@@ -879,6 +1323,7 @@ class _RecordingPlayer implements Player {
     completed: const Stream<bool>.empty(),
     buffering: const Stream<bool>.empty(),
     position: const Stream<Duration>.empty(),
+    playheadJump: _jumpController.stream,
     duration: const Stream<Duration>.empty(),
     seekable: const Stream<bool>.empty(),
     buffer: const Stream<Duration>.empty(),
@@ -895,10 +1340,19 @@ class _RecordingPlayer implements Player {
     backendSwitched: const Stream<void>.empty(),
   );
 
+  /// Mirrors [PlayerBase.runSeek]: the requested target is announced whatever
+  /// asked for it, while [freezePositionOnSeek] models a backend that has not
+  /// moved the reported position yet.
   @override
   Future<void> seek(Duration position) async {
     seeks.add(position);
     if (!freezePositionOnSeek) _position = position;
+    _jumpController.add(position);
+  }
+
+  @override
+  Future<void> dispose({bool preserveDisplayMode = false}) async {
+    await _jumpController.close();
   }
 
   @override

@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:plezy/connection/connection.dart';
 import 'package:plezy/i18n/strings.g.dart';
@@ -15,6 +16,7 @@ import 'package:plezy/services/companion_remote/lan_discovery_service.dart';
 import 'package:plezy/services/companion_remote/remote_auth_context.dart';
 import 'package:plezy/services/companion_remote/remote_auth_service.dart';
 
+import '../test_helpers/backend_client_fixtures.dart';
 import '../test_helpers/prefs.dart';
 import '../test_helpers/profile_stack.dart';
 
@@ -24,11 +26,6 @@ void main() {
   setUp(resetSharedPreferencesForTest);
 
   group('CompanionRemoteProvider — initial state', () {
-
-
-
-
-
     test('discoverHosts returns null when crypto is not ready', () {
       final p = CompanionRemoteProvider();
       expect(p.discoverHosts(), isNull);
@@ -51,6 +48,107 @@ void main() {
       expect(p.isHostServerRunning, isFalse);
       p.dispose();
     });
+
+    test('host listen addresses are exposed while running and cleared on stop', () async {
+      final host = _FakeCompanionRemotePeerService();
+      final harness = await _RemoteHarness.create(
+        _FakePeerFactory([host]).call,
+        discoveryServiceFactory: _FakeLanDiscoveryService.new,
+      );
+      addTearDown(harness.close);
+
+      expect(harness.provider.hostServerAddresses, isEmpty);
+      await harness.provider.startHostServer();
+      expect(harness.provider.hostServerAddresses, ['127.0.0.1:48634']);
+
+      await harness.provider.stopHostServer();
+      expect(harness.provider.hostServerAddresses, isEmpty);
+    });
+  });
+
+  group('CompanionRemoteProvider — live host identity refresh', () {
+    test('a refresh still rebuilding when the provider is disposed does not restart the host', () async {
+      final stack = await ProfileStack.create();
+      addTearDown(stack.dispose);
+      final first = _localProfile('profile-a');
+      final second = _localProfile('profile-b');
+      for (final (profile, connection) in [(first, _jellyfinConnection('a')), (second, _jellyfinConnection('b'))]) {
+        await stack.connections.upsert(connection);
+        await stack.profiles.upsert(profile);
+        await stack.profileConnections.upsert(
+          ProfileConnection(profileId: profile.id, connectionId: connection.id, userIdentifier: connection.userId),
+          makeDefault: true,
+        );
+      }
+      await stack.storage.setActiveProfileId(first.id);
+      await stack.active.initialize();
+
+      final disconnectGate = Completer<void>();
+      final host = _FakeCompanionRemotePeerService(disconnectGate: disconnectGate);
+      final peers = _FakePeerFactory([host, _FakeCompanionRemotePeerService()]);
+      final provider = CompanionRemoteProvider.forTesting(
+        peerServiceFactory: peers.call,
+        discoveryServiceFactory: _FakeLanDiscoveryService.new,
+      );
+      addTearDown(() {
+        if (!disconnectGate.isCompleted) disconnectGate.complete();
+        if (!provider.isDisposed) provider.dispose();
+      });
+      expect(
+        await provider.ensureCryptoReady(
+          null,
+          connections: stack.connections,
+          activeProfile: stack.active,
+          profileConnections: stack.profileConnections,
+        ),
+        isTrue,
+      );
+      await provider.startHostServer();
+      provider.bindProfileServices(
+        connections: stack.connections,
+        activeProfile: stack.active,
+        profileConnections: stack.profileConnections,
+        plexHome: stack.plexHome,
+      );
+      // Let the watchers' initial emissions refresh an unchanged identity.
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+      expect(provider.isHostServerRunning, isTrue);
+
+      // A profile switch changes the identity: the refresh tears the host
+      // down to rebuild, and the provider is disposed while it does.
+      expect(await stack.active.activate(second), isTrue);
+      await host.disconnectStarted.future;
+      provider.dispose();
+      disconnectGate.complete();
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+
+      expect(peers.created, 1);
+      expect(provider.isHostServerRunning, isFalse);
+    });
+  });
+
+  group('CompanionRemoteProvider — host player state', () {
+    test('a remote that pairs while the player is up is told it is active', () async {
+      final host = _FakeCompanionRemotePeerService();
+      final harness = await _RemoteHarness.create(
+        _FakePeerFactory([host]).call,
+        discoveryServiceFactory: _FakeLanDiscoveryService.new,
+      );
+      addTearDown(harness.close);
+      await harness.provider.startHostServer();
+      harness.provider.setHostPlayerActive(true);
+      host.sentCommands.clear();
+
+      host.emitDeviceConnected(RemoteDevice(id: 'phone', name: 'Phone', platform: 'ios', connectedAt: DateTime(2026)));
+
+      expect(host.sentCommands.single.type, RemoteCommandType.syncState);
+      expect(host.sentCommands.single.data, {'playerActive': true});
+
+      harness.provider.setHostPlayerActive(false);
+      host.sentCommands.clear();
+      host.emitDeviceConnected(RemoteDevice(id: 'phone', name: 'Phone', platform: 'ios', connectedAt: DateTime(2026)));
+      expect(host.sentCommands.single.data, {'playerActive': false});
+    });
   });
 
   group('CompanionRemoteProvider — dispose hygiene', () {
@@ -60,12 +158,6 @@ void main() {
       // status remains disconnected.
       expect(p.cancelReconnect, returnsNormally);
       expect(p.status, RemoteSessionStatus.disconnected);
-      p.dispose();
-    });
-
-    test('stopDiscovery on a fresh provider is a no-op', () {
-      final p = CompanionRemoteProvider();
-      expect(p.stopDiscovery, returnsNormally);
       p.dispose();
     });
 
@@ -406,6 +498,155 @@ void main() {
     });
   });
 
+  group('CompanionRemoteProvider — lifecycle and reconnect resilience', () {
+    test('trailing peer status and error events do not end the reconnect cycle', () async {
+      final initial = _FakeCompanionRemotePeerService();
+      final factory = _FakePeerFactory([initial]);
+      final harness = await _RemoteHarness.create(factory.call);
+      addTearDown(harness.close);
+      await harness.provider.connectToManualHost('192.0.2.30:48634');
+
+      // The real peer emits deviceDisconnected followed by a disconnected
+      // status, and a dying socket can surface a stale error; none of these
+      // may knock the session out of reconnecting.
+      initial.emitDeviceDisconnected();
+      initial.emitStatus(RemoteSessionStatus.disconnected);
+      initial.emitError(RemotePeerError(type: RemotePeerErrorType.connectionFailed, message: 'socket error'));
+
+      expect(harness.provider.status, RemoteSessionStatus.reconnecting);
+      expect(harness.provider.session?.errorMessage, isNull);
+      expect(harness.provider.reconnectAttempts, 1);
+
+      await harness.provider.cancelReconnect();
+    });
+
+    test('candidate status and error emissions during a failed reconnect attempt still reschedule', () async {
+      final initial = _FakeCompanionRemotePeerService();
+      final joinGate = Completer<void>();
+      final candidate = _FakeCompanionRemotePeerService(
+        joinGate: joinGate,
+        joinError: StateError('synthetic reconnect failure'),
+      );
+      final factory = _FakePeerFactory([initial, candidate]);
+      final harness = await _RemoteHarness.create(factory.call);
+      addTearDown(harness.close);
+      await harness.provider.connectToManualHost('192.0.2.35:48634');
+
+      initial.emitDeviceDisconnected();
+      final retry = harness.provider.retryReconnectNow();
+      await candidate.joinStarted.future;
+
+      // A joining candidate mirrors its own lifecycle into the session: a
+      // transient connected knocks it out of `reconnecting`, and the dying
+      // socket's error then stamps `error`.
+      candidate.emitStatus(RemoteSessionStatus.connected);
+      candidate.emitError(RemotePeerError(type: RemotePeerErrorType.connectionFailed, message: 'handshake died'));
+      expect(harness.provider.status, isNot(RemoteSessionStatus.reconnecting));
+
+      joinGate.complete();
+      await retry;
+
+      // Regression: rescheduling used to read the peer-overwritten session
+      // status and ended the cycle after this single failed attempt. The
+      // attempt's own captured intent must drive the reschedule.
+      expect(harness.provider.reconnectAttempts, 1);
+
+      await harness.provider.cancelReconnect();
+    });
+
+    test('a failed user-initiated connect does not schedule a reconnect', () async {
+      final candidate = _FakeCompanionRemotePeerService(joinError: StateError('synthetic connect failure'));
+      final factory = _FakePeerFactory([candidate]);
+      final harness = await _RemoteHarness.create(factory.call);
+      addTearDown(harness.close);
+
+      await expectLater(harness.provider.connectToManualHost('192.0.2.36:48634'), throwsA(isA<StateError>()));
+
+      // _scheduleReconnect arms synchronously, so a zero attempt count proves
+      // the user-initiated failure surfaced as an error without a retry cycle.
+      expect(harness.provider.status, RemoteSessionStatus.error);
+      expect(harness.provider.reconnectAttempts, 0);
+      expect(factory.created, 1);
+    });
+
+    test('disconnect while backgrounded defers retries until resume, then reconnects', () async {
+      final initial = _FakeCompanionRemotePeerService();
+      final candidate = _FakeCompanionRemotePeerService();
+      final factory = _FakePeerFactory([initial, candidate]);
+      final harness = await _RemoteHarness.create(factory.call);
+      addTearDown(harness.close);
+      await harness.provider.connectToManualHost('192.0.2.31:48634');
+
+      harness.provider.didChangeAppLifecycleState(AppLifecycleState.paused);
+      initial.emitDeviceDisconnected();
+
+      // Backgrounded: the cycle is held open without burning the retry budget
+      // or allocating a candidate that would fail against restricted network.
+      expect(harness.provider.status, RemoteSessionStatus.reconnecting);
+      expect(harness.provider.reconnectAttempts, 0);
+      expect(factory.created, 1);
+
+      harness.provider.didChangeAppLifecycleState(AppLifecycleState.resumed);
+      await candidate.joinStarted.future;
+      await Future<void>.delayed(Duration.zero);
+
+      expect(harness.provider.status, RemoteSessionStatus.connected);
+      expect(harness.provider.reconnectAttempts, 0);
+    });
+
+    test('backgrounding pauses an armed backoff timer and resume retries with a fresh budget', () async {
+      final initial = _FakeCompanionRemotePeerService();
+      final candidate = _FakeCompanionRemotePeerService();
+      final factory = _FakePeerFactory([initial, candidate]);
+      final harness = await _RemoteHarness.create(factory.call);
+      addTearDown(harness.close);
+      await harness.provider.connectToManualHost('192.0.2.32:48634');
+
+      initial.emitDeviceDisconnected();
+      expect(harness.provider.reconnectAttempts, 1);
+
+      harness.provider.didChangeAppLifecycleState(AppLifecycleState.paused);
+      harness.provider.didChangeAppLifecycleState(AppLifecycleState.resumed);
+      await candidate.joinStarted.future;
+      await Future<void>.delayed(Duration.zero);
+
+      expect(harness.provider.status, RemoteSessionStatus.connected);
+      expect(harness.provider.reconnectAttempts, 0);
+    });
+
+    test('resume pings a connected remote session to surface a dead socket', () async {
+      final initial = _FakeCompanionRemotePeerService();
+      final factory = _FakePeerFactory([initial]);
+      final harness = await _RemoteHarness.create(factory.call);
+      addTearDown(harness.close);
+      await harness.provider.connectToManualHost('192.0.2.33:48634');
+
+      harness.provider.didChangeAppLifecycleState(AppLifecycleState.paused);
+      harness.provider.didChangeAppLifecycleState(AppLifecycleState.resumed);
+
+      expect(initial.pingsSent, 1);
+    });
+
+    test('leave while a resume retry is pending prevents the retry', () async {
+      final initial = _FakeCompanionRemotePeerService();
+      final factory = _FakePeerFactory([initial]);
+      final harness = await _RemoteHarness.create(factory.call);
+      addTearDown(harness.close);
+      await harness.provider.connectToManualHost('192.0.2.34:48634');
+
+      harness.provider.didChangeAppLifecycleState(AppLifecycleState.paused);
+      initial.emitDeviceDisconnected();
+      await harness.provider.leaveSession();
+      harness.provider.didChangeAppLifecycleState(AppLifecycleState.resumed);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(harness.provider.session, isNull);
+      // _FakePeerFactory throws on an unexpected allocation, so reaching here
+      // proves no reconnect candidate was created.
+      expect(factory.created, 1);
+    });
+  });
+
   group('CompanionRemoteProvider — public API safety', () {
     test('connectToDiscoveredHost reports localized auth failure when crypto is not ready', () async {
       final p = CompanionRemoteProvider();
@@ -649,44 +890,29 @@ PlexAccountConnection _plexAccount(String id, String clientIdentifier) {
   );
 }
 
-JellyfinConnection _jellyfinConnection(String id) {
-  return JellyfinConnection(
-    id: id,
-    baseUrl: 'https://jellyfin.example.test',
-    serverName: 'Jellyfin',
-    serverMachineId: 'machine-$id',
-    userId: 'user-$id',
-    userName: 'User $id',
-    accessToken: 'token-$id',
-    deviceId: 'device-$id',
-    createdAt: DateTime(2026, 1, 1),
-  );
-}
+JellyfinConnection _jellyfinConnection(String id) => testJellyfinConnection(
+  id: id,
+  machineId: 'machine-$id',
+  userId: 'user-$id',
+  baseUrl: 'https://jellyfin.example.test',
+  serverName: 'Jellyfin',
+  userName: 'User $id',
+  accessToken: 'token-$id',
+  deviceId: 'device-$id',
+  createdAt: DateTime(2026, 1, 1),
+);
 
 Profile _localProfile(String id) {
   return Profile.local(id: id, displayName: id, createdAt: DateTime(2026, 1, 1));
 }
 
 PlexHome _home(String adminUuid) {
-  return PlexHome(
-    id: 1,
-    name: 'Home',
-    guestUserID: null,
-    guestUserUUID: '',
-    guestEnabled: false,
-    subscription: false,
-    users: [_homeUser(adminUuid, admin: true)],
-  );
+  return PlexHome(id: 1, users: [_homeUser(adminUuid, admin: true)]);
 }
 
 PlexHome _homeWithUsers(String adminUuid, List<String> userUuids) {
   return PlexHome(
     id: 1,
-    name: 'Home',
-    guestUserID: null,
-    guestUserUUID: '',
-    guestEnabled: false,
-    subscription: false,
     users: [_homeUser(adminUuid, admin: true), for (final uuid in userUuids) _homeUser(uuid, admin: false)],
   );
 }
@@ -823,8 +1049,23 @@ class _FakeCompanionRemotePeerService extends CompanionRemotePeerService {
     sentCommands.add(command);
   }
 
+  int pingsSent = 0;
+
+  @override
+  void sendPing() {
+    pingsSent++;
+  }
+
+  void emitDeviceConnected(RemoteDevice device) {
+    if (!_streamsClosed) _connected.add(device);
+  }
+
   void emitDeviceDisconnected() {
     if (!_streamsClosed) _disconnected.add(null);
+  }
+
+  void emitStatus(RemoteSessionStatus status) {
+    if (!_streamsClosed) _statuses.add(status);
   }
 
   void emitCommand(RemoteCommand command) {
@@ -844,8 +1085,16 @@ class _FakeCompanionRemotePeerService extends CompanionRemotePeerService {
     if (gate != null) await gate.future;
   }
 
+  Future<void>? _disposeInFlight;
+
+  /// Mirrors the real service's idempotent dispose (`_disposed` /
+  /// `FutureCoalescer` dedup): only the first call tears down, concurrent
+  /// and repeat calls join it. The provider relies on that contract instead of
+  /// memoizing disposals itself, so [disposeCalls] counts effective disposals.
   @override
-  Future<void> dispose() async {
+  Future<void> dispose() => _disposeInFlight ??= _disposeOnce();
+
+  Future<void> _disposeOnce() async {
     disposeCalls++;
     await disconnect();
     if (_streamsClosed) return;

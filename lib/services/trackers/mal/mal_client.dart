@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 
 import '../../../models/mal/mal_anime.dart';
 import '../../../models/mal/mal_character.dart';
+import '../../../models/trackers/anime_list_snapshot.dart';
 import '../../../utils/app_logger.dart';
 import '../../../utils/json_utils.dart';
 import '../future_coalescer.dart';
@@ -36,7 +37,7 @@ class MalClient implements DisposableTrackerClient {
     http.Client? httpClient,
     MalAuthService? authService,
   }) : _session = session,
-       _http = TrackerHttpClient(service: TrackerService.mal, logLabel: 'MAL', httpClient: httpClient),
+       _http = TrackerHttpClient(logLabel: 'MAL', httpClient: httpClient),
        _auth = authService ?? MalAuthService();
 
   TrackerSession get session => _session;
@@ -64,6 +65,22 @@ class MalClient implements DisposableTrackerClient {
 
   Future<void> deleteMyListStatus(int animeId) async {
     await _request('DELETE', '/anime/$animeId/my_list_status');
+  }
+
+  /// The viewer's list status for an anime — `plan_to_watch`, `watching`,
+  /// `completed`, `on_hold` or `dropped` — or null when it is not on their list.
+  Future<String?> getMyListStatusName(int animeId) async {
+    try {
+      final res = await _request('GET', '/anime/$animeId?fields=my_list_status');
+      if (res is! Map) return null;
+      final myListStatus = res['my_list_status'];
+      if (myListStatus is! Map) return null;
+      final status = myListStatus['status'];
+      return status is String ? status : null;
+    } on TrackerApiException catch (e) {
+      if (e.statusCode == 404) return null;
+      rethrow;
+    }
   }
 
   Future<int?> getMyListScore(int animeId) async {
@@ -152,11 +169,20 @@ class MalClient implements DisposableTrackerClient {
     return MalPage.fromJson(res, MalAnime.fromJson);
   }
 
-  Future<int?> getAnimeEpisodeCount(int animeId) async {
-    final res = await _request('GET', '/anime/$animeId?fields=num_episodes');
+  /// Episode count plus the viewer's list status in one request, so the
+  /// rewatch-preserving scrobble path costs no extra call.
+  Future<AnimeListSnapshot?> getAnimeListSnapshot(int animeId) async {
+    final res = await _request('GET', '/anime/$animeId?fields=num_episodes,my_list_status');
     if (res is! Map) return null;
     final count = flexibleInt(res['num_episodes']);
-    return count != null && count > 0 ? count : null;
+    final list = res['my_list_status'];
+    return AnimeListSnapshot(
+      episodeCount: count != null && count > 0 ? count : null,
+      rewatching: list is Map && flexibleBool(list['is_rewatching']),
+      completed: list is Map && list['status'] == 'completed',
+      rewatchCount: list is Map ? (flexibleInt(list['num_times_rewatched']) ?? 0) : 0,
+      progress: list is Map ? (flexibleInt(list['num_watched_episodes']) ?? 0) : 0,
+    );
   }
 
   Future<TrackerSession> _refresh() => _refreshCoalescer.run(_doRefresh);
@@ -193,13 +219,7 @@ class MalClient implements DisposableTrackerClient {
     var res = await _send(method, path, body: body, formBody: formBody);
 
     if (res.statusCode == 401) {
-      try {
-        await _refresh();
-      } catch (_) {
-        // Reported as an API 401, not as the TrackerAuthException Trakt
-        // propagates from the same path.
-        throw const TrackerApiException(service: TrackerService.mal, statusCode: 401);
-      }
+      await _refresh();
       res = await _send(method, path, body: body, formBody: formBody);
     }
 

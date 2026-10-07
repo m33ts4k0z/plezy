@@ -3,7 +3,7 @@ import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 
-import '../../scripts/generate_iso_639_data.dart';
+import '../../scripts/codegen/generate_iso_639_data.dart';
 
 void main() {
   late String validSource;
@@ -68,18 +68,6 @@ void main() {
 
     await expectLater(generateIso639Data(input.path, output.path), throwsA(isA<FormatException>()));
     expect(await output.readAsString(), 'sentinel');
-  });
-
-  test('atomic writer replaces the complete destination', () async {
-    final directory = await Directory.systemTemp.createTemp('plezy_iso_atomic_test.');
-    addTearDown(() => directory.delete(recursive: true));
-    final output = File('${directory.path}/output.dart');
-    await output.writeAsString('old');
-
-    await writeFileAtomically(output.path, 'new bytes\n');
-
-    expect(await output.readAsString(), 'new bytes\n');
-    expect(directory.listSync().where((entry) => entry.path.contains('.tmp.')), isEmpty);
   });
 }
 

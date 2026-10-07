@@ -4,6 +4,9 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+import '../i18n/app_locale_utils.dart';
+import '../i18n/strings.g.dart';
+import '../media/media_kind.dart';
 import '../utils/app_logger.dart';
 import '../utils/external_ids.dart';
 import '../utils/json_utils.dart';
@@ -261,18 +264,27 @@ class PlexDiscoverClient {
     ];
   }
 
-  Future<Map<String, dynamic>?> match(ExternalIds ids) async {
+  /// Resolve a library item's external ids to Discover metadata. Discover
+  /// answers a `guid` lookup only when paired with the numeric metadata
+  /// `type` (1 movie, 2 show); a bare guid returns an empty container for
+  /// every item (#1873).
+  Future<Map<String, dynamic>?> match(ExternalIds ids, {required MediaKind kind}) async {
+    final type = switch (kind) {
+      MediaKind.movie => 1,
+      MediaKind.show => 2,
+      _ => null,
+    };
     final guid = switch (ids) {
       ExternalIds(imdb: final String imdb) => 'imdb://$imdb',
       ExternalIds(tmdb: final int tmdb) => 'tmdb://$tmdb',
       ExternalIds(tvdb: final int tvdb) => 'tvdb://$tvdb',
       _ => null,
     };
-    if (guid == null) return null;
+    if (type == null || guid == null) return null;
     final data = await _request(
       'GET',
       '/library/metadata/matches',
-      query: {'guid': guid, 'includeGuids': 1},
+      query: {'type': type, 'guid': guid, 'includeGuids': 1},
       allowNotFound: true,
     );
     if (data == null) return null;
@@ -337,6 +349,9 @@ class PlexDiscoverClient {
       'X-Plex-Client-Identifier': session.clientIdentifier,
       'X-Plex-Product': 'Plezy',
       'X-Plex-Version': '2',
+      // Read per request so a language switch applies on the next fetch.
+      // Discover localizes titles, summaries and shelf names from this.
+      'X-Plex-Language': LocaleSettings.currentLocale.plexLanguageCode,
     };
     final request = switch (method) {
       'GET' => _http.get(uri, headers: headers),

@@ -7,9 +7,10 @@ import 'package:http/http.dart' as http;
 import 'package:package_info_plus/package_info_plus.dart';
 
 import '../connection/connection.dart';
+import '../media/account_preferences.dart';
+import '../media/artist_discography.dart';
 import '../media/episode_collection.dart';
 import '../media/library_filter_result.dart';
-import '../media/library_first_character.dart';
 import '../media/library_query.dart';
 import 'favorite_channels_repository.dart';
 import 'live_session_tracker.dart';
@@ -20,22 +21,30 @@ import '../media/live_tv_support.dart';
 import '../media/lyrics.dart';
 import '../media/media_backend.dart';
 import '../media/media_browser_dialect.dart';
+import '../media/library_change_event.dart';
+import 'library_events/library_event_socket.dart';
+import 'library_events/media_browser_library_event_socket.dart';
 import '../media/media_file_info.dart';
 import '../media/media_hub.dart';
 import '../media/media_item.dart';
 import '../media/media_kind.dart';
 import '../media/media_library.dart';
 import '../media/media_playlist.dart';
+import '../media/media_person.dart';
 import '../media/ids.dart';
 import '../media/media_server_client.dart';
 import '../media/playback_report_metadata.dart';
 import '../media/server_capabilities.dart';
 import '../models/audio_quality_preset.dart';
-import '../models/transcode_quality_preset.dart';
-import '../models/jellyfin/jellyfin_user_profile.dart';
+import '../models/jellyfin/jellyfin_account_preferences.dart';
+import '../models/jellyfin/jellyfin_display_preferences.dart';
 import '../models/livetv_capture_buffer.dart';
 import '../models/livetv_channel.dart';
 import '../models/livetv_program.dart';
+import '../models/livetv_dvr.dart';
+import '../models/media_grab_operation.dart';
+import '../models/media_subscription.dart';
+import '../models/transcode_quality_preset.dart';
 import '../media/media_source_info.dart';
 import '../media/media_sort.dart';
 import '../media/media_version.dart';
@@ -49,6 +58,7 @@ import '../utils/log_redaction_manager.dart';
 import '../utils/external_ids.dart';
 import '../utils/media_server_http_client.dart';
 import '../utils/resolution_label.dart';
+import '../utils/search_relevance.dart';
 import '../utils/track_label_builder.dart';
 import '../exceptions/media_server_exceptions.dart';
 import '../i18n/strings.g.dart';
@@ -58,6 +68,7 @@ import 'jellyfin_auth_header.dart';
 import 'jellyfin_endpoint_discovery.dart';
 import '../media/download_resolution.dart';
 import 'api_cache.dart';
+import 'bif_thumbnail_service.dart';
 import 'download_artwork_helpers.dart';
 import 'jellyfin_api_cache.dart';
 import 'jellyfin_mappers.dart';
@@ -68,10 +79,14 @@ import 'jellyfin_trickplay_service.dart';
 import 'media_browser_paths.dart';
 import 'playback_initialization_types.dart';
 import 'scrub_preview_source.dart';
+import 'settings_service.dart' show SpecialsOrdering;
 import 'subtitle_preference.dart';
 import 'track_selection_service.dart';
+import 'video_decode_capabilities.dart';
 import '../mpv/mpv.dart';
+import '../utils/codec_utils.dart';
 
+part 'jellyfin_client/parts/account_preferences.dart';
 part 'jellyfin_client/parts/browse.dart';
 part 'jellyfin_client/parts/music.dart';
 part 'jellyfin_client/parts/playback.dart';
@@ -80,6 +95,7 @@ part 'jellyfin_client/parts/playlists.dart';
 part 'jellyfin_client/parts/collections.dart';
 part 'jellyfin_client/parts/file_info.dart';
 part 'jellyfin_client/parts/live_tv.dart';
+part 'jellyfin_client/parts/live_tv_dvr.dart';
 part 'jellyfin_client/parts/images_downloads.dart';
 part 'jellyfin_client/parts/metadata_edit.dart';
 
@@ -94,9 +110,71 @@ mixin _JellyfinClientInternals on MediaServerCacheMixin {
   MediaBrowserDialect get dialect;
   MediaBrowserPaths get paths;
   FailoverHttpClient get _http;
+
+  /// Cached `DisplayPreferences` value: whether `/Shows/NextUp` requests carry
+  /// `EnableRewatching=true`. Written by the account-preferences part, read by
+  /// the browse part on every Next Up request, so it is declared here.
+  bool _rewatchingInNextUp = false;
+
+  /// Whether this server both understands the parameter and has it switched on
+  /// for this account.
+  bool get sendNextUpRewatching => _rewatchingInNextUp && dialect.supportsNextUpRewatching;
+
   MediaItem? _mapItem(Map<String, dynamic> json);
   List<MediaItem> _mapItems(Iterable<Map<String, dynamic>> items);
   String? _absolutizeImagePath(String? path);
+
+  /// Per-facet value listing shared by the browse part (library filters) and
+  /// the metadata-edit part (server-wide tag suggestions when [libraryId] is
+  /// null). Emby-only route shape; Jellyfin callers use `/Items/Filters`.
+  /// Throws [MediaServerHttpException] on any request failure — each caller
+  /// picks its own degradation.
+  Future<List<String>> _fetchFilterFacet(String endpoint, String? libraryId);
+  Future<JellyfinPlaybackBundle?> fetchPlaybackBundle(
+    String itemId, {
+    int sourceIndex = 0,
+    String? sourceId,
+    String? preferredSignature,
+  });
+  String buildDirectStreamUrl(
+    String itemId, {
+    String? container,
+    String? mediaSourceId,
+    String? playSessionId,
+    String? liveStreamId,
+    int? audioStreamIndex,
+    bool containerExtension = false,
+  });
+  String buildAudioDirectStreamUrl(
+    String itemId, {
+    String? container,
+    String? mediaSourceId,
+    bool containerExtension = false,
+  });
+  Future<Map<String, dynamic>> getPlaybackInfo(
+    String itemId, {
+    int? maxStreamingBitrate = 100_000_000,
+    String? mediaSourceId,
+    String? liveStreamId,
+    int? startTimeTicks,
+    int? audioStreamIndex,
+    int? subtitleStreamIndex,
+    bool? autoOpenLiveStream,
+    bool? enableDirectPlay,
+    bool? enableDirectStream,
+    bool? enableTranscoding,
+    bool? allowVideoStreamCopy,
+    bool? allowAudioStreamCopy,
+    bool isLiveTv,
+    bool audioProfile,
+    bool burnSubtitles,
+  });
+  String _withApiKey(String urlOrPath);
+
+  /// Positional core of the tolerant `/Items` array fetch. The browse part's
+  /// implementation widens it with optional retry/abort/diagnostics knobs that
+  /// only its own call sites pass.
+  Future<List<Map<String, dynamic>>> _safeFetchItemsArray(String path, Map<String, dynamic> queryParameters);
 
   /// Row metadata Jellyfin volunteers on `/Items` list responses but Emby
   /// withholds unless it is named in `Fields`.
@@ -134,12 +212,32 @@ mixin _JellyfinClientInternals on MediaServerCacheMixin {
     'UserDataLastPlayedDate',
   ];
 
+  /// Emby's companion to `MediaSources` on list rows.
+  ///
+  /// Emby list routes answer `Fields=MediaSources` with the row item's own
+  /// file only, dropping every version merged with it; the single-item route
+  /// returns them all. Measured on Emby 4.10.0.40 with two merged episode
+  /// versions: `/Shows/{id}/Episodes` and `/Users/{id}/Items?ParentId=` gave
+  /// one source to admin and non-admin users alike, and two — in the detail
+  /// route's order — once this token was named. Emby staff recommend it for
+  /// exactly this (community topic 148258). A one-entry list on a merged item
+  /// breaks the [MediaItem.mediaVersions] completeness contract: pickers,
+  /// saved-version resolution and delete impact all trust it (#2474).
+  ///
+  /// Only added where `MediaSources` is already requested: the server resolves
+  /// alternates per row, a cost the lighter row sets have no use for.
+  static const _embyAlternateMediaSourcesField = 'AlternateMediaSources';
+
   /// Append the fields this dialect withholds, skipping any the set already
   /// names so Jellyfin's request strings stay byte-identical.
   String _withDialectRowFields(String fields) {
     if (dialect != MediaBrowserDialect.emby) return fields;
     final present = fields.split(',').map((field) => field.trim()).toSet();
-    final missing = _embyWithheldRowFields.where((field) => !present.contains(field));
+    final missing = [
+      ..._embyWithheldRowFields.where((field) => !present.contains(field)),
+      if (present.contains('MediaSources') && !present.contains(_embyAlternateMediaSourcesField))
+        _embyAlternateMediaSourcesField,
+    ];
     return missing.isEmpty ? fields : '$fields,${missing.join(',')}';
   }
 
@@ -168,6 +266,7 @@ class JellyfinClient
     with
         MediaServerCacheMixin,
         _JellyfinClientInternals,
+        _JellyfinAccountPreferencesMethods,
         _JellyfinBrowseMethods,
         _JellyfinMusicMethods,
         _JellyfinPlaybackMethods,
@@ -219,18 +318,13 @@ class JellyfinClient
     } catch (_) {
       // Tests / non-platform contexts — keep the fallback version.
     }
-    // Raw, not header-sanitized: [buildJellyfinAuthHeader] percent-encodes it.
-    String? deviceName;
-    try {
-      final resolved = (await DeviceIdentityService.resolve()).deviceName?.trim();
-      if (resolved != null && resolved.isNotEmpty) deviceName = resolved;
-    } catch (_) {
-      // Tests / non-platform contexts — keep the fallback name.
-    }
+    // Never throws: tests and non-platform contexts degrade to the bare OS
+    // name, which the helpers below turn into a usable client and device.
+    final identity = await DeviceIdentityService.resolve();
     final authHeader = buildJellyfinAuthHeader(
-      clientName: 'Plezy',
+      clientName: jellyfinClientName(identity),
       clientVersion: version,
-      deviceName: deviceName ?? 'Plezy',
+      deviceName: jellyfinDeviceName(identity),
       deviceId: connection.deviceId,
       accessToken: connection.accessToken,
     );
@@ -248,11 +342,6 @@ class JellyfinClient
       baseUrl: connection.baseUrl,
       defaultHeaders: headers,
       logLabel: 'Jellyfin',
-      // Same pool tuning Plex uses: the home fan-out issues several concurrent
-      // requests per pass, and the untuned dart:io default drops idle
-      // connections after 15s — a fresh TLS handshake per request on a
-      // high-RTT/CDN link.
-      usePlexApiClient: true,
       prioritizedEndpoints: connection.baseUrls,
       onEndpointSwitch: (newBaseUrl, {required persist}) => client._handleEndpointSwitch(newBaseUrl, persist: persist),
       onAllEndpointsExhausted: onAllEndpointsExhausted,
@@ -294,7 +383,7 @@ class JellyfinClient
     return client;
   }
 
-  /// Mutable so [isHealthy] can refresh `Policy.IsAdministrator` from the
+  /// Mutable so [checkHealth] can refresh `Policy.IsAdministrator` from the
   /// current-user probe response — admin status changed server-side should
   /// propagate without forcing the user to re-auth.
   JellyfinConnection _connection;
@@ -380,6 +469,9 @@ class JellyfinClient
   String get scopedServerId => connection.id;
 
   @override
+  final Object authenticationSessionId = Object();
+
+  @override
   String? get serverName => connection.serverName;
 
   @override
@@ -390,6 +482,50 @@ class JellyfinClient
     MediaBrowserDialect.jellyfin => ServerCapabilities.jellyfin,
     MediaBrowserDialect.emby => ServerCapabilities.emby,
   };
+
+  /// Realtime library-change push on the dialect's session socket. Reads the
+  /// base URL live so endpoint failover lands on the channel's next
+  /// reconnect; Emby only routes `LibraryChanged` to sessions that registered
+  /// capabilities, so that dialect registers before each connect.
+  /// [LibraryEventService] owns the returned channel's lifecycle.
+  ///
+  /// The upgrade carries the same `Authorization: MediaBrowser …` header as
+  /// HTTP requests. With only the query token, the server falls back to the
+  /// client name stored when the token was issued; sessions are keyed by
+  /// client + device + user, so a token from before the client name changed
+  /// splits the device into two sessions and the dashboard loses "now playing".
+  @override
+  LibraryEventChannel? createLibraryEventChannel() {
+    final authorization = _http.defaultHeaders['Authorization'];
+    return MediaBrowserLibraryEventSocket(
+      serverId: serverId,
+      dialect: dialect,
+      baseUrl: () => _http.baseUrl,
+      accessToken: connection.accessToken,
+      deviceId: connection.deviceId,
+      channelFactory: authorization == null
+          ? null
+          : libraryEventChannelFactory(headers: {'Authorization': authorization}),
+      registerCapabilities: dialect.requiresSessionCapabilitiesForLibraryEvents
+          ? _registerSessionCapabilitiesForEvents
+          : null,
+    );
+  }
+
+  /// `POST /Sessions/Capabilities/Full` with a minimal payload (verified 204
+  /// on Emby 4.9.5, after which the socket receives `LibraryChanged`).
+  Future<void> _registerSessionCapabilitiesForEvents() async {
+    final response = await _http.post(
+      '/Sessions/Capabilities/Full',
+      body: {
+        'PlayableMediaTypes': ['Video', 'Audio'],
+        'SupportedCommands': <String>[],
+        'SupportsMediaControl': false,
+        'SupportsSync': false,
+      },
+    );
+    throwIfHttpError(response);
+  }
 
   /// Neither dialect exposes a per-server played-threshold pref, so we mirror
   /// Plex's default of 90%.
@@ -422,8 +558,10 @@ class JellyfinClient
   /// profile avatars catch server-side changes without requiring re-auth
   /// (see [onConnectionUpdated]).
   ///
-  /// 401/403 surfaces as [HealthStatus.authError] so the manager can
-  /// distinguish a revoked token from a generic transport failure.
+  /// 401 surfaces as [HealthStatus.authError] and 403 as
+  /// [HealthStatus.accessDenied] (a user denied remote access or outside their
+  /// parental schedule) so the manager can tell a revoked token and a refused
+  /// account from a generic transport failure.
   @override
   Future<HealthStatus> checkHealth() async {
     try {
@@ -457,36 +595,19 @@ class JellyfinClient
         }
         return HealthStatus.online;
       }
-      if (response.statusCode == 401 || response.statusCode == 403) {
-        return HealthStatus.authError;
-      }
-      return HealthStatus.offline;
+      return _refusalHealth(response.statusCode) ?? HealthStatus.offline;
     } on MediaServerHttpException catch (e) {
-      if (e.statusCode == 401 || e.statusCode == 403) return HealthStatus.authError;
-      return HealthStatus.offline;
+      return _refusalHealth(e.statusCode) ?? HealthStatus.offline;
     } catch (_) {
       return HealthStatus.offline;
     }
   }
 
-  @override
-  Future<bool> isHealthy() async => (await checkHealth()) == HealthStatus.online;
-
-  /// Fetch the authenticated user's `Configuration` (audio/subtitle language
-  /// prefs, auto-select flag) so the player can apply per-user defaults.
-  /// Returns null on transport failures — caller treats as "no preference".
-  Future<JellyfinUserProfile?> fetchUserProfile() async {
-    try {
-      final response = await _http.get(paths.currentUser);
-      throwIfHttpError(response);
-      final data = response.data;
-      if (data is! Map<String, dynamic>) return null;
-      return JellyfinUserProfile.fromUserDto(data);
-    } catch (e, st) {
-      appLogger.w('JellyfinClient.fetchUserProfile failed', error: e, stackTrace: st);
-      return null;
-    }
-  }
+  static HealthStatus? _refusalHealth(int? statusCode) => switch (statusCode) {
+    401 => HealthStatus.authError,
+    403 => HealthStatus.accessDenied,
+    _ => null,
+  };
 
   @override
   Future<String?> getMachineIdentifier() async {

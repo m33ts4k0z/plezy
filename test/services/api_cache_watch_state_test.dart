@@ -94,8 +94,11 @@ void main() {
       expect(json['viewedLeafCount'], 7);
     });
 
-    test('no cached row is a silent no-op', () async {
+    test('no cached row means nothing is written', () async {
       await PlexApiCache.instance.applyWatchState(serverId: serverId, itemId: 'missing', isWatched: true);
+
+      expect(await PlexApiCache.instance.get(serverId, '/library/metadata/missing'), isNull);
+      expect(await db.select(db.apiCache).get(), isEmpty);
     });
   });
 
@@ -178,18 +181,20 @@ void main() {
       expect(userData.values, isNot(contains(9)));
     });
 
-    test('malformed cached rows are skipped without throwing', () async {
+    test('malformed cached rows are skipped and left untouched', () async {
       await db
           .into(db.apiCache)
           .insertOnConflictUpdate(
             ApiCacheCompanion(
               cacheKey: const Value('jf-srv:/Users/user-a/Items/item-1'),
               data: const Value('not json'),
-              cachedAt: Value(DateTime.now()),
             ),
           );
 
       await JellyfinApiCache.instance.applyWatchState(serverId: serverId, itemId: 'item-1', isWatched: true);
+
+      final row = await db.select(db.apiCache).getSingle();
+      expect(row.data, 'not json');
     });
   });
 }

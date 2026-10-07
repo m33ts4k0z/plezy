@@ -16,14 +16,29 @@ extension _PlexVideoControlsVisibilityMethods on _PlexVideoControlsState {
     }
   }
 
-  /// Focus play/pause button if we're in keyboard navigation mode (desktop/TV only)
-  void _focusPlayPauseIfKeyboardMode() {
-    if (!mounted) return;
-    if (!_videoPlayerNavigationEnabled) return;
+  /// Focus Play/Pause when the viewer is already driving with keyboard/D-pad
+  /// and opted into player navigation.
+  ///
+  /// This is an *automatic* grab — no key caused it — so it additionally
+  /// requires an active keyboard session; a key-driven grab only needs
+  /// [eventRequestsFocusNavigation].
+  ///
+  /// Returns whether it actually moved focus, because the caller uses that to
+  /// decide whether the player surface still needs to claim the remote. It must
+  /// therefore report `false` when the chrome is not mounted — a TV route opens
+  /// with the chrome down, and claiming that it focused something there would
+  /// leave the remote parked on the screen node (#1765).
+  bool _focusPlayPauseIfKeyboardMode() {
+    if (!mounted || !_showControls) return false;
+    // The raw preference, not the directional policy: a TV viewer who turned
+    // player navigation off must not get Play/Pause focused on open.
+    if (!videoPlayerNavigationPreference()) return false;
     final isMobile = PlatformDetector.isMobile(context) && !PlatformDetector.isTV();
-    if (!isMobile && InputModeTracker.isKeyboardMode(context)) {
-      _desktopControlsKey.currentState?.requestPlayPauseFocus();
-    }
+    if (isMobile || !InputModeTracker.isKeyboardMode(context, listen: false)) return false;
+    final controls = _desktopControlsKey.currentState;
+    if (controls == null) return false;
+    controls.requestPlayPauseFocus();
+    return true;
   }
 
   /// Listen to playback state changes to manage auto-hide timer
@@ -46,27 +61,35 @@ extension _PlexVideoControlsVisibilityMethods on _PlexVideoControlsState {
     });
   }
 
-  /// Controls hide delay: 5s on mobile/TV/keyboard-nav, 3s on desktop with mouse.
-  /// Maestro builds extend the delay because accessibility-tree queries can take
-  /// longer than the production timeout on physical devices.
+  /// Controls hide delay: 5s on touch mobile and under D-pad/keyboard
+  /// navigation, 3s on desktop with a mouse. Every D-pad press restarts the
+  /// timer, so traversing the bar never races it; a paused D-pad viewer keeps
+  /// the chrome until they dismiss it (see [PlayerChromeController.configure]).
+  /// Maestro builds extend the delay because accessibility-tree queries can
+  /// take longer than the production timeout on physical devices.
   Duration get _hideDelay {
     if (const bool.fromEnvironment('PLEZY_MAESTRO_E2E')) {
       return const Duration(seconds: 30);
     }
     final isMobile = (Platform.isIOS || Platform.isAndroid) && !PlatformDetector.isTV();
-    if (isMobile || PlatformDetector.isTV() || _videoPlayerNavigationEnabled) {
+    if (isMobile || playerDirectionalNavigationEnabled()) {
       return const Duration(seconds: 5);
     }
     return const Duration(seconds: 3);
   }
 
-  /// Shared hide logic: hides controls, notifies parent, updates traffic lights, restores focus.
+  /// Hide the controls. Notifying the parent, updating the traffic lights and
+  /// restoring focus all moved into [ChromeController.hide].
   void _hideControls() {
     if (!mounted) return;
     widget.chromeController.hide();
   }
 
-  void _startHideTimer() => widget.chromeController.startAutoHide();
+  void _startHideTimer() {
+    // Sheet completion can arrive after the controls and their route retire.
+    if (!mounted) return;
+    widget.chromeController.startAutoHide();
+  }
 
   /// Restart the hide timer on user interaction for the current playback state.
   void _restartHideTimerForCurrentPlaybackState() => widget.chromeController.restartAutoHideForCurrentPlaybackState();
@@ -83,6 +106,16 @@ extension _PlexVideoControlsVisibilityMethods on _PlexVideoControlsState {
     widget.chromeController.recordPointerActivity();
   }
 
+  /// Holds the chrome while any pointer is pressed on the controls, so a held
+  /// slider, scrub or button can't fade out and unmount under the pointer.
+  Widget _holdChromeWhilePressed({required Widget child}) => Listener(
+    behavior: HitTestBehavior.translucent,
+    onPointerDown: (event) => widget.chromeController.recordPointerDown(event.pointer),
+    onPointerUp: (event) => widget.chromeController.recordPointerUp(event.pointer),
+    onPointerCancel: (event) => widget.chromeController.recordPointerUp(event.pointer),
+    child: child,
+  );
+
   void _toggleControls() {
     widget.chromeController.toggle();
   }
@@ -98,14 +131,10 @@ extension _PlexVideoControlsVisibilityMethods on _PlexVideoControlsState {
 
   /// Apply preferred orientations for the given lock state. Wired to
   /// [SettingsService.rotationLocked] via [bindEffect] so any change — from
-  /// this toggle or from the settings screen — fires the same SystemChrome call.
+  /// this toggle or from the settings screen — takes the same path, and
+  /// [OrientationHelper] keeps fixed-orientation platforms (car, TV) out of it.
   void _applyRotationLock(bool locked) {
-    if (PlatformDetector.isAutomotive()) return;
-    unawaited(
-      SystemChrome.setPreferredOrientations(
-        locked ? const [DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight] : DeviceOrientation.values,
-      ),
-    );
+    unawaited(locked ? OrientationHelper.lockLandscapeOrientation() : OrientationHelper.restoreDefaultOrientations());
   }
 
   void _toggleRotationLock() {
@@ -176,9 +205,15 @@ extension _PlexVideoControlsVisibilityMethods on _PlexVideoControlsState {
     await FullscreenStateManager().toggleFullscreen();
   }
 
-  /// Initialize always-on-top state from window manager (desktop only)
+  /// Initialize always-on-top state (desktop only). The toggle is remembered
+  /// across player sessions via [SettingsService.playerAlwaysOnTop] (#931) —
+  /// including episode transitions, which rebuild these controls — while the
+  /// window flag itself is only held while a player is open (dispose drops
+  /// the flag without touching the pref).
   Future<void> _initAlwaysOnTopState() async {
-    final isOnTop = await windowManager.isAlwaysOnTop();
+    final remembered = SettingsService.instance.read(SettingsService.playerAlwaysOnTop);
+    if (remembered) await windowManager.setAlwaysOnTop(true);
+    final isOnTop = remembered || await windowManager.isAlwaysOnTop();
     if (mounted && isOnTop != _isAlwaysOnTop) {
       _setControlsState(() {
         _isAlwaysOnTop = isOnTop;
@@ -192,6 +227,7 @@ extension _PlexVideoControlsVisibilityMethods on _PlexVideoControlsState {
 
     final newValue = !_isAlwaysOnTop;
     await windowManager.setAlwaysOnTop(newValue);
+    unawaited(SettingsService.instance.write(SettingsService.playerAlwaysOnTop, newValue));
     if (!mounted) return;
     _setControlsState(() {
       _isAlwaysOnTop = newValue;
@@ -240,14 +276,19 @@ extension _PlexVideoControlsVisibilityMethods on _PlexVideoControlsState {
     if (!mounted) return;
     final controlsVisible = widget.chromeController.controlsVisible;
     final visibilityChanged = controlsVisible != _lastControlsVisible;
-    final focusTarget = widget.chromeController.takeFocusTarget();
+    final focusPlayPause = widget.chromeController.takePlayPauseFocus();
     _lastControlsVisible = controlsVisible;
 
     if (visibilityChanged && !controlsVisible) {
       _desktopControlsKey.currentState?.hideContentStrip();
       _cancelSkipButtonDismissTimer();
+      // When the chrome never reached full opacity, hide() already retired the
+      // presented flag — no fade-out will run, so AnimatedOpacity.onEnd never
+      // fires. Drop the subtree here instead of waiting for it.
+      final controlsDismissed = !widget.chromeController.controlsPresented;
       _setControlsState(() {
         _controlsOpaque = false;
+        if (controlsDismissed) _controlsMounted = false;
         if (_currentMarker != null) _skipButtonDismissed = true;
       });
       _claimPlayerSurfaceFocus();
@@ -261,10 +302,18 @@ extension _PlexVideoControlsVisibilityMethods on _PlexVideoControlsState {
         _controlsOpaque = false;
       });
       WidgetsBinding.instance.addPostFrameCallback((_) {
+        // Only flips the render target so the freshly mounted AnimatedOpacity
+        // animates up instead of inserting at full opacity. The controller's
+        // opaque flag follows the real fade-in completion (AnimatedOpacity.onEnd
+        // in video_controls.dart): marking it here would let a hide() landing
+        // before the next build trust an opacity the renderer never realized —
+        // hide() would keep controlsPresented while the fade-in target never
+        // rendered, so no fade-out runs and markControlsHidden never arrives.
         if (!mounted || !_showControls || !_controlsMounted) return;
         _setControlsState(() => _controlsOpaque = true);
       });
     } else if (controlsVisible && !_controlsMounted) {
+      widget.chromeController.markControlsOpaque();
       _setControlsState(() {
         _controlsMounted = true;
         _controlsOpaque = true;
@@ -275,8 +324,8 @@ extension _PlexVideoControlsVisibilityMethods on _PlexVideoControlsState {
       _updateTrafficLightVisibility();
     }
 
-    if (focusTarget != null) {
-      _requestFocusTarget(focusTarget);
+    if (focusPlayPause) {
+      _requestPlayPauseFocus();
     }
   }
 
@@ -285,28 +334,26 @@ extension _PlexVideoControlsVisibilityMethods on _PlexVideoControlsState {
   /// self-heal raises the whole chrome on the first actionable key, which is
   /// what the transient seek and transport indicators exist to avoid.
   void _claimPlayerSurfaceFocus() {
-    final sheetOpen = OverlaySheetController.maybeOf(context)?.isOpen ?? false;
-    if (sheetOpen) return;
+    if (_sheetIsOpen()) return;
     _focusNode.requestFocus();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted && !_focusNode.hasPrimaryFocus) {
-        _focusNode.requestFocus();
-      }
+      // Re-check: a sheet or a route can open during the frame we deferred
+      // over, and the retry must not pull the remote back out of it.
+      if (!mounted || _focusNode.hasPrimaryFocus || _sheetIsOpen()) return;
+      if (ModalRoute.of(context)?.isCurrent != true) return;
+      _focusNode.requestFocus();
     });
   }
 
-  void _requestFocusTarget(PlayerChromeFocusTarget target) {
+  bool _sheetIsOpen() => OverlaySheetController.maybeOf(context)?.isOpen ?? false;
+
+  void _requestPlayPauseFocus() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted || !widget.chromeController.controlsVisible) return;
       // Never steal focus from an open sheet (same rule as
       // _claimPlayerSurfaceFocus).
       if (OverlaySheetController.maybeOf(context)?.isOpen ?? false) return;
-      switch (target) {
-        case PlayerChromeFocusTarget.playPause:
-          _desktopControlsKey.currentState?.requestPlayPauseFocus();
-        case PlayerChromeFocusTarget.timeline:
-          _desktopControlsKey.currentState?.requestTimelineFocus();
-      }
+      _desktopControlsKey.currentState?.requestPlayPauseFocus();
     });
   }
 }

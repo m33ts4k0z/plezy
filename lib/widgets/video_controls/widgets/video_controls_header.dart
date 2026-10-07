@@ -7,6 +7,7 @@ import '../../../i18n/strings.g.dart';
 import '../../../watch_together/widgets/watch_together_overlay.dart';
 import '../../../watch_together/providers/watch_together_provider.dart';
 import '../../app_bar_back_button.dart';
+import '../../system_clock.dart';
 
 /// Header layout style for video controls
 enum VideoHeaderStyle {
@@ -33,6 +34,11 @@ class VideoControlsHeader extends StatelessWidget {
   final VoidCallback? onCancelAutoHide;
   final VoidCallback? onStartAutoHide;
 
+  /// Whether to show the system clock. Off for a portrait phone, where the
+  /// header is too narrow to fit the clock beside the title and trailing
+  /// controls.
+  final bool showClock;
+
   const VideoControlsHeader({
     super.key,
     required this.metadata,
@@ -41,6 +47,7 @@ class VideoControlsHeader extends StatelessWidget {
     this.onBack,
     this.onCancelAutoHide,
     this.onStartAutoHide,
+    this.showClock = true,
   });
 
   @override
@@ -68,6 +75,13 @@ class VideoControlsHeader extends StatelessWidget {
             );
           },
         ),
+        if (showClock)
+          const Padding(
+            padding: EdgeInsets.only(right: 8),
+            child: SystemClock(
+              style: TextStyle(color: Colors.white70, fontSize: 14, fontWeight: .w500),
+            ),
+          ),
         ?trailing,
       ],
     );

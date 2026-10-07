@@ -1,16 +1,39 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:plezy/media/library_query.dart';
 import 'package:plezy/media/media_filter.dart';
 import 'package:plezy/screens/libraries/filters_bottom_sheet.dart';
 import 'package:plezy/screens/libraries/state_messages.dart';
 import 'package:plezy/widgets/bottom_sheet_header.dart';
+import 'package:plezy/widgets/bottom_sheet_page_scaffold.dart';
 import 'package:plezy/widgets/overlay_sheet.dart';
 
 final _filters = [
-  MediaFilter(filter: 'genre', filterType: 'string', key: 'genre', title: 'Genre', type: 'filter'),
-  MediaFilter(filter: 'studio', filterType: 'string', key: 'studio', title: 'Studio', type: 'filter'),
+  MediaFilter(filter: 'unwatched', filterType: MediaFilterType.boolean, key: '', title: 'Unwatched', type: 'filter'),
+  MediaFilter(filter: 'genre', filterType: MediaFilterType.tag, key: 'genre', title: 'Genre', type: 'filter'),
+  MediaFilter(filter: 'studio', filterType: MediaFilterType.tag, key: 'studio', title: 'Studio', type: 'filter'),
+  MediaFilter(filter: 'file', filterType: MediaFilterType.string, key: '', title: 'File Path', type: 'filter'),
+  MediaFilter(
+    filter: 'duration',
+    filterType: MediaFilterType.integer,
+    key: '',
+    title: 'Duration',
+    type: 'filter',
+    unit: MediaFilterUnit.duration,
+  ),
+  MediaFilter(filter: 'addedAt', filterType: MediaFilterType.date, key: '', title: 'Date Added', type: 'filter'),
+  MediaFilter(
+    // Equality only, as MediaBrowser declares its value facets.
+    filter: 'tag',
+    filterType: MediaFilterType.tag,
+    key: 'tag',
+    title: 'Tag',
+    type: 'filter',
+    operators: const [LibraryFilterOperator.is_],
+  ),
 ];
 
 MediaFilterValue _value(String key, String title) => MediaFilterValue(key: key, title: title);
@@ -18,7 +41,7 @@ MediaFilterValue _value(String key, String title) => MediaFilterValue(key: key, 
 void main() {
   testWidgets('filter switch rejects an obsolete success and its presentation effects', (tester) async {
     final requests = _FilterRequests();
-    final harness = await _pumpSheet(tester, loader: requests.load);
+    await _pumpSheet(tester, loader: requests.load);
 
     await _openFilter(tester, 'Genre');
     await _goBack(tester);
@@ -34,12 +57,11 @@ void main() {
     expect(find.text('Current Studio'), findsOneWidget);
     expect(find.text('Obsolete Genre'), findsNothing);
     expect(tester.takeException(), isNull);
-    harness.dispose();
   });
 
   testWidgets('same-filter reopen rejects the first request completion', (tester) async {
     final requests = _FilterRequests();
-    final harness = await _pumpSheet(tester, loader: requests.load);
+    await _pumpSheet(tester, loader: requests.load);
 
     await _openFilter(tester, 'Genre');
     await _goBack(tester);
@@ -52,12 +74,11 @@ void main() {
 
     expect(find.text('New Genre'), findsOneWidget);
     expect(find.text('Old Genre'), findsNothing);
-    harness.dispose();
   });
 
   testWidgets('stale failure cannot replace a newer successful value list', (tester) async {
     final requests = _FilterRequests();
-    final harness = await _pumpSheet(tester, loader: requests.load);
+    await _pumpSheet(tester, loader: requests.load);
 
     await _openFilter(tester, 'Genre');
     await _goBack(tester);
@@ -70,7 +91,6 @@ void main() {
 
     expect(find.byType(ErrorStateWidget), findsNothing);
     expect(find.text('Current Studio'), findsOneWidget);
-    harness.dispose();
   });
 
   testWidgets('library replacement retires the old owner request', (tester) async {
@@ -87,16 +107,17 @@ void main() {
     expect(find.text('Old Library Genre'), findsNothing);
     expect(find.byType(CircularProgressIndicator), findsNothing);
     expect(find.text('Filters'), findsOneWidget);
-    harness.dispose();
   });
 
-  testWidgets('back then clear retires a loading request before closing', (tester) async {
+  testWidgets('back then clear retires a loading request and keeps the editor open', (tester) async {
     final requests = _FilterRequests();
-    final applied = <Map<String, String>>[];
-    final harness = await _pumpSheet(
+    final applied = <List<LibraryFilter>>[];
+    await _pumpSheet(
       tester,
       loader: requests.load,
-      selectedFilters: const {'studio': 'selected'},
+      selectedFilters: const [
+        LibraryFilter(field: 'studio', values: ['selected']),
+      ],
       onChanged: applied.add,
     );
 
@@ -107,21 +128,24 @@ void main() {
 
     expect(applied, hasLength(1));
     expect(applied.single, isEmpty);
-    expect(find.byType(FiltersBottomSheet), findsNothing);
+    // Editing stages; the host commits on dismissal, so clearing must not
+    // close the editor out from under a user who is still adding criteria.
+    expect(find.byType(FiltersBottomSheet), findsOneWidget);
 
     requests.request('genre').complete([_value('late', 'Late Genre')]);
     await tester.pump();
     expect(tester.takeException(), isNull);
-    harness.dispose();
   });
 
   testWidgets('missing selected value is preserved until explicit user action', (tester) async {
     final requests = _FilterRequests();
-    final applied = <Map<String, String>>[];
-    final harness = await _pumpSheet(
+    final applied = <List<LibraryFilter>>[];
+    await _pumpSheet(
       tester,
       loader: requests.load,
-      selectedFilters: const {'genre': 'missing'},
+      selectedFilters: const [
+        LibraryFilter(field: 'genre', values: ['missing']),
+      ],
       onChanged: applied.add,
     );
 
@@ -132,12 +156,11 @@ void main() {
 
     expect(find.text('Clear All'), findsOneWidget);
     expect(applied, isEmpty);
-    harness.dispose();
   });
 
   testWidgets('load failure has retry state while empty success remains selectable', (tester) async {
     final requests = _FilterRequests();
-    final harness = await _pumpSheet(tester, loader: requests.load);
+    await _pumpSheet(tester, loader: requests.load);
 
     await _openFilter(tester, 'Genre');
     requests.request('genre').completeError(StateError('temporary failure'));
@@ -154,12 +177,259 @@ void main() {
 
     expect(find.byType(ErrorStateWidget), findsNothing);
     expect(find.text('All'), findsOneWidget);
-    harness.dispose();
+  });
+
+  testWidgets('settled filter-values states hug while the transient one holds the height', (tester) async {
+    tester.view.physicalSize = const Size(1280, 800);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    final requests = _FilterRequests();
+    await _pumpSheet(tester, loader: requests.load);
+
+    const cap = 800 * 0.75;
+    double sheetHeight() => tester.getSize(find.byType(BottomSheetPageScaffold)).height;
+
+    // The root filters list must hug too — nothing else in the suite pins it.
+    // (`sheet == header + list` is a layout identity for a min-Column with no
+    // divider, so it holds even under a full fill; only the cap bound below
+    // actually discriminates.)
+    final filtersListHeight = sheetHeight();
+    expect(filtersListHeight, lessThan(cap), reason: 'two filters must not fill the cap');
+
+    // Drilling in is a setState page swap inside one sheet, so the transient
+    // spinner must hold the outgoing height: a change here moves the header and
+    // its Back button, and moves them straight back when the values land.
+    await _openFilter(tester, 'Genre');
+    expect(sheetHeight(), filtersListHeight, reason: 'the transient spinner must not move the sheet');
+
+    // Settled states hug — that is the empty space this change exists to remove.
+    requests.request('genre').completeError(StateError('temporary failure'));
+    await tester.pumpAndSettle();
+    expect(find.byType(ErrorStateWidget), findsOneWidget);
+    expect(sheetHeight(), lessThan(cap), reason: 'error state must not fill the cap');
+
+    await tester.tap(find.text('Retry'));
+    await tester.pump();
+    requests.request('genre', 1).complete([_value('action', 'Action')]);
+    await tester.pumpAndSettle();
+    expect(find.text('Action'), findsOneWidget);
+    expect(sheetHeight(), lessThan(cap), reason: 'short value list must not fill the cap');
+  });
+
+  testWidgets('values accumulate instead of applying and closing on the first tap', (tester) async {
+    final applied = <List<LibraryFilter>>[];
+    await _pumpSheet(
+      tester,
+      loader: (_) async => const [],
+      onChanged: applied.add,
+      cachedValues: {
+        'genre': [_value('1', 'Action'), _value('2', 'Comedy')],
+      },
+    );
+
+    await tester.tap(find.text('Genre'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Action'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Comedy'));
+    await tester.pumpAndSettle();
+
+    expect(find.byType(FiltersBottomSheet), findsOneWidget, reason: 'a multi-select page cannot close on each tap');
+    expect(applied.last, const [
+      LibraryFilter(field: 'genre', values: ['1', '2']),
+    ]);
+
+    // Re-tapping removes just that value.
+    await tester.tap(find.text('Action'));
+    await tester.pumpAndSettle();
+    expect(applied.last, const [
+      LibraryFilter(field: 'genre', values: ['2']),
+    ]);
+  });
+
+  testWidgets('the exclude row negates the clause and survives a value change', (tester) async {
+    final applied = <List<LibraryFilter>>[];
+    await _pumpSheet(
+      tester,
+      loader: (_) async => const [],
+      onChanged: applied.add,
+      cachedValues: {
+        'genre': [_value('1', 'Action')],
+      },
+    );
+
+    await tester.tap(find.text('Genre'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Action'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Exclude').last);
+    await tester.pumpAndSettle();
+
+    expect(applied.last, const [
+      LibraryFilter(field: 'genre', op: LibraryFilterOperator.isNot, values: ['1']),
+    ]);
+  });
+
+  testWidgets('a field the backend cannot negate offers no exclude control', (tester) async {
+    await _pumpSheet(
+      tester,
+      loader: (_) async => const [],
+      cachedValues: {
+        'tag': [_value('t1', 'Christmas')],
+      },
+    );
+
+    await tester.tap(find.text('Tag'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Christmas'), findsOneWidget);
+    expect(find.text('Exclude'), findsNothing);
+  });
+
+  testWidgets('a boolean field cycles Any -> Yes -> No in place', (tester) async {
+    final applied = <List<LibraryFilter>>[];
+    await _pumpSheet(tester, loader: (_) async => const [], onChanged: applied.add);
+
+    await tester.tap(find.text('Unwatched'));
+    await tester.pumpAndSettle();
+    expect(applied.last, const [
+      LibraryFilter(field: 'unwatched', values: ['1']),
+    ]);
+    // Still the category list: a boolean has no page to drill into.
+    expect(find.text('Genre'), findsOneWidget);
+
+    await tester.tap(find.text('Unwatched'));
+    await tester.pumpAndSettle();
+    expect(applied.last, const [
+      LibraryFilter(field: 'unwatched', op: LibraryFilterOperator.isNot, values: ['1']),
+    ]);
+
+    await tester.tap(find.text('Unwatched'));
+    await tester.pumpAndSettle();
+    expect(applied.last, isEmpty);
+  });
+
+  testWidgets('a boolean row is one focus stop, not one per segment', (tester) async {
+    // The segmented control is a pointer affordance. Left in the traversal
+    // order it would put three extra stops on every boolean row, and the
+    // rows sort to the top of the category list.
+    await _pumpSheet(tester, loader: (_) async => const []);
+
+    final rows = find.byType(ListTile);
+    final firstRow = tester.widget<ListTile>(rows.at(0));
+    firstRow.focusNode!.requestFocus();
+    await tester.pumpAndSettle();
+    expect(firstRow.focusNode!.hasFocus, isTrue);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+    await tester.pumpAndSettle();
+
+    // One Tab moves to the next row, not into the first row's segments.
+    expect(tester.widget<ListTile>(rows.at(1)).focusNode?.hasFocus, isTrue);
+    expect(firstRow.focusNode!.hasFocus, isFalse);
+  });
+
+  testWidgets('a numeric range emits two clauses in the field\'s stored unit', (tester) async {
+    final applied = <List<LibraryFilter>>[];
+    await _pumpSheet(tester, loader: (_) async => const [], onChanged: applied.add);
+
+    await tester.tap(find.text('Duration'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField).first, '90');
+    await tester.pumpAndSettle();
+
+    // Plex keeps durations in milliseconds: sent as typed, `duration>>=90`
+    // would match every item in the library.
+    expect(applied.last, const [
+      LibraryFilter(field: 'duration', op: LibraryFilterOperator.atLeast, values: ['5400000']),
+    ]);
+
+    await tester.enterText(find.byType(TextField).last, '150');
+    await tester.pumpAndSettle();
+    expect(applied.last, const [
+      LibraryFilter(field: 'duration', op: LibraryFilterOperator.atLeast, values: ['5400000']),
+      LibraryFilter(field: 'duration', op: LibraryFilterOperator.atMost, values: ['9000000']),
+    ]);
+  });
+
+  testWidgets('a stored bound is shown back in the unit it was typed in', (tester) async {
+    await _pumpSheet(
+      tester,
+      loader: (_) async => const [],
+      selectedFilters: const [
+        LibraryFilter(field: 'duration', op: LibraryFilterOperator.atLeast, values: ['5400000']),
+      ],
+    );
+
+    await tester.tap(find.text('Duration'));
+    await tester.pumpAndSettle();
+    expect(tester.widget<TextField>(find.byType(TextField).first).controller?.text, '90');
+  });
+
+  testWidgets('a relative date window emits one bounded clause', (tester) async {
+    final applied = <List<LibraryFilter>>[];
+    await _pumpSheet(tester, loader: (_) async => const [], onChanged: applied.add);
+
+    await tester.tap(find.text('Date Added'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Last 30 days'));
+    await tester.pumpAndSettle();
+    expect(applied.last, const [
+      LibraryFilter(field: 'addedAt', op: LibraryFilterOperator.atLeast, values: ['-30d']),
+    ]);
+
+    await tester.tap(find.text('Older than 30 days'));
+    await tester.pumpAndSettle();
+    expect(applied.last, const [
+      LibraryFilter(field: 'addedAt', op: LibraryFilterOperator.atMost, values: ['-30d']),
+    ]);
+  });
+
+  testWidgets('a text match mode changes the clause operator, not the value', (tester) async {
+    final applied = <List<LibraryFilter>>[];
+    await _pumpSheet(tester, loader: (_) async => const [], onChanged: applied.add);
+
+    await tester.tap(find.text('File Path'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField).first, '2160p');
+    await tester.pumpAndSettle();
+    expect(applied.last, const [
+      LibraryFilter(field: 'file', values: ['2160p']),
+    ]);
+
+    await tester.tap(find.text('Does not contain'));
+    await tester.pumpAndSettle();
+    expect(applied.last, const [
+      LibraryFilter(field: 'file', op: LibraryFilterOperator.isNot, values: ['2160p']),
+    ]);
+  });
+
+  testWidgets('a free-text field does not take the entry focus', (tester) async {
+    // A focused text input opens the TV keyboard on arrival, which would bury
+    // the sheet before the viewer asked to type, so the page's first stop is
+    // the clear row instead.
+    await _pumpSheet(tester, loader: (_) async => const []);
+
+    await tester.tap(find.text('File Path'));
+    await tester.pumpAndSettle();
+
+    final field = tester.widget<EditableText>(find.byType(EditableText));
+    expect(field.focusNode.hasFocus, isFalse);
+
+    // Entering a D-pad session on this page moves onto a row, not into the
+    // field: the row above the input is the page's first stop.
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pumpAndSettle();
+    // The sheet's own entry node, which the page puts on the row above the
+    // input rather than on the field.
+    expect(FocusManager.instance.primaryFocus?.debugLabel, 'FiltersBottomSheetInitialFocus');
+    expect(tester.widget<EditableText>(find.byType(EditableText)).focusNode.hasFocus, isFalse);
   });
 
   testWidgets('cached values bypass the lazy loader', (tester) async {
     var loadCount = 0;
-    final harness = await _pumpSheet(
+    await _pumpSheet(
       tester,
       loader: (_) async {
         loadCount++;
@@ -174,16 +444,15 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Cached Genre'), findsOneWidget);
     expect(loadCount, 0);
-    harness.dispose();
   });
 }
 
 Future<_SheetHarness> _pumpSheet(
   WidgetTester tester, {
   required Future<List<MediaFilterValue>> Function(MediaFilter filter) loader,
-  Map<String, String> selectedFilters = const {},
+  List<LibraryFilter> selectedFilters = const [],
   Map<String, List<MediaFilterValue>>? cachedValues,
-  ValueChanged<Map<String, String>>? onChanged,
+  ValueChanged<List<LibraryFilter>>? onChanged,
 }) async {
   final config = ValueNotifier(
     _SheetConfig(
@@ -226,19 +495,31 @@ Future<_SheetHarness> _pumpSheet(
 
   await tester.tap(find.text('Open'));
   await tester.pumpAndSettle();
-  return _SheetHarness(config);
+  final harness = _SheetHarness(config);
+  addTearDown(harness.dispose);
+  return harness;
 }
 
 Future<void> _openFilter(WidgetTester tester, String title) async {
   await tester.tap(find.text(title));
   await tester.pump();
   expect(find.byType(CircularProgressIndicator), findsOneWidget);
+  await _settleSheetResize(tester);
 }
 
 Future<void> _goBack(WidgetTester tester) async {
   final headerRect = tester.getRect(find.byType(BottomSheetHeader));
   await tester.tapAt(headerRect.centerLeft + const Offset(20, 0));
   await tester.pump();
+  await _settleSheetResize(tester);
+}
+
+/// Advances past the host's 180ms resize tween. A page swap changes the sheet's
+/// height, and mid-tween the content is laid out at its final size but clipped
+/// by the still-animating box — so header geometry is not tappable until this
+/// completes. `pumpAndSettle` cannot be used: the spinner never settles.
+Future<void> _settleSheetResize(WidgetTester tester) async {
+  await tester.pump(const Duration(milliseconds: 200));
 }
 
 class _FilterRequests {
@@ -264,7 +545,7 @@ class _SheetConfig {
 
   final String serverId;
   final String libraryKey;
-  final Map<String, String> selectedFilters;
+  final List<LibraryFilter> selectedFilters;
   final Future<List<MediaFilterValue>> Function(MediaFilter filter) loader;
   final Map<String, List<MediaFilterValue>>? cachedValues;
 

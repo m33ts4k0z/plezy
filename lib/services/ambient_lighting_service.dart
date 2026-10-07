@@ -1,5 +1,3 @@
-import 'dart:async';
-
 import 'dart:io';
 
 import 'package:path_provider/path_provider.dart';
@@ -11,13 +9,21 @@ import '../utils/app_logger.dart';
 /// Generates and manages an ambient lighting GLSL shader that fills letterbox/pillarbox
 /// bars with a blurred, dimmed version of the video edges.
 ///
-/// Uses video-aspect-override to fill the window (eliminating black bars), then
-/// a GLSL shader composites the sharp original video centered at correct aspect
-/// over a blurred background.
+/// `keepaspect=no` makes mpv scale the frame to the whole window; the shader
+/// then composites the sharp picture, centered at its own aspect, over a
+/// blurred background. It reads mpv's `input_size` (the picture) and
+/// `target_size` (the rect mpv scales into — here the window) every frame, so
+/// neither a resize nor an in-place item swap needs a write for the fill.
 ///
-/// The shader uses MPV's built-in `input_size` and `target_size` uniforms to
-/// dynamically compute the video rect position. On window resize, only
-/// `video-aspect-override` needs updating — no shader regeneration required.
+/// The fill deliberately avoids `video-aspect-override`, which stretches the
+/// same way but rewrites the picture's aspect in mpv's video params: every
+/// `dwidth`/`dheight` read — the next item's subtitle placement, PiP — then
+/// answered the window's aspect instead of the picture's (#2447).
+///
+/// mpv places subtitles against the displayed video rect, which the fill turns
+/// into the whole window; `sub-video-rect-aspect` (a Plezy mpv patch) hands it
+/// the picture's real aspect so corner-anchored ASS events and PGS bitmaps stay
+/// on the picture the shader composites (#2120).
 class AmbientLightingService {
   final Player _player;
   String? _shaderPath;
@@ -34,8 +40,7 @@ class AmbientLightingService {
   /// Enable ambient lighting effect.
   ///
   /// [videoAspect] - the source video's display aspect ratio (width/height).
-  /// [outputAspect] - the player widget's aspect ratio (width/height).
-  Future<void> enable(double videoAspect, double outputAspect) async {
+  Future<void> enable(double videoAspect) async {
     if (!isSupported) return;
 
     try {
@@ -43,15 +48,21 @@ class AmbientLightingService {
 
       appLogger.d('AmbientLightingService: Shader path: $_shaderPath');
 
-      // Set video-aspect-override to fill the entire output area
-      await _player.setProperty('video-aspect-override', outputAspect.toString());
+      // First, so a libmpv without the patch refuses before anything on
+      // screen changes.
+      await _player.setProperty('sub-video-rect-aspect', videoAspect.toString());
 
-      // Append ambient lighting shader
+      // Shader before fill: while mpv still letterboxes, the rect it scales
+      // into already has the picture's aspect, so the composite reproduces
+      // the plain letterboxed frame and no frame shows the stretched picture
+      // without its composite.
       await _player.command(['change-list', 'glsl-shaders', 'append', _shaderPath!]);
+
+      await _player.setProperty('keepaspect', 'no');
 
       _enabled = true;
 
-      appLogger.d('AmbientLightingService: Enabled (video=$videoAspect, output=$outputAspect)');
+      appLogger.d('AmbientLightingService: Enabled (video=$videoAspect)');
     } catch (e, st) {
       appLogger.w('AmbientLightingService: Failed to enable', error: e, stackTrace: st);
     }
@@ -62,11 +73,15 @@ class AmbientLightingService {
     if (!_enabled) return;
 
     try {
+      // Letterbox first, mirroring [enable]: the composite then reproduces
+      // the plain letterboxed frame, so removing the shader is invisible.
+      await _player.setProperty('keepaspect', 'yes');
+
       if (_shaderPath != null) {
         await _player.command(['change-list', 'glsl-shaders', 'remove', _shaderPath!]);
       }
 
-      await _player.setProperty('video-aspect-override', 'no');
+      await _player.setProperty('sub-video-rect-aspect', 'no');
 
       _enabled = false;
 
@@ -83,17 +98,16 @@ class AmbientLightingService {
     await _player.command(['change-list', 'glsl-shaders', 'append', _shaderPath!]);
   }
 
-  /// Update video-aspect-override when the window resizes.
-  /// The shader adapts automatically via dynamic `target_size` uniform.
-  void updateOutputAspect(double outputAspect) {
+  /// Re-point subtitle placement at a new picture: the shader adapts to the
+  /// swapped item through `input_size`, but `sub-video-rect-aspect` was
+  /// written from the item [enable] saw.
+  Future<void> updateVideoAspect(double videoAspect) async {
     if (!_enabled) return;
-    unawaited(() async {
-      try {
-        await _player.setProperty('video-aspect-override', outputAspect.toString());
-      } catch (error, stackTrace) {
-        appLogger.w('AmbientLightingService: Failed to update output aspect', error: error, stackTrace: stackTrace);
-      }
-    }());
+    try {
+      await _player.setProperty('sub-video-rect-aspect', videoAspect.toString());
+    } catch (error, stackTrace) {
+      appLogger.w('AmbientLightingService: Failed to update video aspect', error: error, stackTrace: stackTrace);
+    }
   }
 
   /// Generate a static multi-pass GLSL shader.

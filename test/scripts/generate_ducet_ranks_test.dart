@@ -5,7 +5,7 @@ import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as path;
 
-import '../../scripts/generate_ducet_ranks.dart';
+import '../../scripts/codegen/generate_ducet_ranks.dart';
 
 void main() {
   late Directory temporaryDirectory;
@@ -20,10 +20,9 @@ void main() {
     }
   });
 
-
   test('bundled gzip inputs have deterministic normalized headers and bytes', () {
-    final allKeys = File('scripts/data/${allKeysSource.bundledFileName}').readAsBytesSync();
-    final fractional = File('scripts/data/${fractionalUcaSource.bundledFileName}').readAsBytesSync();
+    final allKeys = File('scripts/codegen/data/${allKeysSource.bundledFileName}').readAsBytesSync();
+    final fractional = File('scripts/codegen/data/${fractionalUcaSource.bundledFileName}').readAsBytesSync();
 
     expect(allKeys.take(8), [0x1F, 0x8B, 0x08, 0, 0, 0, 0, 0]);
     expect(fractional.take(8), [0x1F, 0x8B, 0x08, 0, 0, 0, 0, 0]);
@@ -95,8 +94,9 @@ void main() {
     );
 
     expect(downloads, 0);
-    expect(output.readAsStringSync(), contains('const String _ducetRanks ='));
-    expect(output.readAsStringSync(), isNot(contains('_buildRanks')));
+    final (cjkOrder, kangxiDecomp) = parseRadicals(fractionalText);
+    final expected = renderDucetOrder(buildOrder(parseAllKeys(allKeysText), cjkOrder), kangxiDecomp);
+    expect(output.readAsStringSync(), expected);
   });
 
   test('rejects an explicit digest mismatch without replacing output', () async {

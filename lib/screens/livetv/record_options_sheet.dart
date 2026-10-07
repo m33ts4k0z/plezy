@@ -7,6 +7,7 @@ import '../../focus/focusable_button.dart';
 import '../../focus/focusable_text_field.dart';
 import '../../focus/focusable_wrapper.dart';
 import '../../i18n/strings.g.dart';
+import '../../media/media_backend.dart';
 import '../../media/media_kind.dart';
 import '../../media/media_library.dart';
 import '../../media/media_server_client.dart';
@@ -132,9 +133,13 @@ class _RecordOptionsContentState extends State<_RecordOptionsContent> {
   };
 
   /// Sections eligible as recording targets for the selected entry.
+  ///
+  /// Only Plex records into a library section. MediaBrowser servers record
+  /// into their own configured folder, and Emby's numeric library ids must not
+  /// be mistaken for Plex section ids.
   List<MediaLibrary> get _eligibleLibraries {
     final kind = _entryLibraryKind;
-    if (kind == null) return const [];
+    if (kind == null || widget.client.backend != MediaBackend.plex) return const [];
     return [
       for (final library in _libraries)
         if (library.kind == kind && !library.isShared && int.tryParse(library.id) != null) library,
@@ -170,12 +175,13 @@ class _RecordOptionsContentState extends State<_RecordOptionsContent> {
     });
   }
 
-  void _setPref(String id, Object? baseline, Object? value) {
+  void _setPref(SubscriptionSetting setting, Object? value) {
     setState(() {
-      if (_compareValues(value, baseline)) {
-        _dirtyPrefs.remove(id);
+      // Clearing a numeric field restores its baseline, not a null patch.
+      if ((setting.type == 'int' && value == null) || _compareValues(value, _baselineFor(setting))) {
+        _dirtyPrefs.remove(setting.id);
       } else {
-        _dirtyPrefs[id] = value;
+        _dirtyPrefs[setting.id] = value;
       }
     });
   }
@@ -199,8 +205,14 @@ class _RecordOptionsContentState extends State<_RecordOptionsContent> {
       _close(RecordOutcome.failed);
       return;
     }
-    final targetSectionId = widget.isEdit ? null : _effectiveSectionId(_eligibleLibraries);
-    if (!widget.isEdit && targetSectionId == null) {
+    final eligible = widget.isEdit ? const <MediaLibrary>[] : _eligibleLibraries;
+    final targetSectionId = widget.isEdit ? null : _effectiveSectionId(eligible);
+    // A target section is a Plex concept — recordings land in a library
+    // section the template names. MediaBrowser templates carry no target (the
+    // server records into its own configured folder), so only fail when the
+    // template actually expects one.
+    final requiresTarget = !widget.isEdit && (_entry.targetLibrarySectionID != null || eligible.isNotEmpty);
+    if (requiresTarget && targetSectionId == null) {
       _close(RecordOutcome.targetMissing);
       return;
     }
@@ -212,7 +224,7 @@ class _RecordOptionsContentState extends State<_RecordOptionsContent> {
           _close(RecordOutcome.failed);
           return;
         }
-        await dvr.updateRecordingRule(id, Map.of(_dirtyPrefs));
+        await dvr.updateRecordingRule(id, _entry.validatePrefs(_dirtyPrefs));
         if (!mounted) return;
         _close(RecordOutcome.updated);
       } else {
@@ -230,11 +242,13 @@ class _RecordOptionsContentState extends State<_RecordOptionsContent> {
       appLogger.e('Failed to save recording rule', error: e);
       if (!mounted) return;
       final code = e is MediaServerHttpException ? e.statusCode : null;
-      final outcome = switch (code) {
-        403 => RecordOutcome.adminRequired,
-        409 => RecordOutcome.alreadyScheduled,
-        _ => RecordOutcome.failed,
-      };
+      final outcome = e is RecordingConflictException
+          ? RecordOutcome.alreadyScheduled
+          : switch (code) {
+              403 => RecordOutcome.adminRequired,
+              409 => RecordOutcome.alreadyScheduled,
+              _ => RecordOutcome.failed,
+            };
       _close(outcome);
     }
   }
@@ -315,6 +329,13 @@ class _RecordOptionsContentState extends State<_RecordOptionsContent> {
                 ? Padding(
                     padding: const EdgeInsets.symmetric(vertical: 24),
                     child: Center(
+                      // Hugs like every other empty state. Switching entries
+                      // still moves the chooser chips above by the difference
+                      // in row count, which is inherent to content sizing;
+                      // filling this one branch instead made the mixed case
+                      // (one entry with settings, one without) far worse, since
+                      // the empty entry then inflated to the whole height cap.
+                      heightFactor: 1,
                       child: Text(
                         _entry.airingsType ?? '',
                         style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.onSurfaceVariant),
@@ -330,7 +351,7 @@ class _RecordOptionsContentState extends State<_RecordOptionsContent> {
                         setting: setting,
                         currentValue: _currentValueFor(setting),
                         autofocus: index == 0,
-                        onChanged: (value) => _setPref(setting.id, _baselineFor(setting), value),
+                        onChanged: (value) => _setPref(setting, value),
                       );
                     },
                   ),

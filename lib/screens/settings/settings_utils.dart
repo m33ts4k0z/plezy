@@ -15,6 +15,7 @@ import '../../utils/snackbar_helper.dart';
 import '../../widgets/app_icon.dart';
 import '../../widgets/dialog_action_button.dart';
 import '../../widgets/focusable_list_tile.dart';
+import '../../widgets/scroll_ink_boundary.dart';
 import '../../widgets/tv_color_picker.dart';
 import '../../widgets/tv_number_spinner.dart';
 
@@ -160,39 +161,101 @@ class _SettingsInputDialogState extends State<_SettingsInputDialog> {
 
 /// Shows a selection dialog with focusable rows for dpad/keyboard navigation.
 /// Used for settings with 5+ options (language, buffer size, etc.).
-Future<T?> showSelectionDialog<T>({
+///
+/// Returns the picked option, or null when the dialog was dismissed — the
+/// wrapper keeps a picked null *value* (e.g. a "same as default" option)
+/// distinguishable from dismissal.
+Future<DialogOption<T>?> showSelectionDialog<T>({
   required BuildContext context,
   required String title,
   required List<DialogOption<T>> options,
   required T currentValue,
 }) {
   final focusFirstItem = InputModeTracker.isKeyboardMode(context, listen: false);
-  return showScopedDialog<T>(
+  return showScopedDialog<DialogOption<T>>(
     context: context,
     builder: (dialogContext) => AlertDialog(
       title: Text(title),
       contentPadding: const EdgeInsets.only(top: 12, bottom: 24),
-      content: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: .min,
-          children: options.map((option) {
-            final selected = option.value == currentValue;
-            return FocusableListTile(
-              key: ValueKey(option.value),
-              leading: AppIcon(
-                selected ? Symbols.radio_button_checked_rounded : Symbols.radio_button_unchecked_rounded,
-                color: selected ? Theme.of(dialogContext).colorScheme.primary : null,
-              ),
-              title: Text(option.title),
-              subtitle: option.subtitle != null ? Text(option.subtitle!) : null,
-              selected: selected,
-              autofocus: focusFirstItem && selected,
-              onTap: () => Navigator.pop(dialogContext, option.value),
-            );
-          }).toList(),
+      content: ScrollInkBoundary(
+        child: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: .min,
+            children: options.map((option) {
+              final selected = option.value == currentValue;
+              return FocusableListTile(
+                key: ValueKey(option.value),
+                leading: AppIcon(
+                  selected ? Symbols.radio_button_checked_rounded : Symbols.radio_button_unchecked_rounded,
+                  color: selected ? Theme.of(dialogContext).colorScheme.primary : null,
+                ),
+                title: Text(option.title),
+                subtitle: option.subtitle != null ? Text(option.subtitle!) : null,
+                selected: selected,
+                autofocus: focusFirstItem && selected,
+                onTap: () => Navigator.pop(dialogContext, option),
+              );
+            }).toList(),
+          ),
         ),
       ),
     ),
+  );
+}
+
+/// Shows a checkbox dialog with focusable rows and Save/Cancel. [onSave]
+/// receives the checked values in [options] order. Values in [locked] render
+/// checked and disabled, so D-pad traversal skips them.
+void showChecklistDialog<T>({
+  required BuildContext context,
+  required String title,
+  required List<DialogOption<T>> options,
+  required Set<T> checked,
+  Set<T> locked = const {},
+  required Future<void> Function(List<T> checked) onSave,
+}) {
+  final current = {...checked, ...locked};
+  final focusFirstItem = InputModeTracker.isKeyboardMode(context, listen: false);
+  final firstEditable = options.where((option) => !locked.contains(option.value)).firstOrNull?.value;
+
+  _showSettingsInputDialog(
+    context: context,
+    title: title,
+    contentBuilder: (_, _, setDialogState, _) => ScrollInkBoundary(
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: .min,
+          children: [
+            for (final option in options)
+              FocusableCheckboxListTile(
+                key: ValueKey(option.value),
+                value: current.contains(option.value),
+                onChanged: locked.contains(option.value)
+                    ? null
+                    : (value) => setDialogState(() {
+                        if (value ?? false) {
+                          current.add(option.value);
+                        } else {
+                          current.remove(option.value);
+                        }
+                      }),
+                title: Text(option.title),
+                subtitle: option.subtitle != null ? Text(option.subtitle!) : null,
+                autofocus: focusFirstItem && option.value == firstEditable,
+                controlAffinity: ListTileControlAffinity.leading,
+                contentPadding: EdgeInsets.zero,
+              ),
+          ],
+        ),
+      ),
+    ),
+    onSave: (_) async {
+      await onSave([
+        for (final option in options)
+          if (current.contains(option.value)) option.value,
+      ]);
+      return true;
+    },
   );
 }
 
@@ -444,10 +507,19 @@ void showRegexInputDialog({
   final controller = TextEditingController(text: currentValue);
   String? errorText;
 
+  // A blank pattern compiles but matches every chapter title, so it is
+  // rejected like uncompilable input; "Reset to default" is the intentional
+  // way to clear the setting.
+  String? validationError(String value) =>
+      settings.SettingsService.isValidSkipPattern(value) ? null : t.settings.invalidRegex;
+
+  StateSetter? dialogState;
+
   _showSettingsInputDialog(
     context: context,
     title: title,
     contentBuilder: (_, _, setDialogState, saveFocusNode) {
+      dialogState = setDialogState;
       return FocusableTextField(
         controller: controller,
         decoration: InputDecoration(labelText: t.settings.regex, errorText: errorText),
@@ -455,14 +527,7 @@ void showRegexInputDialog({
         textInputAction: TextInputAction.done,
         onEditingComplete: () => saveFocusNode.requestFocus(),
         onChanged: (value) {
-          setDialogState(() {
-            try {
-              RegExp(value, caseSensitive: false);
-              errorText = null;
-            } catch (_) {
-              errorText = t.settings.invalidRegex;
-            }
-          });
+          setDialogState(() => errorText = validationError(value));
         },
       );
     },
@@ -476,7 +541,13 @@ void showRegexInputDialog({
       ),
     ],
     onSave: (_) async {
-      if (errorText != null) return false;
+      // Save is the persistence boundary: re-validate here so an
+      // already-persisted blank value cannot be saved back untouched.
+      final error = validationError(controller.text);
+      if (error != null) {
+        dialogState?.call(() => errorText = error);
+        return false;
+      }
       await onSave(controller.text);
       return true;
     },

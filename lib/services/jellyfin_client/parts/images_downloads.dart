@@ -1,39 +1,6 @@
 part of '../../jellyfin_client.dart';
 
 mixin _JellyfinImageDownloadMethods on _JellyfinClientInternals {
-  Future<JellyfinPlaybackBundle?> fetchPlaybackBundle(
-    String itemId, {
-    int sourceIndex = 0,
-    String? sourceId,
-    String? preferredSignature,
-  });
-  String buildDirectStreamUrl(
-    String itemId, {
-    String? container,
-    String? mediaSourceId,
-    String? playSessionId,
-    String? liveStreamId,
-    int? audioStreamIndex,
-  });
-  String buildAudioDirectStreamUrl(String itemId, {String? container, String? mediaSourceId});
-  Future<Map<String, dynamic>> getPlaybackInfo(
-    String itemId, {
-    int? maxStreamingBitrate = 100_000_000,
-    String? mediaSourceId,
-    String? liveStreamId,
-    int? startTimeTicks,
-    int? audioStreamIndex,
-    int? subtitleStreamIndex,
-    bool? autoOpenLiveStream,
-    bool? enableDirectPlay,
-    bool? enableDirectStream,
-    bool? enableTranscoding,
-    bool? allowVideoStreamCopy,
-    bool? allowAudioStreamCopy,
-    bool audioProfile,
-  });
-  String _withApiKey(String urlOrPath);
-
   /// [cover] is accepted for interface parity and ignored: `maxWidth`/
   /// `maxHeight` already scale the long axis to fit inside the box, so
   /// Jellyfin never overshoots the way Plex's `minSize=1` transcode does.
@@ -68,22 +35,6 @@ mixin _JellyfinImageDownloadMethods on _JellyfinClientInternals {
       appLogger.d('JellyfinClient.fetchThumbnailBytes failed', error: error);
       return null;
     }
-  }
-
-  @override
-  Future<String?> resolveExternalPlaybackUrl(MediaItem item, {int mediaIndex = 0, String? mediaSourceId}) async {
-    // Tracks stream from /Audio/{id}/stream; the URL contract (Static=true,
-    // api_key in the query string) is otherwise identical to the video one.
-    final isTrack = item.kind == MediaKind.track;
-    final bundle = await fetchPlaybackBundle(item.id, sourceIndex: mediaIndex, sourceId: mediaSourceId);
-    if (bundle == null) {
-      return isTrack ? buildAudioDirectStreamUrl(item.id) : buildDirectStreamUrl(item.id);
-    }
-    final container = bundle.container;
-    final pinnedSourceId = bundle.pinnedSourceId;
-    return isTrack
-        ? buildAudioDirectStreamUrl(item.id, container: container, mediaSourceId: pinnedSourceId)
-        : buildDirectStreamUrl(item.id, container: container, mediaSourceId: pinnedSourceId);
   }
 
   @override
@@ -162,10 +113,11 @@ mixin _JellyfinImageDownloadMethods on _JellyfinClientInternals {
       if (index is! int) continue;
       final codec = fields.codec?.toLowerCase();
       final delivery = fields.deliveryUrl;
+      final streamFile = _segment('Stream.${CodecUtils.getSubtitleExtension(codec)}');
       final url = _withApiKey(
         delivery != null && delivery.isNotEmpty
             ? delivery
-            : '/Videos/${_segment(item.id)}/${_segment(subtitleMediaSourceId)}/Subtitles/$index/${_segment('Stream.${codec ?? 'srt'}')}',
+            : '/Videos/${_segment(item.id)}/${_segment(subtitleMediaSourceId)}/Subtitles/$index/$streamFile',
       );
       subtitles.add(
         DownloadSubtitleSpec(

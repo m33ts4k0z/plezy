@@ -11,14 +11,12 @@ class MpvPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, MpvPluginS
   private weak var registrar: FlutterPluginRegistrar?
   var nameToId: [String: Int] = [:]
 
-  // MpvPluginShared conformance
   var coreBase: MpvPlayerCoreBase? { playerCore }
   func setPlayerVisible(_ visible: Bool, restoreOnWindowVisible: Bool) {
     playerCore?.setVisible(visible, restoreOnWindowVisible: restoreOnWindowVisible)
   }
   func updatePlayerFrame() { playerCore?.updateFrame() }
 
-  // PiP
   private var pipController: MpvPipController?
   private var pipChannel: FlutterMethodChannel?
   private var autoPipEnabled = false
@@ -27,13 +25,11 @@ class MpvPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, MpvPluginS
   // MARK: - FlutterPlugin Registration
 
   static func register(with registrar: FlutterPluginRegistrar) {
-    // Method channel for commands
     let methodChannel = FlutterMethodChannel(
       name: "com.plezy/mpv_player",
       binaryMessenger: registrar.messenger
     )
 
-    // Event channel for state updates
     let eventChannel = FlutterEventChannel(
       name: "com.plezy/mpv_player/events",
       binaryMessenger: registrar.messenger
@@ -52,7 +48,7 @@ class MpvPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, MpvPluginS
     eventChannel.setStreamHandler(instance)
     pipChannel.setMethodCallHandler(instance.handlePipCall)
 
-    print("[MpvPlayerPlugin] Registered with Flutter")
+    MpvLog.debug("[MpvPlayerPlugin] Registered with Flutter")
   }
 
   // MARK: - FlutterStreamHandler
@@ -61,13 +57,13 @@ class MpvPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, MpvPluginS
     -> FlutterError?
   {
     self.eventSink = events
-    print("[MpvPlayerPlugin] Event stream connected")
+    MpvLog.debug("[MpvPlayerPlugin] Event stream connected")
     return nil
   }
 
   func onCancel(withArguments arguments: Any?) -> FlutterError? {
     self.eventSink = nil
-    print("[MpvPlayerPlugin] Event stream disconnected")
+    MpvLog.debug("[MpvPlayerPlugin] Event stream disconnected")
     return nil
   }
 
@@ -110,8 +106,6 @@ class MpvPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, MpvPluginS
     }
   }
 
-  // MARK: - PiP
-
   private func ensurePipController() -> MpvPipController {
     if let existing = pipController { return existing }
     let controller = MpvPipController()
@@ -135,13 +129,11 @@ class MpvPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, MpvPluginS
         let pip = ensurePipController()
         pip.setAutoStart(ready)
         if ready {
-          // Observe app resigning active to auto-enter PiP
           NotificationCenter.default.removeObserver(
             self, name: NSApplication.didResignActiveNotification, object: nil)
           NotificationCenter.default.addObserver(
             self, selector: #selector(appDidResignActive),
             name: NSApplication.didResignActiveNotification, object: nil)
-          // Observe app becoming active to auto-exit PiP
           NotificationCenter.default.removeObserver(
             self, name: NSApplication.didBecomeActiveNotification, object: nil)
           NotificationCenter.default.addObserver(
@@ -184,8 +176,7 @@ class MpvPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, MpvPluginS
       return
     }
 
-    // Get video dimensions for aspect ratio
-    var aspectRatio = NSSize(width: 16, height: 9)  // default
+    var aspectRatio = NSSize(width: 16, height: 9)
     if let videoSize = playerCore.videoSize {
       aspectRatio = NSSize(width: videoSize.width, height: videoSize.height)
     }
@@ -206,14 +197,14 @@ class MpvPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, MpvPluginS
       !pc.isPaused,
       pipController?.autoPipEnabled == true
     else { return }
-    print("[MpvPlayerPlugin] Auto-PiP: app resigned active, entering PiP")
+    MpvLog.debug("[MpvPlayerPlugin] Auto-PiP: app resigned active, entering PiP")
     enterPip(manual: false)
   }
 
   /// App became active — auto-exit PiP if it was entered automatically
   @objc private func appDidBecomeActive() {
     guard enteredPipViaAuto, let pip = pipController, pip.isActive else { return }
-    print("[MpvPlayerPlugin] Auto-PiP: app became active, exiting PiP")
+    MpvLog.debug("[MpvPlayerPlugin] Auto-PiP: app became active, exiting PiP")
     pip.stopPip()
   }
 
@@ -226,28 +217,25 @@ class MpvPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, MpvPluginS
         return
       }
 
-      // Check if already initialized
       if self.playerCore?.isInitialized == true {
-        print("[MpvPlayerPlugin] Already initialized")
+        MpvLog.debug("[MpvPlayerPlugin] Already initialized")
         result(true)
         return
       }
 
-      // Find the Flutter window
       guard let (window, _, _) = self.findFlutterWindow() else {
-        print("[MpvPlayerPlugin] Failed to find Flutter window")
+        MpvLog.debug("[MpvPlayerPlugin] Failed to find Flutter window")
         result(
           FlutterError(
             code: "NO_WINDOW", message: "Could not find Flutter window", details: nil))
         return
       }
 
-      // Create and initialize player core
       let core = MpvPlayerCore()
       core.delegate = self
 
       guard core.initialize(in: window) else {
-        print("[MpvPlayerPlugin] Failed to initialize MPV")
+        MpvLog.debug("[MpvPlayerPlugin] Failed to initialize MPV")
         result(
           FlutterError(
             code: "MPV_INIT_FAILED", message: "Failed to initialize MPV", details: nil))
@@ -256,10 +244,9 @@ class MpvPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, MpvPluginS
 
       self.playerCore = core
 
-      // Start hidden
       core.setVisible(false)
 
-      print("[MpvPlayerPlugin] Initialized successfully")
+      MpvLog.debug("[MpvPlayerPlugin] Initialized successfully")
       result(true)
     }
   }
@@ -270,6 +257,12 @@ class MpvPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, MpvPluginS
       if let pip = self.pipController, pip.isActive {
         pip.stopPip()
         pip.detachLayer()
+        // The controller is released below, before PiP's close callback
+        // (pipDidStop) can arrive, so tell Dart PiP ended here; otherwise
+        // later players stay covered by the PiP placeholder.
+        self.playerCore?.isPipActive = false
+        self.enteredPipViaAuto = false
+        self.pipChannel?.invokeMethod("onPipChanged", arguments: false)
       }
       self.pipController = nil
       self.autoPipEnabled = false
@@ -279,7 +272,7 @@ class MpvPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, MpvPluginS
         self, name: NSApplication.didBecomeActiveNotification, object: nil)
       self.playerCore?.dispose()
       self.playerCore = nil
-      print("[MpvPlayerPlugin] Disposed")
+      MpvLog.debug("[MpvPlayerPlugin] Disposed")
       result(nil)
     }
   }
@@ -303,7 +296,6 @@ class MpvPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, MpvPluginS
       }
     }
 
-    // Fallback
     for window in NSApplication.shared.windows {
       if let contentView = window.contentView,
         let contentVC = window.contentViewController
@@ -322,25 +314,22 @@ class MpvPlayerPlugin: NSObject, FlutterPlugin, FlutterStreamHandler, MpvPluginS
 extension MpvPlayerPlugin: MpvPipDelegate {
 
   func pipWillStart() {
-    print("[MpvPlayerPlugin] PiP will start")
+    MpvLog.debug("[MpvPlayerPlugin] PiP will start")
   }
 
   func pipDidStart() {
-    print("[MpvPlayerPlugin] PiP did start")
+    MpvLog.debug("[MpvPlayerPlugin] PiP did start")
   }
 
   func pipDidStop(restored: Bool) {
-    print("[MpvPlayerPlugin] PiP did stop (restored: \(restored))")
+    MpvLog.debug("[MpvPlayerPlugin] PiP did stop (restored: \(restored))")
     playerCore?.isPipActive = false
     enteredPipViaAuto = false
 
-    // Detach the Metal layer from the PiP wrapper view
     pipController?.detachLayer()
 
-    // Re-attach the Metal layer to the main window
     playerCore?.reattachMetalLayer()
 
-    // Force a redraw if paused (prevents black frame after PiP exit)
     if playerCore?.isPaused == true {
       playerCore?.forceDraw()
     }

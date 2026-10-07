@@ -5,20 +5,25 @@ import android.app.AppOpsManager
 import android.app.PictureInPictureParams
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
 import android.content.res.Configuration
 import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Process
+import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import android.util.Rational
 import android.view.InputDevice
 import android.view.KeyEvent
+import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
 import android.view.WindowManager
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputConnection
 import android.view.inputmethod.InputMethodManager
 import android.widget.FrameLayout
 import androidx.annotation.RequiresApi
@@ -28,7 +33,9 @@ import com.edde746.plezy.localmedia.LocalMediaInfoPlugin
 import com.edde746.plezy.medianotification.MediaNotificationPlugin
 import com.edde746.plezy.mpv.MpvAudioPlayerPlugin
 import com.edde746.plezy.mpv.MpvPlayerPlugin
+import com.edde746.plezy.shared.AssistiveTechnologyMonitor
 import com.edde746.plezy.shared.DeviceQuirks
+import com.edde746.plezy.shared.MediaCodecQuery
 import com.edde746.plezy.shared.ThemeHelper
 import com.edde746.plezy.watchnext.WatchNextPlugin
 import io.flutter.embedding.android.FlutterActivity
@@ -48,6 +55,13 @@ class MainActivity : FlutterActivity() {
   companion object {
     private const val TAG = "MainActivity"
     private const val TEXT_INPUT_DIAGNOSTICS_ENABLED = false
+
+    // Safety net for a device where the text-editor proxy (see
+    // TextEditorProxyView) still leaves the IME without a key session: a
+    // bounded number of restartInput repairs, spaced so one cannot pile on
+    // another mid-bind.
+    private const val IME_LEAK_RESTART_BUDGET = 2
+    private const val IME_LEAK_RESTART_MIN_INTERVAL_MS = 1000L
     private const val EXIT_DIAGNOSTICS_PREFS = "plezy_exit_diagnostics"
     private const val LAST_EXIT_DEDUPE_KEY = "last_reported_exit"
     private const val LAST_STARTUP_PHASE_KEY = "last_startup_phase"
@@ -68,6 +82,20 @@ class MainActivity : FlutterActivity() {
     // "2GB" devices report totalMem slightly above 2 GiB after carve-outs.
     private const val LOW_MEM_THRESHOLD_BYTES = 2252L shl 20
 
+    // Configuration bits only a fold/unfold or display switch flips (a
+    // subset of the android:configChanges set that keeps this activity alive
+    // across them). CONFIG_SCREEN_SIZE is handled separately: rotation
+    // reports it too because width/height swap, so it only counts when no
+    // orientation change explains it. Density alone is not a fold.
+    private const val FOLD_CONFIG_MASK =
+      ActivityInfo.CONFIG_SMALLEST_SCREEN_SIZE or ActivityInfo.CONFIG_SCREEN_LAYOUT
+
+    // How long the nav-bar show in [reassertHiddenSystemBars] is left to
+    // settle before the hide: past InsetsController's show animation
+    // (275 ms), so the hide lands as a fresh transition the window manager
+    // acts on rather than a cancellation of the show it never finished.
+    private const val SYSTEM_BARS_SETTLE_MS = 400L
+
     private var selectedFlutterRenderer = FlutterRenderer.IMPELLER
 
     /// Currently attached activity, used by the persistent media notification
@@ -84,15 +112,25 @@ class MainActivity : FlutterActivity() {
   private val TEXT_INPUT_CHANNEL = "com.plezy/text_input"
   private val APP_EXIT_CHANNEL = "com.plezy/app_exit"
   private val CAR_RESTRICTIONS_CHANNEL = "com.plezy/car_restrictions"
+  private val ASSISTIVE_TECHNOLOGY_CHANNEL = "com.plezy/assistive_technology"
   private var watchNextPlugin: WatchNextPlugin? = null
   private var carRestrictions: CarRestrictionsMonitor? = null
   private var carRestrictionsChannel: MethodChannel? = null
+  private var assistiveTechnology: AssistiveTechnologyMonitor? = null
+  private var assistiveTechnologyChannel: MethodChannel? = null
   private var nativeTextInputFocused = false
+  private var imeLeakRestartBudget = 0
+  private var lastImeLeakRestartUptime = 0L
+  private var systemBarsInsetsHost: View? = null
+  private var systemBarsReassertPending = false
+  private var pendingSystemBarsHide: Runnable? = null
+  private var lastConfig: Configuration? = null
   private var originalWindowBrightness: Float? = null
   private var flutterTextureView: FlutterTextureView? = null
   private var flutterSurfaceReconnectPending = false
   private var activityStarted = false
   private val externalPlayerChannel = ExternalPlayerChannel(this)
+  private val userCertificateChannel = UserCertificateChannel()
   private val exitDiagnosticsRequested = AtomicBoolean(false)
 
   private inline fun logTextInputDiag(message: () -> String) {
@@ -101,7 +139,6 @@ class MainActivity : FlutterActivity() {
     }
   }
 
-  // Auto PiP state
   private var autoPipReady = false
   private var autoPipWidth: Int = 16
   private var autoPipHeight: Int = 9
@@ -169,6 +206,85 @@ class MainActivity : FlutterActivity() {
     val forward = !nativeTextInputFocused && !isImeVisible() && !imm.isAcceptingText
     logTextInputDiag { "shouldForwardDpadBeforeIme=$forward ${describeImeState()}" }
     return forward
+  }
+
+  private fun inputMethodManager(): InputMethodManager = getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager
+
+  private fun flutterView(): View? = findViewById(FLUTTER_VIEW_ID)
+
+  // Android TV's low-RAM overlay enables config_preventImeStartupUnlessTextEditor
+  // (Chromecast with Google TV, Philips/TCL Google TVs): InputMethodManagerService
+  // answers every startInput whose focused view does not report
+  // onCheckIsTextEditor() with NO_EDITOR and unbinds the IME. FlutterView never
+  // reports it, so the engine's restartInput kills Gboard, the showSoftInput
+  // that follows revives it, and the revived session's bind carries a sequence
+  // this process never asked for ("Ignoring onBind: cur seq=-1"): the keyboard
+  // is drawn but the app holds no IME session, and D-pad keys fall through to
+  // Flutter (#1051, #1079, #2405, flutter/flutter#177360).
+  //
+  // This view lives inside FlutterView and holds Android focus in its place
+  // (FOCUS_AFTER_DESCENDANTS routes the engine's requestFocus here too). It
+  // reports text-editor status from the Dart-side session flag, hands the
+  // IMM Flutter's own InputConnection, and vouches for FlutterView so the
+  // engine's showSoftInput/restartInput(flutterView) still pass the IMM's
+  // served-view check. Keys are unaffected: FlutterView.dispatchKeyEvent runs
+  // before descending to the focused child.
+  private inner class TextEditorProxyView(context: Context, private val flutterView: View) : View(context) {
+    init {
+      isFocusable = true
+      isFocusableInTouchMode = true
+      importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_NO
+    }
+
+    override fun onCheckIsTextEditor(): Boolean = nativeTextInputFocused
+
+    override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection? = flutterView.onCreateInputConnection(outAttrs)
+
+    override fun checkInputConnectionProxy(view: View): Boolean = view === flutterView
+  }
+
+  private fun installTextEditorProxy() {
+    val flutterView = flutterView() as? ViewGroup ?: return
+    flutterView.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+    val proxy = TextEditorProxyView(this, flutterView)
+    flutterView.addView(proxy, FrameLayout.LayoutParams(1, 1))
+    if (flutterView.isFocused) proxy.requestFocus()
+  }
+
+  private fun restartNativeTextInput(reason: String) {
+    val view = flutterView() ?: return
+    logTextInputDiag { "restartInput reason=$reason ${describeImeState()}" }
+    inputMethodManager().restartInput(view)
+  }
+
+  // A visible IME owns D-pad navigation: a healthy Gboard consumes these keys
+  // at the ImeInputStage, before the app. One arriving here means the IME's
+  // key session is not bound in this process. With the text-editor proxy in
+  // place a restartInput re-attaches the bound session synchronously, so
+  // rebind and eat the press so Flutter focus cannot wander behind the stuck
+  // keyboard. The bounded budget guarantees keys flow again (and Flutter can
+  // close the session) if a device still cannot be healed.
+  private fun consumeLeakedImeNavigationKey(event: KeyEvent): Boolean {
+    if (!nativeTextInputFocused || imeLeakRestartBudget <= 0) return false
+    when (event.keyCode) {
+      KeyEvent.KEYCODE_DPAD_UP,
+      KeyEvent.KEYCODE_DPAD_DOWN,
+      KeyEvent.KEYCODE_DPAD_LEFT,
+      KeyEvent.KEYCODE_DPAD_RIGHT,
+      KeyEvent.KEYCODE_DPAD_CENTER -> Unit
+      else -> return false
+    }
+    if (!isImeVisible()) return false
+    if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+      val now = SystemClock.uptimeMillis()
+      if (now - lastImeLeakRestartUptime >= IME_LEAK_RESTART_MIN_INTERVAL_MS) {
+        lastImeLeakRestartUptime = now
+        imeLeakRestartBudget--
+        restartNativeTextInput("leaked-dpad-while-ime-visible")
+      }
+    }
+    logTextInputDiag { "consuming leaked IME key ${describeKeyEvent(event)} budget=$imeLeakRestartBudget" }
+    return true
   }
 
   private fun getAndroidTvDetection(): Map<String, Any> {
@@ -386,6 +502,7 @@ class MainActivity : FlutterActivity() {
 
     current = this
     super.onCreate(savedInstanceState)
+    lastConfig = Configuration(resources.configuration)
 
     // Disable the Android splash screen fade-out animation to avoid
     // a flicker before Flutter draws its first frame.
@@ -442,9 +559,33 @@ class MainActivity : FlutterActivity() {
       )
     )
 
-    // Handle Watch Next deep link from initial launch
-    handleWatchNextIntent(intent)
-    MediaNotificationPlugin.dispatchActionFromIntent(intent)
+    // Anchor the post-fold system-bar re-assert on the first inset dispatch
+    // after the configuration change: that lands on a vsync traversal after
+    // the window manager has re-laid the window out, whereas a post from
+    // onConfigurationChanged raced the taskbar's force-show. The listener
+    // lives on the wrapper, not the DecorView, so DecorView.onApplyWindowInsets
+    // keeps its color-view handling; insets are never consumed so FlutterView
+    // still receives them.
+    wrapper.setOnApplyWindowInsetsListener { v, insets ->
+      if (systemBarsReassertPending) {
+        systemBarsReassertPending = false
+        v.post { reassertHiddenSystemBars() }
+      }
+      insets
+    }
+    systemBarsInsetsHost = wrapper
+
+    if (isAndroidTvDevice()) installTextEditorProxy()
+
+    // Handle Watch Next deep links and media-notification taps from the initial
+    // launch. A restored activity or a relaunch from Recents carries the
+    // original launch intent, whose tap was already handled; replaying it would
+    // start that item again (or re-fire a stale play/resume action).
+    val launchedFromHistory = (intent?.flags ?: 0) and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY != 0
+    if (savedInstanceState == null && !launchedFromHistory) {
+      handleWatchNextIntent(intent)
+      MediaNotificationPlugin.dispatchActionFromIntent(intent)
+    }
   }
 
   override fun onNewIntent(intent: Intent) {
@@ -458,6 +599,9 @@ class MainActivity : FlutterActivity() {
     if (isDpadKeyCode(event.keyCode)) {
       logTextInputDiag { "activity.dispatchKeyEvent before ${describeKeyEvent(event)} ${describeImeState()}" }
     }
+    // Reaching the activity means the ImeInputStage already declined this
+    // key, so consumption below cannot starve a healthy IME.
+    if (consumeLeakedImeNavigationKey(event)) return true
     val handled = super.dispatchKeyEvent(event)
     if (isDpadKeyCode(event.keyCode)) {
       logTextInputDiag {
@@ -476,9 +620,15 @@ class MainActivity : FlutterActivity() {
   override fun onDestroy() {
     if (current === this) current = null
     externalPlayerChannel.dispose()
+    systemBarsInsetsHost?.setOnApplyWindowInsetsListener(null)
+    systemBarsInsetsHost = null
+    cancelPendingSystemBarsHide()
     carRestrictions?.release()
     carRestrictions = null
     carRestrictionsChannel = null
+    assistiveTechnology?.release()
+    assistiveTechnology = null
+    assistiveTechnologyChannel = null
     activityStarted = false
     flutterSurfaceReconnectPending = false
     flutterTextureView = null
@@ -520,22 +670,32 @@ class MainActivity : FlutterActivity() {
     val args = super.getFlutterShellArgs()
     selectedFlutterRenderer = selectFlutterRenderer()
     selectedFlutterRenderer.shellArgument?.let { args.add(it) }
+    // FlutterLoader appends its own defaults after these args and the engine
+    // keeps the last value of a flag. The manifest's OldGenHeapSize meta-data
+    // suppresses the loader's old-gen default, so the value set here is the
+    // one that sticks. Skia's resource cache threshold has no such opt-out;
+    // Dart caps that cache over the flutter/skia channel (DevicePerformance).
     if (isLowRamClass()) {
-      // Bound the memory pools Dart can't reach: Skia's GPU resource cache
-      // is sized from the surface area (hundreds of MB on a 4K-composited
-      // TV) and the Dart old gen defaults to a large fraction of physical
-      // RAM. Both drive LMK kills on 2GB boxes (#1349).
-      if (selectedFlutterRenderer == FlutterRenderer.SKIA) {
-        args.add("--resource-cache-max-bytes-threshold=50331648")
-      }
+      // The Dart old gen defaults to half of physical RAM, which drives LMK
+      // kills on 2GB boxes (#1349).
       args.add("--old-gen-heap-size=256")
       Log.i(
         TAG,
         "Low-RAM device: capped engine caches " +
           "(renderer=${selectedFlutterRenderer.diagnosticName}, oldGen=256MB)"
       )
+    } else {
+      args.add("--old-gen-heap-size=${defaultOldGenHeapSizeMegabytes()}")
     }
     return args
+  }
+
+  /** FlutterLoader's own default (half of physical RAM), which the manifest meta-data turns off. */
+  private fun defaultOldGenHeapSizeMegabytes(): Int {
+    val activityManager = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+    val memoryInfo = ActivityManager.MemoryInfo()
+    activityManager.getMemoryInfo(memoryInfo)
+    return (memoryInfo.totalMem / 1e6 / 2).toInt()
   }
 
   private fun selectFlutterRenderer(): FlutterRenderer {
@@ -600,6 +760,90 @@ class MainActivity : FlutterActivity() {
     tryReconnectFlutterSurface()
   }
 
+  /**
+   * Arm a one-shot re-assert of the hidden navigation bar after a fold-class
+   * configuration change. The manifest keeps this activity alive across
+   * fold/unfold and display switches, and Samsung's taskbar (a window of its
+   * own, not an inset this activity controls) is force-shown on the inner
+   * display without any `systemUIChange` the Dart guard could answer.
+   *
+   * Replaying the requested overlays here was a no-op at three layers:
+   * `View.setSystemUiVisibility` drops unchanged flags, `ViewRootImpl` only
+   * issues an inset hide on a flag transition, and `InsetsController.hide`
+   * skips a type that is already requested-hidden. No timing can make an
+   * unchanged request reach the window manager, so instead
+   * [reassertHiddenSystemBars] flips the requested visibility (show, then
+   * hide once the show has settled) once the first inset dispatch after the
+   * change confirms the window has been re-laid out. Only screen-size and
+   * layout diffs arm it; orientation-only and density-only changes do not.
+   */
+  override fun onConfigurationChanged(newConfig: Configuration) {
+    super.onConfigurationChanged(newConfig)
+    val diff = lastConfig?.diff(newConfig) ?: 0
+    lastConfig = Configuration(newConfig)
+    val foldClass = (diff and FOLD_CONFIG_MASK) != 0 ||
+      ((diff and ActivityInfo.CONFIG_SCREEN_SIZE) != 0 && (diff and ActivityInfo.CONFIG_ORIENTATION) == 0)
+    if (foldClass) systemBarsReassertPending = true
+  }
+
+  // Forces a real requested-visibility transition on the navigation bar so
+  // the window manager, StatusBar service and SystemUI re-derive "nav hidden"
+  // for this window. show() makes the consumer requested-visible; the hide
+  // follows once that show has settled. Issuing both in one runnable reached
+  // the window manager (requested true→false) but the hide only cancelled
+  // the show's pending animation (`cancelAnimation: types=navigationBars`)
+  // and the taskbar never retracted, whereas a transient that runs to
+  // completion does retract it. So the show is allowed to complete, as a
+  // swipe-reveal would, and the hide is a fresh transition after it.
+  // The show also rewrites Flutter's legacy flags: once the bar is visible
+  // with control, ViewRootImpl.updateCompatSysUiVisibility marks
+  // HIDE_NAVIGATION as a local change and View.updateLocalSystemUiVisibility
+  // clears it on the DecorView. A flag-gated controller.hide() therefore
+  // never ran, and every later fold failed the entry guard. So the hide is a
+  // restore of the flags snapshotted before the show: putting HIDE_NAVIGATION
+  // back is a flag transition, so ViewRootImpl.controlInsetsForCompatibility
+  // issues the hide itself — the path Flutter takes to enter immersive — and
+  // the engine's flags are coherent again for the next fold. Ownership is a
+  // flag comparison rather than a HIDE_NAVIGATION check: leaving the player
+  // meanwhile writes edge-to-edge flags, which also drop FULLSCREEN and
+  // IMMERSIVE_STICKY, so they mismatch the snapshot even with HIDE_NAVIGATION
+  // added back. Outside immersive mode (edge-to-edge screens) there is
+  // nothing to re-assert.
+  @Suppress("DEPRECATION")
+  private fun reassertHiddenSystemBars() {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
+    if (!navigationHiddenByFlags()) return
+    val controller = window.insetsController ?: return
+    Log.i(TAG, "Re-asserting hidden navigation bars after a fold-class configuration change")
+    cancelPendingSystemBarsHide()
+    val immersiveFlags = window.decorView.systemUiVisibility
+    controller.show(WindowInsets.Type.navigationBars())
+    val hide = Runnable {
+      pendingSystemBarsHide = null
+      val current = window.decorView.systemUiVisibility
+      if ((current or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION) != immersiveFlags) return@Runnable
+      if (current == immersiveFlags) {
+        // The show never reached the compat sync (no control at that instant), so
+        // the flags carry no transition to replay; hide the bar directly.
+        window.insetsController?.hide(WindowInsets.Type.navigationBars())
+      } else {
+        window.decorView.systemUiVisibility = immersiveFlags
+      }
+    }
+    pendingSystemBarsHide = hide
+    window.decorView.postDelayed(hide, SYSTEM_BARS_SETTLE_MS)
+  }
+
+  private fun cancelPendingSystemBarsHide() {
+    pendingSystemBarsHide?.let { window.decorView.removeCallbacks(it) }
+    pendingSystemBarsHide = null
+  }
+
+  // Whether Dart's last requested system-UI mode hides the navigation bar,
+  // i.e. the player's immersive mode is in force.
+  @Suppress("DEPRECATION")
+  private fun navigationHiddenByFlags(): Boolean = (window.decorView.systemUiVisibility and View.SYSTEM_UI_FLAG_HIDE_NAVIGATION) != 0
+
   private fun tryReconnectFlutterSurface() {
     if (!activityStarted || !flutterSurfaceReconnectPending) return
     val textureView = flutterTextureView ?: return
@@ -636,6 +880,7 @@ class MainActivity : FlutterActivity() {
         "getTvDetection" -> result.success(getAndroidTvDetection())
         "getDeviceName" -> result.success(getDeviceName())
         "getPerformanceSignals" -> result.success(getPerformanceSignals())
+        "getVideoDecodeCapabilities" -> result.success(MediaCodecQuery.hardwareVideoDecodeSupport())
         "getBackgroundWorkSignals" -> result.success(
           BackgroundWorkClassifier.toMap(BackgroundWorkDiagnostics.read(this))
         )
@@ -680,6 +925,19 @@ class MainActivity : FlutterActivity() {
       }
     }
 
+    val assistiveChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, ASSISTIVE_TECHNOLOGY_CHANNEL)
+    assistiveTechnologyChannel = assistiveChannel
+    val assistiveMonitor = assistiveTechnology ?: AssistiveTechnologyMonitor(applicationContext).also {
+      assistiveTechnology = it
+    }
+    assistiveMonitor.start { runOnUiThread { assistiveTechnologyChannel?.invokeMethod("onChanged", null) } }
+    assistiveChannel.setMethodCallHandler { call, result ->
+      when (call.method) {
+        "getSignals" -> result.success(assistiveMonitor.signals())
+        else -> result.notImplemented()
+      }
+    }
+
     MethodChannel(flutterEngine.dartExecutor.binaryMessenger, DEVICE_ADJUSTMENT_CHANNEL).setMethodCallHandler { call, result ->
       handleDeviceAdjustmentCall(call.method, call.arguments, result)
     }
@@ -691,6 +949,9 @@ class MainActivity : FlutterActivity() {
           nativeTextInputFocused = call.arguments as? Boolean ?: false
           logTextInputDiag {
             "methodChannel setNativeTextInputFocused old=$oldValue new=$nativeTextInputFocused ${describeImeState()}"
+          }
+          if (nativeTextInputFocused && !oldValue) {
+            imeLeakRestartBudget = IME_LEAK_RESTART_BUDGET
           }
           result.success(null)
         }
@@ -711,6 +972,7 @@ class MainActivity : FlutterActivity() {
     }
 
     externalPlayerChannel.attach(flutterEngine.dartExecutor.binaryMessenger)
+    userCertificateChannel.attach(flutterEngine.dartExecutor.binaryMessenger)
 
     // Splash screen theme: persist user's chosen theme for next launch (API 31+)
     MethodChannel(flutterEngine.dartExecutor.binaryMessenger, THEME_CHANNEL).setMethodCallHandler { call, result ->
@@ -778,7 +1040,8 @@ class MainActivity : FlutterActivity() {
           } catch (e: IllegalStateException) {
             result.success(mapOf("success" to false, "errorCode" to "not_supported"))
           } catch (e: Exception) {
-            result.success(mapOf("success" to false, "errorCode" to "unknown", "errorMessage" to (e.message ?: "Unknown error")))
+            Log.w(TAG, "Failed to enter PiP", e)
+            result.success(mapOf("success" to false, "errorCode" to "unknown", "errorMessage" to e.message))
           }
         }
         "setAutoPipReady" -> {
