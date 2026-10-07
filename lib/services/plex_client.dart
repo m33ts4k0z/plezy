@@ -126,6 +126,7 @@ String _plexHlsLiveVideoTranscodeTarget() =>
 const _plexHlsSubtitleTranscodeTarget =
     'add-transcode-target(type=subtitleProfile&context=streaming'
     '&protocol=hls&container=webvtt&subtitleCodec=webvtt)';
+
 /// HTTP/MKV VOD transcode target. The `*` wildcards let the server copy
 /// whatever the source carries into the Matroska container. Once the user
 /// refuses a video codec in settings (#2443) the video list narrows to the
@@ -140,6 +141,7 @@ String _plexHttpVideoTranscodeTarget() {
       '&protocol=http&container=mkv&videoCodec=$videoCodecs'
       '&audioCodec=opus%2Cvorbis%2Cflac%2C*&subtitleCodec=ass%2Cpgs%2Cvobsub%2C*)';
 }
+
 const _plexHttpVideoTranscodeSettings =
     'add-transcode-target-settings(type=videoProfile&context=streaming'
     '&protocol=http&CopyMatroskaAttachments=true)';
@@ -2874,6 +2876,10 @@ class PlexClient
   /// [sourceCodecRefused] asks for a video encode even at Original quality:
   /// the user refused the source's codec, so the file itself must not be
   /// served (#2443).
+  ///
+  /// [copySourceAudio] passes the source audio track through untouched
+  /// instead of fitting it into the preset's stream budget (see
+  /// [_copiesSourceAudio]).
   Future<({String? startPath, TranscodeDecisionOutcome outcome})> buildTranscodeStartPath({
     required String ratingKey,
     required int mediaIndex,
@@ -2885,6 +2891,7 @@ class PlexClient
     MediaSubtitleTrack? selectedSubtitleTrack,
     int? offsetMs,
     bool sourceCodecRefused = false,
+    bool copySourceAudio = false,
   }) async {
     try {
       final allParams = _buildTranscodeParams(
@@ -2898,11 +2905,15 @@ class PlexClient
         selectedSubtitleTrack: selectedSubtitleTrack,
         offsetMs: offsetMs,
         sourceCodecRefused: sourceCodecRefused,
+        copySourceAudio: copySourceAudio,
       );
       final result = await _runTranscodeDecision(
         startEndpoint: _plexVideoHttpStartEndpoint,
         allParams: allParams,
         isOriginal: preset.isOriginal,
+        // The platform the URL names, as the start request also sends it
+        // (see [transcodeStreamHeaders]).
+        headers: {'X-Plex-Platform': _transcodePlatformName()},
       );
       return (startPath: result.startPath, outcome: result.outcome);
     } catch (e, st) {
@@ -3002,13 +3013,14 @@ class PlexClient
     required Map<String, String> allParams,
     required bool isOriginal,
     String? requiredContainer,
+    Map<String, String> headers = const {},
   }) async {
     final decisionEndpoint = '${startEndpoint.substring(0, startEndpoint.lastIndexOf('/'))}/decision';
 
     final decisionResponse = await _http.get(
       decisionEndpoint,
       queryParameters: allParams,
-      headers: const {'Accept-Language': 'en', 'Accept': 'application/json'},
+      headers: {'Accept-Language': 'en', 'Accept': 'application/json', ...headers},
     );
 
     final decisionBody = decisionResponse.data?.toString() ?? '<empty>';
@@ -3084,6 +3096,7 @@ class PlexClient
     MediaSubtitleTrack? selectedSubtitleTrack,
     int? offsetMs,
     bool sourceCodecRefused = false,
+    bool copySourceAudio = false,
   }) {
     final isOriginal = preset.isOriginal;
     final selectedEmbeddedTextSubtitle = _shouldEmbedSubtitleInHttpTranscode(selectedSubtitleTrack)
@@ -3106,14 +3119,28 @@ class PlexClient
       'directPlay': isOriginal && !sourceCodecRefused ? '1' : '0',
       'directStream': isOriginal ? '1' : '0',
       'subtitleSize': '100',
-      'audioBoost': '100',
+      // PMS applies this only when it downmixes multichannel audio to stereo,
+      // which in practice is the 240p preset. Its downmix is normalised ~7.7 dB
+      // below the player-side downmix, so 100 left that stream much quieter
+      // than every other quality; see [enqueueServerSideTranscode].
+      'audioBoost': '225',
       'location': 'lan',
-      if (!isOriginal && preset.videoBitrateKbps != null) 'maxVideoBitrate': preset.videoBitrateKbps.toString(),
+      // A whole-stream budget: under it PMS copies no audio track larger than
+      // its own re-encode allowance (~400 kbps for 5.1), so E-AC3 would always
+      // go through EasyAudioEncoder (see directStreamAudio). The profile's
+      // video.bitrate limitation already holds the video to the preset, so the
+      // budget is dropped whenever the source audio is to be copied.
+      if (!isOriginal && preset.videoBitrateKbps != null && !copySourceAudio)
+        'maxVideoBitrate': preset.videoBitrateKbps.toString(),
       if (!isOriginal && preset.videoResolution != null) 'videoResolution': preset.videoResolution!,
       if (!isOriginal && preset.videoQuality != null) 'videoQuality': preset.videoQuality.toString(),
       'addDebugOverlay': '0',
       'autoAdjustQuality': '0',
-      'directStreamAudio': '0',
+      // Let PMS copy the source audio into the MKV (the target's `*` allows any
+      // codec) instead of re-encoding it. Re-encoding E-AC3 goes through Plex's
+      // EasyAudioEncoder, which can reject every packet when a transcode starts
+      // mid-file ("Cannot group in blocks of 6!"), so the stream never starts.
+      'directStreamAudio': '1',
       'mediaBufferSize': '102400',
       'session': transcodeSessionId,
       'subtitles': selectedEmbeddedTextSubtitle != null ? 'embedded' : 'none',
@@ -3145,6 +3172,7 @@ class PlexClient
     MediaSubtitleTrack? selectedSubtitleTrack,
     int? offsetMs,
     bool sourceCodecRefused = false,
+    bool copySourceAudio = false,
   }) {
     return _buildTranscodeParams(
       ratingKey: ratingKey,
@@ -3157,6 +3185,7 @@ class PlexClient
       selectedSubtitleTrack: selectedSubtitleTrack,
       offsetMs: offsetMs,
       sourceCodecRefused: sourceCodecRefused,
+      copySourceAudio: copySourceAudio,
     );
   }
 
@@ -3786,6 +3815,7 @@ class PlexClient
           selectedSubtitleTrack: selectedSubtitleTrack,
           offsetMs: _transcodeStartOffsetMs(options.startPosition, data.mediaInfo),
           sourceCodecRefused: sourceCodecRefused,
+          copySourceAudio: _copiesSourceAudio(data.mediaInfo, resolvedAudioId),
         );
 
         if (result.outcome == TranscodeDecisionOutcome.transcodeOk && result.startPath != null) {
@@ -3921,6 +3951,26 @@ class PlexClient
     return tracks.first.id;
   }
 
+  /// Lossy codecs whose tracks stay within about 1.5 Mbps, so passing one
+  /// through a capped transcode adds a bounded amount of bandwidth. TrueHD,
+  /// DTS, FLAC and PCM tracks (often 1.5–6 Mbps) stay inside the preset's
+  /// stream budget, which re-encodes them.
+  static const _copyableTranscodeAudioCodecs = {'aac', 'ac3', 'eac3', 'mp2', 'mp3', 'opus', 'vorbis'};
+
+  /// Whether a transcode should pass [audioStreamId]'s track through as-is.
+  /// Copying keeps Plex's EasyAudioEncoder out of the stream: re-encoding
+  /// E-AC3 decodes it there, and that decoder can reject every packet when the
+  /// transcode starts mid-file, so the stream never produces any output.
+  bool _copiesSourceAudio(MediaSourceInfo? info, int? audioStreamId) {
+    if (info == null || audioStreamId == null) return false;
+    for (final track in info.audioTracks) {
+      if (track.id != audioStreamId) continue;
+      final codec = track.codec?.toLowerCase();
+      return codec != null && _copyableTranscodeAudioCodecs.contains(codec);
+    }
+    return false;
+  }
+
   /// Best-effort cleanup for a rendition superseded by a quality, version, or
   /// audio switch.
   Future<void> stopTranscodeSession({required String transcodeSessionId}) async {
@@ -3982,6 +4032,7 @@ class PlexClient
   MediaSubtitleTrack? resolveTranscodeSubtitleTrackForTesting(MediaSourceInfo? info, SubtitlePreference? preferred) {
     return _resolveTranscodeSubtitleTrack(info, preferred);
   }
+
   /// Build the absolute URL for an external subtitle track on this Plex
   /// server. Returns `null` for tracks that aren't external (no `/library/
   /// streams/{id}` key) or when the server has no auth token.
@@ -4712,6 +4763,13 @@ class PlexClient
 
   @override
   Map<String, String> get streamHeaders => Map.unmodifiable(config.headers);
+
+  /// [streamHeaders] for a video transcode's start request, naming the
+  /// platform its URL names. PMS reads the header over the query param, and
+  /// as "Android" it burns the part's selected external subtitle into the
+  /// video even with `subtitles=none`, on top of the copy the player draws.
+  Map<String, String> get transcodeStreamHeaders =>
+      Map.unmodifiable({...config.headers, 'X-Plex-Platform': _transcodePlatformName()});
 
   /// Reads both guid shapes Plex can answer with. The `Guid` array only exists
   /// for items matched by the Plex Movie / Plex TV Series agents; a library

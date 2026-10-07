@@ -1,7 +1,9 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:drift/drift.dart' show Value;
 import 'package:drift/native.dart';
+import 'package:http/http.dart' as http;
 import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
 import 'package:plezy/media/ids.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -17,8 +19,10 @@ import 'package:plezy/services/multi_server_manager.dart';
 import 'package:plezy/services/playback_context.dart';
 import 'package:plezy/services/playback_initialization_types.dart';
 import 'package:plezy/services/playback_source_resolver.dart';
+import 'package:plezy/services/plex_api_cache.dart';
 import 'package:plezy/services/saf_storage_service.dart';
 import 'package:plezy/services/settings_service.dart';
+import '../test_helpers/backend_client_fixtures.dart';
 import '../test_helpers/io_fakes.dart';
 import '../test_helpers/media_items.dart';
 import '../test_helpers/prefs.dart';
@@ -291,5 +295,79 @@ void main() {
       expect(context.sourceKind, PlaybackSourceKind.localFile);
       expect(context.result.videoUrl, 'content://sdcard/movie-1.mkv');
     });
+  });
+
+  // Last in the file: it installs the process-wide PlexApiCache on a database
+  // its teardown closes, which no later test here should inherit.
+  test('a plex video transcode streams with the platform its URL names', () async {
+    // PMS reads X-Plex-Platform from the header before the query; as the
+    // "Android" identity it burns the selected external subtitle into the
+    // video while the player draws the same subtitle itself.
+    final db = AppDatabase.forTesting(NativeDatabase.memory());
+    PlexApiCache.initialize(db);
+    final manager = MultiServerManager();
+    final client = testPlexClient(
+      serverId: ServerId('srv'),
+      handler: (request) async {
+        final body = switch (request.url.path) {
+          '/library/metadata/item-1' => {
+            'MediaContainer': {
+              'Metadata': [
+                {
+                  'ratingKey': 'item-1',
+                  'Media': [
+                    {
+                      'id': 7,
+                      'container': 'mkv',
+                      'bitrate': 13137,
+                      'height': 1080,
+                      'Part': [
+                        {'id': 99, 'key': '/library/parts/99/file.mkv'},
+                      ],
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+          '/video/:/transcode/universal/decision' => {
+            'MediaContainer': {
+              'transcodeDecisionCode': 1001,
+              'Metadata': [
+                {
+                  'Media': [
+                    {'container': 'mkv', 'protocol': 'http', 'selected': true},
+                  ],
+                },
+              ],
+            },
+          },
+          _ => null,
+        };
+        if (body == null) return http.Response('unexpected request', 500);
+        return http.Response(jsonEncode(body), 200, headers: {'content-type': 'application/json'});
+      },
+    );
+    addTearDown(() async {
+      manager.dispose();
+      client.close();
+      await db.close();
+    });
+    manager.debugRegisterClientForTesting(client, online: true);
+
+    final context = await PlaybackSourceResolver(serverManager: manager, database: db).resolve(
+      PlaybackInitializationOptions(
+        metadata: testMediaItem(id: 'item-1', backend: MediaBackend.plex, kind: MediaKind.movie, serverId: 'srv'),
+        selectedMediaIndex: 0,
+        qualityPreset: TranscodeQualityPreset.p720_4mbps,
+        sessionIdentifier: 'playback-session-id',
+        transcodeSessionId: 'transcode-id',
+      ),
+      offlineLibraryMode: false,
+    );
+
+    expect(context.sourceKind, PlaybackSourceKind.remoteTranscode);
+    expect(context.streamHeaders, containsPair('X-Plex-Platform', 'Chrome'));
+    expect(context.streamHeaders, containsPair('X-Plex-Session-Identifier', 'playback-session-id'));
   });
 }

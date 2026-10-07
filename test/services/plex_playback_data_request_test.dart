@@ -847,14 +847,19 @@ void main() {
     expect(original.containsKey('videoQuality'), isFalse);
   });
 
-  Future<({PlaybackInitializationResult result, List<String> paths, List<Uri> decisions})> initializeCappedPlayback({
+  Future<
+    ({PlaybackInitializationResult result, List<String> paths, List<Uri> decisions, List<String?> decisionPlatforms})
+  >
+  initializeCappedPlayback({
     required TranscodeQualityPreset preset,
     required int bitrateKbps,
     required int height,
     String? videoCodec,
+    String? audioCodec,
   }) async {
     final paths = <String>[];
     final decisions = <Uri>[];
+    final decisionPlatforms = <String?>[];
     final client = makeClient((request) async {
       paths.add(request.url.path);
       if (request.url.path == '/library/metadata/42') {
@@ -872,7 +877,14 @@ void main() {
                       'height': height,
                       'videoCodec': ?videoCodec,
                       'Part': [
-                        {'id': 99, 'key': '/library/parts/99/file.mkv'},
+                        {
+                          'id': 99,
+                          'key': '/library/parts/99/file.mkv',
+                          if (audioCodec != null)
+                            'Stream': [
+                              {'id': 501, 'streamType': 2, 'codec': audioCodec, 'channels': 6, 'selected': 1},
+                            ],
+                        },
                       ],
                     },
                   ],
@@ -886,6 +898,7 @@ void main() {
       }
       if (request.url.path == '/video/:/transcode/universal/decision') {
         decisions.add(request.url);
+        decisionPlatforms.add(request.headers['X-Plex-Platform']);
         return http.Response(
           jsonEncode({
             'MediaContainer': {
@@ -915,7 +928,7 @@ void main() {
           transcodeSessionId: 'transcode-id',
         ),
       );
-      return (result: result, paths: paths, decisions: decisions);
+      return (result: result, paths: paths, decisions: decisions, decisionPlatforms: decisionPlatforms);
     } finally {
       client.close();
     }
@@ -952,6 +965,48 @@ void main() {
     );
     expect(overResolution.paths, contains('/video/:/transcode/universal/decision'));
     expect(overResolution.result.playMethod, 'Transcode');
+  });
+
+  test('a lossy source audio track is copied; a lossless one stays inside the stream budget', () async {
+    // Under maxVideoBitrate PMS re-encodes any audio larger than its own
+    // allowance, which routes E-AC3 through EasyAudioEncoder.
+    final eac3 = await initializeCappedPlayback(
+      preset: TranscodeQualityPreset.p1080_10mbps,
+      bitrateKbps: 13137,
+      height: 1080,
+      audioCodec: 'eac3',
+    );
+    final eac3Decision = eac3.decisions.single.queryParameters;
+    expect(eac3Decision['audioStreamID'], '501');
+    expect(eac3Decision['directStreamAudio'], '1');
+    expect(eac3Decision.containsKey('maxVideoBitrate'), isFalse);
+    expect(eac3Decision['X-Plex-Client-Profile-Extra'], contains('name=video.bitrate&value=10000'));
+
+    final truehd = await initializeCappedPlayback(
+      preset: TranscodeQualityPreset.p1080_10mbps,
+      bitrateKbps: 13137,
+      height: 1080,
+      audioCodec: 'truehd',
+    );
+    expect(truehd.decisions.single.queryParameters['maxVideoBitrate'], '10000');
+  });
+
+  test('the transcode decision and start request name the platform the URL names', () async {
+    // As "Android" (the identity header) PMS burns the part's selected external
+    // subtitle even with subtitles=none, while the player draws it as well.
+    final run = await initializeCappedPlayback(
+      preset: TranscodeQualityPreset.p1080_10mbps,
+      bitrateKbps: 13137,
+      height: 1080,
+    );
+    expect(run.decisions.single.queryParameters['X-Plex-Platform'], 'Chrome');
+    expect(run.decisionPlatforms.single, 'Chrome');
+
+    final client = makeClient((_) async => http.Response('not used', 500));
+    addTearDown(client.close);
+    final transcodeHeaders = client.transcodeStreamHeaders;
+    expect(transcodeHeaders['X-Plex-Platform'], 'Chrome');
+    expect({...transcodeHeaders}..remove('X-Plex-Platform'), {...client.streamHeaders}..remove('X-Plex-Platform'));
   });
 
   test('turning the covered-source direct play off keeps the requested transcode (#2193)', () async {
@@ -1616,6 +1671,9 @@ void main() {
     );
 
     expect(params['protocol'], 'http');
+    expect(params['directStreamAudio'], '1');
+    expect(params['maxVideoBitrate'], '4000');
+    expect(params['audioBoost'], '225');
     expect(params['subtitles'], 'none');
     expect(params.containsKey('subtitleStreamID'), isFalse);
     expect(params.containsKey('advancedSubtitles'), isFalse);

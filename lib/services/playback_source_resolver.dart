@@ -6,6 +6,7 @@ import '../media/media_server_client.dart';
 import 'multi_server_manager.dart';
 import 'playback_context.dart';
 import 'playback_initialization_service.dart';
+import 'plex_client.dart';
 
 class PlaybackSourceResolver {
   final MultiServerManager serverManager;
@@ -71,7 +72,13 @@ class PlaybackSourceResolver {
   }) {
     if (client == null || sourceKind == PlaybackSourceKind.localFile) return null;
 
-    final headers = Map<String, String>.from(client.streamHeaders);
+    // A Plex video transcode's start request names the platform its URL and
+    // decision did, or PMS burns subtitles the player also draws.
+    final headers = Map<String, String>.from(switch (client) {
+      final PlexClient plex when sourceKind == PlaybackSourceKind.remoteTranscode && trackStreamUrl == null =>
+        plex.transcodeStreamHeaders,
+      _ => client.streamHeaders,
+    });
     if (client.backend == MediaBackend.plex &&
         sessionIdentifier != null &&
         Uri.tryParse(trackStreamUrl ?? '')?.queryParameters['X-Plex-Session-Identifier'] != sessionIdentifier) {
