@@ -1,5 +1,30 @@
 {
   "schemaVersion": 1,
-  "reviewedOn": "2026-10-15",
-  "accepted": []
+  "reviewedOn": "2026-10-28",
+  "accepted": [
+    {
+      "id": 1243067,
+      "package": "@sveltejs/kit",
+      "severity": "low",
+      "vulnerableRange": "<3.0.0",
+      "expiresOn": "2027-01-26",
+      "rationale": "GHSA-pfhg-q3qv-9q6r: Fixed only in SvelteKit 3. The prerendered static site has no form actions or use:enhance, so the enhanced-form redirect is unreachable."
+    },
+    {
+      "id": 1243076,
+      "package": "@sveltejs/kit",
+      "severity": "low",
+      "vulnerableRange": "<3.0.0",
+      "expiresOn": "2027-01-26",
+      "rationale": "GHSA-27mw-82g8-phjj: Fixed only in SvelteKit 3. The site never calls setHeaders, so no cache-control value reaches the prerendered meta tag."
+    },
+    {
+      "id": 1243505,
+      "package": "deepmerge",
+      "severity": "low",
+      "vulnerableRange": ">=4.2.0 <=4.3.1",
+      "expiresOn": "2027-01-26",
+      "rationale": "GHSA-gcqx-w48m-w2h4: No fixed release exists. Only vite-plugin-svelte merges repository-controlled build config with it; no untrusted input or deployed runtime."
+    }
+  ]
 }
